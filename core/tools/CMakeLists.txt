@@ -1,0 +1,2 @@
+add_executable(mavlink_monitor mavlink_monitor.c)
+target_link_libraries(mavlink_monitor PRIVATE core_lib)

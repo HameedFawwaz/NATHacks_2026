@@ -1,5 +1,7 @@
-# Test sources go here (e.g. Unity/Check framework, or plain asserts).
-# Example:
-# add_executable(test_mavlink_helpers test_mavlink_helpers.c ../src/mavlink/mavlink_helpers.c)
-# target_include_directories(test_mavlink_helpers PRIVATE ../include ../third_party/mavlink/c_library_v2)
-# add_test(NAME mavlink_helpers COMMAND test_mavlink_helpers)
+add_executable(test_trust_score test_trust_score.c)
+target_link_libraries(test_trust_score PRIVATE core_lib)
+add_test(NAME test_trust_score COMMAND test_trust_score)
+
+add_executable(test_mavlink_loopback test_mavlink_loopback.c)
+target_link_libraries(test_mavlink_loopback PRIVATE core_lib)
+add_test(NAME test_mavlink_loopback COMMAND test_mavlink_loopback)

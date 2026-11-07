@@ -9,6 +9,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 add_compile_options(-Wall -Wextra)
+# The vendored MAVLink headers trigger -Waddress-of-packed-member throughout;
+# that's generated third-party code, not ours, so it's silenced rather than fixed.
+add_compile_options(-Wno-address-of-packed-member)
 
 # MAVLink v2 C headers (header-only). Expected at:
 #   core/third_party/mavlink/c_library_v2
@@ -18,9 +21,15 @@ include_directories(
   third_party/mavlink/c_library_v2
 )
 
-file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS src/*.c)
+file(GLOB_RECURSE CORE_LIB_SOURCES CONFIGURE_DEPENDS src/*.c)
+list(REMOVE_ITEM CORE_LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c)
 
-add_executable(core_main ${CORE_SOURCES})
+add_library(core_lib STATIC ${CORE_LIB_SOURCES})
+
+add_executable(core_main src/main.c)
+target_link_libraries(core_main PRIVATE core_lib)
+
+add_subdirectory(tools)
 
 enable_testing()
 add_subdirectory(tests)
