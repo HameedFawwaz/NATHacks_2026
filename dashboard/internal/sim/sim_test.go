@@ -161,3 +161,14 @@ func TestSpoofAndJamTogetherLand(t *testing.T) {
 		t.Fatal("never entered safe land")
 	}
 }
+
+func TestEventsKeepIncreasingSeqPastTheCap(t *testing.T) {
+	s := New(model.DefaultPlan())
+	for i := 0; i < maxEvents+10; i++ {
+		s.logf("event %d", i)
+	}
+	events := s.Events()
+	if len(events) != maxEvents || events[len(events)-1].Seq != maxEvents+10 {
+		t.Fatalf("%d events, last %+v", len(events), events[len(events)-1])
+	}
+}

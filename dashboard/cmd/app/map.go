@@ -82,12 +82,12 @@ func (m *mapView) resize() {
 	m.canvas.Set("height", int(m.height*m.dpr))
 }
 
-// activePlan is the plan being edited on the Plan tab, or the one being flown.
+// activePlan is the plan being edited on the Plan tab, or the route on the Fly tab.
 func (m *mapView) activePlan() model.Plan {
 	if m.app.tab == tabPlan {
 		return m.app.plan
 	}
-	return m.app.sim.Plan()
+	return m.app.flownPlan
 }
 
 // origin is fixed to the home location so a view survives edits to the waypoints.
@@ -337,16 +337,23 @@ func (m *mapView) drawFlight() {
 	c := m.ctx
 	s := m.app.snap
 
+	// Dimmed once contact is lost: it's where the drone was, not where it is.
+	c.Call("save")
+	defer c.Call("restore")
+	if !s.Connected {
+		c.Set("globalAlpha", 0.35)
+	}
+
 	c.Set("lineWidth", 2)
 	c.Set("strokeStyle", colorEstimated)
 	m.polyline(m.app.estimatedTrail)
 	c.Set("strokeStyle", colorReported)
 	m.polyline(m.app.reportedTrail)
 
-	rx, ry := m.toScreen(s.Reported)
 	if s.HasEstimate {
 		ex, ey := m.toScreen(s.Estimated)
 		if meters, show := s.Drift(); show {
+			rx, ry := m.toScreen(s.Reported)
 			m.drawDrift(rx, ry, ex, ey, meters)
 		}
 		// A diamond, so it stays distinct from the GPS arrow when they overlap.
@@ -360,7 +367,12 @@ func (m *mapView) drawFlight() {
 		c.Call("fill")
 	}
 
+	if !s.HasPosition {
+		return
+	}
+
 	// The GPS position, as an arrow pointing along the heading.
+	rx, ry := m.toScreen(s.Reported)
 	heading := s.HeadingDeg * math.Pi / 180
 	c.Call("save")
 	c.Call("translate", rx, ry)
@@ -389,9 +401,11 @@ func (m *mapView) drawDrift(rx, ry, ex, ey, meters float64) {
 	c.Call("stroke")
 
 	label := fmt.Sprintf("%.0f m apart", meters)
-	x, y := (rx+ex)/2, (ry+ey)/2
 	c.Set("font", "700 12px system-ui, sans-serif")
 	width := c.Call("measureText", label).Get("width").Float()
+	// Kept on screen: the GPS position can be spoofed far outside the view.
+	x := max(width/2+8, min(m.width-width/2-8, (rx+ex)/2))
+	y := max(60, min(m.height-20, (ry+ey)/2))
 	c.Set("fillStyle", colorDrift)
 	c.Call("beginPath")
 	c.Call("roundRect", x-width/2-6, y-10, width+12, 20, 4)

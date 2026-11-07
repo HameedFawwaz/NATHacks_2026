@@ -1,0 +1,217 @@
+// Package bridge connects the dashboard to a vehicle over MAVLink. It turns
+// incoming messages into model.Snapshot values, streams those to the browser and
+// uploads missions.
+package bridge
+
+import (
+	"fmt"
+	"math"
+	"strings"
+
+	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/mavlink"
+	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/model"
+)
+
+const (
+	heartbeatTimeoutMs = model.StaleAfterMs
+	maxEvents          = 50
+
+	// Prefix of core's behavior transition messages: "AUTONOMY <behavior>: <reason>".
+	autonomyPrefix = "AUTONOMY "
+)
+
+// copterModes names ArduCopter's custom_mode values.
+var copterModes = map[uint32]string{
+	0: "STABILIZE", 1: "ACRO", 2: "ALT_HOLD", 3: "AUTO", 4: "GUIDED", 5: "LOITER",
+	6: "RTL", 7: "CIRCLE", 9: "LAND", 11: "DRIFT", 13: "SPORT", 14: "FLIP",
+	15: "AUTOTUNE", 16: "POSHOLD", 17: "BRAKE", 18: "THROW", 20: "GUIDED_NOGPS",
+	21: "SMART_RTL",
+}
+
+// vehicleState accumulates telemetry from one vehicle. It isn't safe for
+// concurrent use; Bridge guards it.
+type vehicleState struct {
+	identified    bool
+	sysID, compID uint8
+	lastHeartbeat int64
+	wasConnected  bool
+	snap          model.Snapshot
+	events        []model.Event
+	nextEventSeq  int
+}
+
+// isVehicle tells the autopilot apart from ground stations and companion
+// computers, which send heartbeats on the same network.
+func isVehicle(hb mavlink.Heartbeat) bool {
+	return hb.Autopilot != mavlink.AutopilotInvalid &&
+		hb.Type != mavlink.TypeGCS && hb.Type != mavlink.TypeOnboardController
+}
+
+// apply updates the state from one frame and reports whether the frame was from
+// the vehicle's autopilot itself.
+func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) {
+	if f.MsgID == mavlink.MsgHeartbeat {
+		hb := mavlink.DecodeHeartbeat(f.Payload)
+		if !isVehicle(hb) {
+			return false
+		}
+		if v.identified && (f.SysID != v.sysID || f.CompID != v.compID) {
+			return false // a second vehicle; this dashboard follows the first
+		}
+		v.identified, v.sysID, v.compID = true, f.SysID, f.CompID
+		v.applyHeartbeat(hb, nowMs)
+		return true
+	}
+
+	if !v.identified || f.SysID != v.sysID {
+		return false
+	}
+
+	// Core publishes these from a companion computer, under another component ID.
+	switch f.MsgID {
+	case mavlink.MsgNamedValueFloat:
+		v.applyNamedValue(f.Payload, nowMs)
+	case mavlink.MsgStatusText:
+		v.applyStatusText(f.Payload, nowMs)
+	}
+
+	if f.CompID != v.compID {
+		return false
+	}
+	switch f.MsgID {
+	case mavlink.MsgSysStatus:
+		v.applySysStatus(mavlink.DecodeSysStatus(f.Payload), nowMs)
+	case mavlink.MsgGPSRawInt:
+		v.applyGPS(mavlink.DecodeGPSRawInt(f.Payload))
+	case mavlink.MsgGlobalPositionInt:
+		v.applyGlobalPosition(mavlink.DecodeGlobalPositionInt(f.Payload))
+	}
+	return true
+}
+
+func (v *vehicleState) applyHeartbeat(hb mavlink.Heartbeat, nowMs int64) {
+	v.lastHeartbeat = nowMs
+	v.snap.Armed = hb.BaseMode&mavlink.ModeFlagArmed != 0
+	v.snap.Mode = fmt.Sprintf("Mode %d", hb.CustomMode)
+	if name, ok := copterModes[hb.CustomMode]; ok && hb.Autopilot == mavlink.AutopilotArduPilot {
+		v.snap.Mode = name
+	}
+}
+
+func (v *vehicleState) applyNamedValue(p []byte, nowMs int64) {
+	name, value := mavlink.DecodeNamedValueFloat(p)
+	if math.IsNaN(value) {
+		return
+	}
+	reading := model.Reading{Value: value, AtMs: nowMs}
+	switch name {
+	case "TRUST":
+		v.snap.Overall = reading
+	case "TRUST_NAV":
+		v.snap.Nav = reading
+	case "TRUST_LNK":
+		v.snap.Link = reading
+	case "TRUST_HW":
+		v.snap.Hardware = reading
+	}
+}
+
+func (v *vehicleState) applyStatusText(p []byte, nowMs int64) {
+	_, text := mavlink.DecodeStatusText(p)
+	v.addEvent(text, nowMs)
+	if rest, ok := strings.CutPrefix(text, autonomyPrefix); ok {
+		behavior, _, _ := strings.Cut(rest, ":")
+		switch behavior {
+		case model.BehaviorNominal, model.BehaviorGNSSFailover, model.BehaviorLinkHold,
+			model.BehaviorLinkReturn, model.BehaviorSafeLand:
+			v.snap.Behavior = behavior
+		}
+	}
+}
+
+// applySysStatus reads per-sensor health, which the autopilot reports as yes or
+// no, so these scores are only ever 0 or 1.
+func (v *vehicleState) applySysStatus(s mavlink.SysStatus, nowMs int64) {
+	health := func(mask uint32) (model.Reading, bool) {
+		if s.SensorsPresent&mask != mask {
+			return model.Reading{}, false
+		}
+		value := 0.0
+		if s.SensorsHealth&mask == mask {
+			value = 1
+		}
+		return model.Reading{Value: value, AtMs: nowMs}, true
+	}
+	if r, ok := health(mavlink.SensorGyro | mavlink.SensorAccel); ok {
+		v.snap.IMU = r
+	}
+	if r, ok := health(mavlink.SensorMotorOutputs); ok {
+		v.snap.Motors = r
+	}
+	if s.BatteryRemaining != mavlink.UnknownBattery {
+		v.snap.Battery = model.Reading{Value: float64(s.BatteryRemaining) / 100, AtMs: nowMs}
+	}
+}
+
+func (v *vehicleState) applyGPS(g mavlink.GPSRawInt) {
+	if g.Satellites != mavlink.UnknownU8 {
+		v.snap.Satellites = int(g.Satellites)
+	}
+	if g.FixType < mavlink.GPSFix2D {
+		v.snap.HasPosition = false
+		return
+	}
+	v.snap.HasPosition = true
+	v.snap.Reported = model.LatLon{Lat: g.Lat, Lon: g.Lon}
+}
+
+// applyGlobalPosition uses the autopilot's EKF as the position estimate to
+// compare GPS against, because core doesn't publish its own independent estimate
+// yet. The EKF fuses GPS, so a slow enough spoof that it accepts won't show up as
+// drift here.
+func (v *vehicleState) applyGlobalPosition(g mavlink.GlobalPositionInt) {
+	v.snap.AltM = g.RelativeAltM
+	v.snap.SpeedMS = math.Hypot(g.VNorth, g.VEast)
+	if g.HeadingCdeg != mavlink.UnknownU16 {
+		v.snap.HeadingDeg = float64(g.HeadingCdeg) / 100
+	}
+	if g.Lat == 0 && g.Lon == 0 {
+		v.snap.HasEstimate = false
+		return
+	}
+	v.snap.HasEstimate = true
+	v.snap.Estimated = model.LatLon{Lat: g.Lat, Lon: g.Lon}
+}
+
+func (v *vehicleState) addEvent(text string, nowMs int64) {
+	v.nextEventSeq++
+	v.events = append(v.events, model.Event{Seq: v.nextEventSeq, AtMs: nowMs, Text: text})
+	if len(v.events) > maxEvents {
+		v.events = v.events[len(v.events)-maxEvents:]
+	}
+}
+
+// update records connection changes. Call it periodically.
+func (v *vehicleState) update(nowMs int64) {
+	connected := v.connected(nowMs)
+	if connected != v.wasConnected {
+		if connected {
+			v.addEvent("Connected to the drone.", nowMs)
+		} else {
+			v.addEvent("Lost contact with the drone.", nowMs)
+			v.snap.Behavior = ""
+		}
+		v.wasConnected = connected
+	}
+}
+
+func (v *vehicleState) connected(nowMs int64) bool {
+	return v.identified && nowMs-v.lastHeartbeat <= heartbeatTimeoutMs
+}
+
+func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
+	s := v.snap
+	s.NowMs = nowMs
+	s.Connected = v.connected(nowMs)
+	return s
+}

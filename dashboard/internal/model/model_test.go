@@ -34,7 +34,7 @@ func TestPlanLengthIncludesReturnHome(t *testing.T) {
 }
 
 func TestDriftOnlyShownAboveThreshold(t *testing.T) {
-	s := Snapshot{Reported: DefaultHome, Estimated: FromLocal(DefaultHome, 5, 0), HasEstimate: true}
+	s := Snapshot{Reported: DefaultHome, HasPosition: true, Estimated: FromLocal(DefaultHome, 5, 0), HasEstimate: true}
 	if _, show := s.Drift(); show {
 		t.Fatal("5 m of drift should not show")
 	}
@@ -45,6 +45,10 @@ func TestDriftOnlyShownAboveThreshold(t *testing.T) {
 	s.HasEstimate = false
 	if _, show := s.Drift(); show {
 		t.Fatal("drift should not show without an estimate")
+	}
+	s.HasEstimate, s.HasPosition = true, false
+	if _, show := s.Drift(); show {
+		t.Fatal("drift should not show without a GPS position")
 	}
 }
 
@@ -99,5 +103,25 @@ func TestAssessNoData(t *testing.T) {
 	s.Link = Reading{Value: 1, AtMs: 10000 - StaleAfterMs - 1}
 	if got := subsystemNamed(t, s, "Link").Level; got != LevelNoData {
 		t.Errorf("stale = %s, want no data", got)
+	}
+}
+
+func TestHardwareRowOnlyOnceReported(t *testing.T) {
+	s := Snapshot{NowMs: 1000}
+	if got := len(Assess(s)); got != 5 {
+		t.Fatalf("%d rows before TRUST_HW", got)
+	}
+	s.Hardware = Reading{Value: 0.1, AtMs: 1000}
+	if got := subsystemNamed(t, s, "Hardware").Level; got != LevelCritical {
+		t.Fatalf("Hardware = %s", got)
+	}
+}
+
+func TestPlanCloneSharesNothing(t *testing.T) {
+	p := DefaultPlan()
+	c := p.Clone()
+	c.Waypoints[0].AltM = 99
+	if p.Waypoints[0].AltM == 99 {
+		t.Fatal("clone shares waypoints with the original")
 	}
 }

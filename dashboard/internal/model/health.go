@@ -39,11 +39,13 @@ type Reading struct {
 type Snapshot struct {
 	NowMs int64
 
-	Armed    bool
-	Mode     string
-	Behavior string
+	Connected bool // the vehicle is being heard
+	Armed     bool
+	Mode      string
+	Behavior  string // empty until the drone has reported one
 
-	Reported    LatLon // position according to GNSS
+	Reported    LatLon // position according to GNSS; see HasPosition
+	HasPosition bool
 	Estimated   LatLon // independent position estimate; see HasEstimate
 	HasEstimate bool
 	AltM        float64
@@ -52,16 +54,34 @@ type Snapshot struct {
 	Satellites  int
 
 	Overall, Nav, Link, IMU, Motors, Battery Reading
+
+	// Hardware is core's combined TRUST_HW score. It can trigger a landing, so it
+	// has a row of its own once anything reports it.
+	Hardware Reading
 }
 
 // Drift returns the distance between reported and estimated position, and
 // whether it is large enough to show.
 func (s Snapshot) Drift() (meters float64, show bool) {
-	if !s.HasEstimate {
+	if !s.HasPosition || !s.HasEstimate {
 		return 0, false
 	}
 	meters = DistanceM(s.Reported, s.Estimated)
 	return meters, meters >= DriftThresholdM
+}
+
+// Event is one entry in the operator's event log. Seq increases with each event,
+// so a consumer can tell which ones it has already shown.
+type Event struct {
+	Seq  int
+	AtMs int64
+	Text string
+}
+
+// Update is one message on the telemetry stream from the bridge to the browser.
+type Update struct {
+	Snapshot Snapshot
+	Events   []Event `json:",omitempty"`
 }
 
 type Level int
@@ -117,7 +137,7 @@ func assess(text subsystemText, r Reading, cautionBelow, criticalBelow float64, 
 
 // Assess returns the health of each subsystem, in display order.
 func Assess(s Snapshot) []Subsystem {
-	return []Subsystem{
+	subsystems := []Subsystem{
 		assess(subsystemText{"GNSS",
 			"GPS position agrees with the drone's own estimate.",
 			"GPS position is starting to disagree with the drone's own estimate.",
@@ -144,6 +164,14 @@ func Assess(s Snapshot) []Subsystem {
 			"A motor is failing.",
 		}, s.Motors, TrustHealthy, TrustCritical, s.NowMs),
 	}
+	if s.Hardware.AtMs != 0 {
+		subsystems = append(subsystems, assess(subsystemText{"Hardware",
+			"The drone trusts its hardware overall.",
+			"The drone is losing trust in its hardware.",
+			"The drone doesn't trust its hardware.",
+		}, s.Hardware, TrustHealthy, TrustCritical, s.NowMs))
+	}
+	return subsystems
 }
 
 // BehaviorText describes a behavior for a non-expert operator.
@@ -159,6 +187,8 @@ func BehaviorText(behavior string) string {
 		return "Link still lost. Returning home on its own."
 	case BehaviorSafeLand:
 		return "Can't continue safely. Landing now."
+	case "":
+		return "The drone hasn't reported an autonomy state yet."
 	}
 	return "Unknown behavior: " + behavior
 }

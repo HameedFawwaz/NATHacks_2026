@@ -18,7 +18,7 @@
       <span class="pill" id="vehicle-armed"></span>
       <span class="pill" id="vehicle-mode"></span>
     </div>
-    <div class="sim-badge" title="Telemetry is generated in the browser. No drone is connected.">Simulated data</div>
+    <div class="source-badge" id="source-badge"></div>
   </header>
 
   <main class="layout">
@@ -51,7 +51,7 @@
         <div class="summary-text" id="summary-text"></div>
       </div>
 
-      <div class="actions">
+      <div class="actions" id="sim-controls">
         <button id="flight-start" class="btn btn-primary">Start flight</button>
         <button id="flight-reset" class="btn">Reset</button>
       </div>
@@ -59,12 +59,14 @@
       <h2>System health</h2>
       <div id="health" class="health"></div>
 
-      <h2>Demo: inject a problem</h2>
-      <div id="scenarios" class="scenarios">
-        <button class="btn" data-scenario="0">None</button>
-        <button class="btn" data-scenario="1">GPS spoof</button>
-        <button class="btn" data-scenario="2">Link jam</button>
-        <button class="btn" data-scenario="3">Motor fault</button>
+      <div id="sim-demo">
+        <h2>Demo: inject a problem</h2>
+        <div id="scenarios" class="scenarios">
+          <button class="btn" data-scenario="0">None</button>
+          <button class="btn" data-scenario="1">GPS spoof</button>
+          <button class="btn" data-scenario="2">Link jam</button>
+          <button class="btn" data-scenario="3">Motor fault</button>
+        </div>
       </div>
 
       <h2>Events</h2>
@@ -82,6 +84,8 @@
         <button id="plan-fly" class="btn btn-primary">Fly this plan</button>
         <button id="plan-clear" class="btn">Clear</button>
       </div>
+
+      <p id="plan-status" class="plan-status" role="status" hidden></p>
 
       <h2>Route</h2>
       <ol id="waypoints" class="waypoints"></ol>

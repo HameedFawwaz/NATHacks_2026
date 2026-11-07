@@ -43,12 +43,6 @@ const (
 	phaseLanding
 )
 
-// Event is one entry in the operator's event log.
-type Event struct {
-	AtMs int64
-	Text string
-}
-
 // Sim is a single simulated flight. Create it with New.
 type Sim struct {
 	plan     model.Plan
@@ -72,7 +66,8 @@ type Sim struct {
 	holdSeconds float64
 	landLatched bool
 
-	events []Event
+	events   []model.Event
+	eventSeq int
 }
 
 // New returns a drone sitting at the plan's home, ready to start.
@@ -89,9 +84,9 @@ func New(plan model.Plan) *Sim {
 	}
 }
 
-func (s *Sim) Plan() model.Plan   { return s.plan }
-func (s *Sim) Scenario() Scenario { return s.scenario }
-func (s *Sim) Events() []Event    { return s.events }
+func (s *Sim) Plan() model.Plan      { return s.plan }
+func (s *Sim) Scenario() Scenario    { return s.scenario }
+func (s *Sim) Events() []model.Event { return s.events }
 
 // Flying reports whether a flight is under way.
 func (s *Sim) Flying() bool { return s.phase != phaseIdle }
@@ -280,6 +275,8 @@ func (s *Sim) Snapshot() model.Snapshot {
 	t := float64(now) / 1000
 	return model.Snapshot{
 		NowMs:       now,
+		Connected:   true,
+		HasPosition: true,
 		Armed:       s.Flying(),
 		Mode:        s.mode(),
 		Behavior:    s.behavior,
@@ -323,7 +320,8 @@ func (s *Sim) mode() string {
 func clamp01(v float64) float64 { return math.Max(0, math.Min(1, v)) }
 
 func (s *Sim) logf(format string, args ...any) {
-	s.events = append(s.events, Event{AtMs: s.nowMs, Text: fmt.Sprintf(format, args...)})
+	s.eventSeq++
+	s.events = append(s.events, model.Event{Seq: s.eventSeq, AtMs: s.nowMs, Text: fmt.Sprintf(format, args...)})
 	if len(s.events) > maxEvents {
 		s.events = s.events[len(s.events)-maxEvents:]
 	}

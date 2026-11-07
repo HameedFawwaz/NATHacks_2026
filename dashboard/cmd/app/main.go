@@ -1,6 +1,8 @@
 //go:build js && wasm
 
-// Command app is the dashboard's browser side, compiled to WebAssembly.
+// Command app is the dashboard's browser side, compiled to WebAssembly. It shows
+// live telemetry when the page is served with a bridge (`serve -mavlink`) and a
+// simulated flight otherwise.
 //
 // Every callback runs on the browser's event loop, so state needs no locking.
 package main
@@ -18,6 +20,7 @@ const (
 	tickMs         = 100
 	minTrailStepM  = 1.0
 	maxTrail       = 5000
+	maxEventRows   = 200
 )
 
 type tab int
@@ -28,15 +31,18 @@ const (
 )
 
 type app struct {
-	tab  tab
-	plan model.Plan // the plan being edited; the flight flies its own copy
+	tab       tab
+	plan      model.Plan // the plan being edited
+	flownPlan model.Plan // the route shown on the Fly tab; edits don't touch it
+	snap      model.Snapshot
 
-	sim    *sim.Sim
-	snap   model.Snapshot
-	events int // how many sim events the log already shows
+	live       *liveState // nil when simulating
+	sim        *sim.Sim   // nil when live
+	shownEvent int        // Seq of the newest event in the log
 
 	reportedTrail  []model.LatLon
 	estimatedTrail []model.LatLon
+	wasArmed       bool
 
 	mapView *mapView
 	health  *healthPanel
@@ -44,10 +50,18 @@ type app struct {
 
 func main() {
 	a := &app{plan: loadPlan()}
-	a.sim = sim.New(a.plan)
-	a.snap = a.sim.Snapshot()
+	a.flownPlan = a.plan.Clone()
 	a.mapView = newMapView(a)
 	a.health = newHealthPanel()
+
+	listen, live := detectBridge()
+	if live {
+		a.live = &liveState{listen: listen}
+		a.snap = model.Snapshot{NowMs: 1}
+	} else {
+		a.sim = sim.New(a.flownPlan)
+		a.snap = a.sim.Snapshot()
+	}
 
 	a.bindShell()
 	a.bindFly()
@@ -55,25 +69,61 @@ func main() {
 	a.setTab(tabFly)
 	a.mapView.fit()
 
-	onTick := js.FuncOf(func(js.Value, []js.Value) any {
-		a.tick()
-		return nil
-	})
-	js.Global().Call("setInterval", onTick, tickMs)
-	a.tick()
+	if live {
+		a.startStream()
+	} else {
+		onTick := js.FuncOf(func(js.Value, []js.Value) any {
+			a.simTick()
+			return nil
+		})
+		js.Global().Call("setInterval", onTick, tickMs)
+		a.simTick()
+	}
 	a.mapView.startDrawing()
 
 	select {}
 }
 
-func (a *app) tick() {
+func (a *app) simTick() {
 	a.sim.Step(float64(tickMs) / 1000)
-	a.snap = a.sim.Snapshot()
-	if a.sim.Flying() {
-		a.reportedTrail = appendTrail(a.reportedTrail, a.snap.Reported)
-		a.estimatedTrail = appendTrail(a.estimatedTrail, a.snap.Estimated)
+	a.showEvents(a.sim.Events())
+	a.setSnapshot(a.sim.Snapshot())
+}
+
+// setSnapshot takes in the vehicle's latest state from either source.
+func (a *app) setSnapshot(s model.Snapshot) {
+	if s.Armed && !a.wasArmed {
+		a.reportedTrail, a.estimatedTrail = nil, nil
 	}
+	a.wasArmed = s.Armed
+	a.snap = s
+	if s.Armed && s.Connected {
+		if s.HasPosition {
+			a.reportedTrail = appendTrail(a.reportedTrail, s.Reported)
+		}
+		if s.HasEstimate {
+			a.estimatedTrail = appendTrail(a.estimatedTrail, s.Estimated)
+		}
+	}
+	a.syncHome(s)
 	a.renderFly()
+	a.renderPlanAction()
+}
+
+// syncHome moves the plan's home to where a live drone first reports being on the
+// ground, so the route and the drone appear on the same map.
+func (a *app) syncHome(s model.Snapshot) {
+	if a.live == nil || a.live.homeSynced || !s.Connected || !s.HasPosition || s.Armed {
+		return
+	}
+	a.live.homeSynced = true
+	a.plan.Home = s.Reported
+	a.savePlan()
+	a.syncFlownPlan()
+	if a.tab == tabPlan {
+		a.renderPlan()
+	}
+	a.mapView.fit()
 }
 
 func appendTrail(trail []model.LatLon, p model.LatLon) []model.LatLon {
@@ -103,10 +153,7 @@ func (a *app) setTab(t tab) {
 	byID("side-plan").Set("hidden", fly)
 	byID("plan-hint").Set("hidden", fly)
 	if fly {
-		// An idle drone picks up whatever was edited in the meantime.
-		if !a.sim.Flying() {
-			a.newFlight()
-		}
+		a.syncFlownPlan()
 	} else {
 		a.renderPlan()
 	}
@@ -114,17 +161,24 @@ func (a *app) setTab(t tab) {
 	a.mapView.fit()
 }
 
+// syncFlownPlan shows edits on the Fly tab when nothing else claims that route:
+// an idle simulated drone, or a live one that hasn't been given a plan here.
+func (a *app) syncFlownPlan() {
+	switch {
+	case a.sim != nil && !a.sim.Flying():
+		a.newFlight()
+	case a.live != nil && !a.live.uploaded:
+		a.flownPlan = a.plan.Clone()
+	}
+}
+
 // newFlight replaces the simulated flight with a fresh one on the current plan.
 func (a *app) newFlight() {
-	old := a.sim.Events()
-	a.sim = sim.New(a.plan)
-	a.snap = a.sim.Snapshot()
+	a.flownPlan = a.plan.Clone()
+	a.sim = sim.New(a.flownPlan)
 	a.reportedTrail, a.estimatedTrail = nil, nil
-	if len(old) > 0 {
-		a.events = 0
-		clearChildren(byID("events"))
-	}
-	a.renderFly()
+	a.clearEvents()
+	a.setSnapshot(a.sim.Snapshot())
 }
 
 func loadPlan() model.Plan {
