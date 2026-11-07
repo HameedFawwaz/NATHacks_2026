@@ -1,2 +1,4 @@
 add_executable(mavlink_monitor mavlink_monitor.c)
 target_link_libraries(mavlink_monitor PRIVATE core_lib)
+add_executable(signing_keygen signing_keygen.c)
+target_link_libraries(signing_keygen PRIVATE core_lib)

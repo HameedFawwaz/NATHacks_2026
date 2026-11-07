@@ -16,3 +16,7 @@ Makefile
 .idea/
 *.swp
 .DS_Store
+
+# Link signing secrets - never commit
+*.key
+signing.key

@@ -55,6 +55,64 @@ connection and prints the heartbeat plus whatever other telemetry has been decod
    You should see a `[HEARTBEAT]` line (plus GPS/position/attitude once SITL has a
    fix) roughly once per second. Ctrl+C to stop.
 
+## Link signing (operator <-> drone authentication)
+
+The link is protected with **MAVLink 2 message signing**: every frame carries a
+SHA-256 signature over the key, header, payload, link id and a timestamp. With
+signing on, `core_mavlink_conn_*` drops any inbound frame that is unsigned,
+signed with the wrong key, tampered with, or replayed (old/repeated timestamp),
+and signs everything it sends. Latency cost is a few microseconds per message
+(`test_link_signing` prints the measurement).
+
+Signing authenticates but does **not encrypt**: telemetry is still readable by
+an eavesdropper, but commands and alerts cannot be forged or replayed.
+
+### Provisioning a key
+
+```
+./build/tools/signing_keygen signing.key          # 32 random bytes, hex, mode 0600
+./build/tools/signing_keygen signing.key --print-hex   # (new file) also print the hex
+```
+
+`signing_keygen` refuses to overwrite an existing key. `*.key` is gitignored -
+never commit a key. Copy the same file to the ground station and the companion
+computer over a trusted channel (physical media or `scp`; not over the
+unsigned link itself). Both ends must hold the same key.
+
+### Enabling it in code
+
+```c
+core_mavlink_conn_config_t cfg = { /* ... as before ... */ };
+cfg.signing_enabled = core_signing_key_load_from_env(cfg.signing_key); /* CORE_SIGNING_KEY_FILE=signing.key */
+cfg.signing_link_id = 0;   /* unique per link if you run several */
+```
+
+or load a path directly with `core_signing_key_load_file()`. If signing is not
+enabled (default for a zero-initialised config), behaviour is unchanged.
+
+Rejections are counted in `core_telemetry_t.link_security`
+(`rejected_unsigned`, `rejected_bad_sig`, `rejected_replay`, `last_reject_ms`)
+so the dashboard and autonomy layer can treat a rising count as an attack
+indicator.
+
+### Rotation
+
+1. Generate a new key with `signing_keygen`.
+2. Stop the drone link, copy the new key to both ends, restart both.
+3. Delete the old key file.
+
+There is no live rekeying: both ends must switch together. Rotate after any
+suspected key exposure and before each event/flight day.
+
+### Flight-controller side
+
+The autopilot must be given the same key so it accepts our signed commands
+(and signs its telemetry). ArduPilot stores it via the `SETUP_SIGNING` MAVLink
+message; MAVProxy's `signing setup <passphrase>` command does this, deriving
+the 32-byte key as the SHA-256 of the passphrase. **Not yet verified against
+our SITL setup** - until it is, run the autopilot link unsigned and sign only
+the companion<->GCS hop, or confirm the key handshake first.
+
 ## Dashboard
 
 The operator dashboard is a separate project/framework and lives outside `core/`

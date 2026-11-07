@@ -11,6 +11,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/*
+ * The vendored helpers keep per-channel state in a function-local `static`
+ * array inside a `static inline` function, which gives every .c file its own
+ * private copy. Signing state is attached to a channel in one file and read by
+ * the parser/sender in others, so all files in this directory must share one
+ * array. Supplying our own mavlink_get_channel_status() (defined in
+ * mavlink_channels.c) makes the vendored one step aside.
+ */
+#define MAVLINK_GET_CHANNEL_STATUS
+struct __mavlink_status;
+struct __mavlink_status *mavlink_get_channel_status(uint8_t chan);
+
 #include "common/mavlink.h"
 
 #include "core/mavlink/mavlink_connection.h"
@@ -32,8 +44,18 @@ struct core_mavlink_conn {
     uint64_t last_heartbeat_rx_ms;
     uint64_t last_reconnect_attempt_ms;
 
+    mavlink_signing_t signing;               /* only wired into the channel when cfg.signing_enabled */
+    mavlink_signing_streams_t signing_streams;
+
     core_telemetry_t telemetry;
 };
+
+/* Enables/disables signing on conn's channel per conn->cfg. Called from conn_open and close. */
+void core_mavlink_internal_signing_attach(core_mavlink_conn_t *conn);
+void core_mavlink_internal_signing_detach(core_mavlink_conn_t *conn);
+
+/* Classifies and counts any rejection recorded by the parser since the last call. Call after each parsed byte. */
+void core_mavlink_internal_signing_account(core_mavlink_conn_t *conn, bool frame_accepted);
 
 /* Packs msg's bytes and sends them to the known/learned peer. Returns false (and logs) on failure. */
 bool core_mavlink_internal_send_raw(core_mavlink_conn_t *conn, const mavlink_message_t *msg);

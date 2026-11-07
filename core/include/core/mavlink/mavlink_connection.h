@@ -34,6 +34,17 @@ typedef struct {
     uint8_t component_id;          /* our MAVLink component id, e.g. MAV_COMP_ID_ONBOARD_COMPUTER (191) */
     uint32_t reconnect_interval_ms; /* minimum gap between reconnect attempts */
     uint32_t heartbeat_timeout_ms;  /* no inbound heartbeat within this window => link considered lost */
+
+    /*
+     * MAVLink 2 message signing (see core/crypto/link_signing.h). Off by default
+     * (a zero-initialized config behaves as before). When enabled, every
+     * outbound frame is signed and every inbound frame must carry a valid,
+     * non-replayed signature from the same key - anything else is dropped and
+     * counted in telemetry.link_security.
+     */
+    bool signing_enabled;
+    uint8_t signing_key[32];   /* shared secret, CORE_SIGNING_KEY_LEN bytes */
+    uint8_t signing_link_id;   /* identifies this link in the signature; keep unique per link */
 } core_mavlink_conn_config_t;
 
 typedef enum {

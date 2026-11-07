@@ -106,6 +106,8 @@ core_mavlink_conn_t *core_mavlink_conn_open(const core_mavlink_conn_config_t *cf
         return NULL;
     }
 
+    core_mavlink_internal_signing_attach(conn);
+
     conn->state = CORE_MAVLINK_CONN_CONNECTING;
     conn->last_reconnect_attempt_ms = core_now_ms();
     return conn;
@@ -118,6 +120,7 @@ void core_mavlink_conn_close(core_mavlink_conn_t *conn) {
     if (conn->sock_fd >= 0) {
         close(conn->sock_fd);
     }
+    core_mavlink_internal_signing_detach(conn);
     free(conn);
 }
 
@@ -179,7 +182,9 @@ int core_mavlink_conn_poll(core_mavlink_conn_t *conn) {
 
         for (ssize_t i = 0; i < n; i++) {
             mavlink_message_t msg;
-            if (mavlink_parse_char(conn->chan, buf[i], &msg, &conn->parse_status)) {
+            uint8_t got_msg = mavlink_parse_char(conn->chan, buf[i], &msg, &conn->parse_status);
+            core_mavlink_internal_signing_account(conn, got_msg != 0);
+            if (got_msg) {
                 decoded++;
                 conn->last_rx_ms = now;
                 if (conn->state == CORE_MAVLINK_CONN_CONNECTING) {
