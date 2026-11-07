@@ -104,14 +104,25 @@ func (m *mapView) fromScreen(x, y float64) model.LatLon {
 	return model.FromLocal(m.origin(), east, north)
 }
 
-// fit frames the home location and the whole active route.
+// fit frames home and the whole route, and on the Fly tab where the drone has been.
 func (m *mapView) fit() {
 	plan := m.activePlan()
 	minE, maxE, minN, maxN := -50.0, 50.0, -50.0, 50.0 // keeps a lone home point from over-zooming
-	for _, w := range plan.Waypoints {
-		e, n := model.ToLocal(m.origin(), w.LatLon)
+	include := func(p model.LatLon) {
+		e, n := model.ToLocal(m.origin(), p)
 		minE, maxE = min(minE, e), max(maxE, e)
 		minN, maxN = min(minN, n), max(maxN, n)
+	}
+	for _, w := range plan.Waypoints {
+		include(w.LatLon)
+	}
+	if m.app.tab == tabFly {
+		for _, p := range m.app.reportedTrail {
+			include(p)
+		}
+		for _, p := range m.app.estimatedTrail {
+			include(p)
+		}
 	}
 	m.centerEast, m.centerNorth = (minE+maxE)/2, (minN+maxN)/2
 	availW := max(m.width-2*fitMarginPx, 100)
