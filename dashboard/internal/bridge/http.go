@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -25,15 +26,39 @@ type Status struct {
 	Listen string `json:"listen"`
 }
 
-// Handler serves the bridge's API under /api/.
-func (b *Bridge) Handler() http.Handler {
+// Handler serves the bridge's API under /api/. dashboardAddr is the address the
+// page is served on.
+func (b *Bridge) Handler(dashboardAddr string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, Status{Listen: b.Addr().String()})
 	})
 	mux.HandleFunc("GET /api/telemetry", b.serveTelemetry)
 	mux.HandleFunc("POST /api/mission", b.serveMission)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowedHost(r.Host, dashboardAddr) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// allowedHost defeats DNS rebinding, where an attacker's domain resolves to this
+// machine so that its page counts as same-origin with the API.
+func allowedHost(host, dashboardAddr string) bool {
+	if host == dashboardAddr {
+		return true
+	}
+	name, _, err := net.SplitHostPort(host)
+	if err != nil {
+		name = host
+	}
+	switch name {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

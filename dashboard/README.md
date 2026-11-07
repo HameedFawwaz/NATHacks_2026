@@ -31,21 +31,24 @@ sim_vehicle.py -v ArduCopter --out=udp:127.0.0.1:14552
 arducopter ... --serial2=udpclient:127.0.0.1:14552
 ```
 
-The Plan tab's button becomes "Upload to drone". It refuses while the drone is armed.
+The Plan tab's button becomes "Upload to drone". It refuses while the drone is armed,
+and a plan with a leg over 5 km, which usually means it was made for somewhere else.
 The dashboard doesn't arm or fly the vehicle: start the mission from your ground
 control, e.g. in MAVProxy: `mode guided`, `arm throttle`, `mode auto`,
 `long MISSION_START`. The Fly tab shows the last plan uploaded from the page, or the
 plan being edited if there hasn't been one.
 
-The API has no authentication, and neither does MAVLink itself until #4 is done. Keep
-both on localhost or a trusted network.
+The API has no authentication, and neither does MAVLink itself until #4 is done. It
+only answers to the dashboard's own address and localhost, which stops other websites
+reaching it through the browser, but keep both on localhost or a trusted network.
 
 | Dashboard field | MAVLink source |
 |---|---|
 | Armed, mode | `HEARTBEAT` from the autopilot |
 | GPS position, satellites | `GPS_RAW_INT` |
 | Position estimate, altitude, speed, heading | `GLOBAL_POSITION_INT` (see below) |
-| Battery, IMU, motors | `SYS_STATUS`; sensor health is yes or no, so those scores are 0% or 100% |
+| Battery, IMU | `SYS_STATUS`; IMU health is yes or no, so that score is 0% or 100% |
+| Motors | Nothing yet, so it reads "No data". ArduPilot always sets the `MOTOR_OUTPUTS` health bit, so `SYS_STATUS` can't show a failed motor; this needs ESC telemetry |
 | GNSS, link and hardware scores | `TRUST_NAV`, `TRUST_LNK`, `TRUST_HW` from core |
 | Autonomy behavior | core's `AUTONOMY <behavior>: <reason>` `STATUSTEXT` |
 | Events | every `STATUSTEXT` |
@@ -55,6 +58,8 @@ Things to know when reading the live view:
 - **The drift line compares GPS with the autopilot's EKF**, because core doesn't publish
   its independent estimate yet. The EKF fuses GPS, so a slow spoof that it accepts won't
   show as drift. Once core publishes its estimate, this should switch to it.
+- **The summary line is what autonomy has decided**, not proof the aircraft has done it.
+  The mode in the top bar shows what the autopilot is actually doing.
 - **The behavior only updates on a transition.** A dashboard that connects after one has
   happened shows "hasn't reported an autonomy state yet" until the next.
 - **GNSS and link stay "No data" until core is running** and publishing those scores.

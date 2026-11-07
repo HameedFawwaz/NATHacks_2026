@@ -16,9 +16,8 @@ const (
 
 	ModeFlagArmed = 128
 
-	SensorGyro         = 1 << 0
-	SensorAccel        = 1 << 1
-	SensorMotorOutputs = 1 << 15
+	SensorGyro  = 1 << 0
+	SensorAccel = 1 << 1
 
 	GPSFix2D = 2
 
@@ -31,6 +30,7 @@ const (
 
 	MissionTypeMission = 0
 	MissionAccepted    = 0
+	MissionCancelled   = 14
 
 	DataStreamAll = 0
 )
@@ -146,6 +146,12 @@ func PackMissionCount(targetSys, targetComp uint8, count uint16) []byte {
 	p := make([]byte, 9)
 	binary.LittleEndian.PutUint16(p, count)
 	p[2], p[3], p[4] = targetSys, targetComp, MissionTypeMission
+	return p
+}
+
+func PackMissionAck(targetSys, targetComp, result uint8) []byte {
+	p := make([]byte, 8)
+	p[0], p[1], p[2], p[3] = targetSys, targetComp, result, MissionTypeMission
 	return p
 }
 

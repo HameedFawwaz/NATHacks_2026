@@ -12,12 +12,13 @@ import (
 
 // liveState is the connection to the bridge served alongside the page.
 type liveState struct {
-	listen     string // the UDP address the bridge receives MAVLink on
-	streaming  bool   // the telemetry stream is up
-	lastNowMs  int64
-	uploaded   bool // a plan has been sent to the drone from this page
-	uploading  bool
-	homeSynced bool
+	listen      string // the UDP address the bridge receives MAVLink on
+	streaming   bool   // the telemetry stream is up
+	lastNowMs   int64
+	lastMessage float64 // performance.now() of the newest message
+	uploaded    bool    // a plan has been sent to the drone from this page
+	uploading   bool
+	homeSynced  bool
 }
 
 // await blocks the calling goroutine on a promise, so it must not be called
@@ -60,6 +61,7 @@ func (a *app) startStream() {
 			return
 		}
 		a.live.streaming = true
+		a.live.lastMessage = js.Global().Get("performance").Call("now").Float()
 		if u.Snapshot.NowMs < a.live.lastNowMs {
 			a.clearEvents() // the bridge restarted, so its event numbers did too
 		}
@@ -69,10 +71,21 @@ func (a *app) startStream() {
 	})
 	// EventSource reconnects by itself. Until then, drop the last values rather
 	// than keep showing them as if they were current.
-	on(source, "error", func(js.Value) {
+	lost := func() {
 		a.live.streaming = false
 		a.setSnapshot(model.Snapshot{NowMs: 1})
+	}
+	on(source, "error", func(js.Value) { lost() })
+
+	// A stalled connection doesn't always raise an error, so watch for silence too.
+	watchdog := js.FuncOf(func(js.Value, []js.Value) any {
+		silence := js.Global().Get("performance").Call("now").Float() - a.live.lastMessage
+		if a.live.streaming && silence > model.StaleAfterMs {
+			lost()
+		}
+		return nil
 	})
+	js.Global().Call("setInterval", watchdog, 1000)
 	a.renderFly()
 }
 

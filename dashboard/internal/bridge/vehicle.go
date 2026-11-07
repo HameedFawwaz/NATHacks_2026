@@ -36,6 +36,8 @@ type vehicleState struct {
 	lastHeartbeat int64
 	wasConnected  bool
 	snap          model.Snapshot
+	gpsAt         int64 // when GPS_RAW_INT last arrived
+	globalAt      int64 // when GLOBAL_POSITION_INT last arrived
 	events        []model.Event
 	nextEventSeq  int
 }
@@ -82,8 +84,10 @@ func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) 
 	case mavlink.MsgSysStatus:
 		v.applySysStatus(mavlink.DecodeSysStatus(f.Payload), nowMs)
 	case mavlink.MsgGPSRawInt:
+		v.gpsAt = nowMs
 		v.applyGPS(mavlink.DecodeGPSRawInt(f.Payload))
 	case mavlink.MsgGlobalPositionInt:
+		v.globalAt = nowMs
 		v.applyGlobalPosition(mavlink.DecodeGlobalPositionInt(f.Payload))
 	}
 	return true
@@ -100,7 +104,7 @@ func (v *vehicleState) applyHeartbeat(hb mavlink.Heartbeat, nowMs int64) {
 
 func (v *vehicleState) applyNamedValue(p []byte, nowMs int64) {
 	name, value := mavlink.DecodeNamedValueFloat(p)
-	if math.IsNaN(value) {
+	if !(value >= 0 && value <= 1) { // also rejects NaN; infinities would break JSON
 		return
 	}
 	reading := model.Reading{Value: value, AtMs: nowMs}
@@ -129,8 +133,9 @@ func (v *vehicleState) applyStatusText(p []byte, nowMs int64) {
 	}
 }
 
-// applySysStatus reads per-sensor health, which the autopilot reports as yes or
-// no, so these scores are only ever 0 or 1.
+// applySysStatus reads battery charge and IMU health. Health is yes or no, so the
+// IMU score is only ever 0 or 1. There is deliberately no motor score: ArduPilot
+// always sets the MOTOR_OUTPUTS health bit, which says nothing about the motors.
 func (v *vehicleState) applySysStatus(s mavlink.SysStatus, nowMs int64) {
 	health := func(mask uint32) (model.Reading, bool) {
 		if s.SensorsPresent&mask != mask {
@@ -144,9 +149,6 @@ func (v *vehicleState) applySysStatus(s mavlink.SysStatus, nowMs int64) {
 	}
 	if r, ok := health(mavlink.SensorGyro | mavlink.SensorAccel); ok {
 		v.snap.IMU = r
-	}
-	if r, ok := health(mavlink.SensorMotorOutputs); ok {
-		v.snap.Motors = r
 	}
 	if s.BatteryRemaining != mavlink.UnknownBattery {
 		v.snap.Battery = model.Reading{Value: float64(s.BatteryRemaining) / 100, AtMs: nowMs}
@@ -213,5 +215,12 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 	s := v.snap
 	s.NowMs = nowMs
 	s.Connected = v.connected(nowMs)
+
+	gpsFresh := v.gpsAt != 0 && nowMs-v.gpsAt <= model.StaleAfterMs
+	globalFresh := v.globalAt != 0 && nowMs-v.globalAt <= model.StaleAfterMs
+	s.HasGPS = s.Connected && gpsFresh
+	s.HasPosition = s.HasPosition && s.HasGPS
+	s.HasFlightData = s.Connected && globalFresh
+	s.HasEstimate = s.HasEstimate && s.HasFlightData
 	return s
 }

@@ -95,8 +95,11 @@ func parseOne(data []byte) (frame Frame, size int, ok bool) {
 			return Frame{}, len(data), false
 		}
 		headerLen, payloadLen = headerLenV2, int(data[1])
+		if data[2]&^flagSigned != 0 {
+			return Frame{}, 1, false // needs a capability this parser doesn't have
+		}
 		if data[2]&flagSigned != 0 {
-			extra = sigLen
+			extra = sigLen // skipped, not verified: signatures aren't checked
 		}
 		msgID = uint32(data[7]) | uint32(data[8])<<8 | uint32(data[9])<<16
 		frame.SysID, frame.CompID = data[5], data[6]

@@ -167,14 +167,27 @@ func (b *Bridge) Snapshot(afterSeq int) (model.Snapshot, []model.Event) {
 	return b.vehicle.snapshot(b.nowMs()), events
 }
 
-// UploadPlan sends a plan to the vehicle and waits for it to be accepted.
+// UploadPlan sends a plan to the vehicle and waits for it to be accepted. An
+// unconfirmed transfer is sent again once, which is safe because it fully replaces
+// the mission and the vehicle must still be disarmed.
 func (b *Bridge) UploadPlan(ctx context.Context, plan model.Plan) error {
 	if err := ValidatePlan(plan); err != nil {
 		return err
 	}
+	items := BuildMission(plan)
+	err := b.transfer(ctx, items)
+	if errors.Is(err, errUnconfirmed) {
+		err = b.transfer(ctx, items)
+	}
+	if errors.Is(err, errUnconfirmed) {
+		return errors.New("the drone didn't confirm the mission; what it has stored is unknown, so upload again")
+	}
+	return err
+}
 
+func (b *Bridge) transfer(ctx context.Context, items []mavlink.MissionItem) error {
 	u := &upload{
-		items:    BuildMission(plan),
+		items:    items,
 		progress: make(chan struct{}, 1),
 		done:     make(chan error, 1),
 	}
@@ -206,7 +219,7 @@ func (b *Bridge) UploadPlan(ctx context.Context, plan model.Plan) error {
 		b.mu.Unlock()
 	}()
 
-	retry := time.NewTicker(uploadRetryInterval)
+	retry := time.NewTimer(uploadRetryInterval)
 	defer retry.Stop()
 	retries := 0
 	for {
@@ -215,18 +228,53 @@ func (b *Bridge) UploadPlan(ctx context.Context, plan model.Plan) error {
 			return err
 		case <-u.progress:
 			retries = 0
+			retry.Reset(uploadRetryInterval)
 		case <-retry.C:
 			retries++
 			if retries > uploadMaxRetries {
+				b.cancelUpload()
+				if u.next == len(u.items) {
+					return errUnconfirmed
+				}
 				return errors.New("the drone stopped responding during the upload")
 			}
 			b.mu.Lock()
+			if err := b.uploadBlockedLocked(); err != nil {
+				b.cancelUploadLocked()
+				b.mu.Unlock()
+				return err
+			}
+			u.resent = u.next == len(u.items)
 			u.lastSent()
 			b.mu.Unlock()
+			retry.Reset(uploadRetryInterval)
 		case <-ctx.Done():
+			b.cancelUpload()
 			return ctx.Err()
 		}
 	}
+}
+
+// uploadBlockedLocked says why a transfer under way must stop, if it must.
+func (b *Bridge) uploadBlockedLocked() error {
+	switch {
+	case !b.vehicle.connected(b.nowMs()):
+		return errors.New("lost contact with the drone during the upload; its mission may be incomplete")
+	case b.vehicle.snap.Armed:
+		return errors.New("the drone was armed during the upload; its mission may be incomplete")
+	}
+	return nil
+}
+
+func (b *Bridge) cancelUpload() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cancelUploadLocked()
+}
+
+// cancelUploadLocked tells the vehicle to stop waiting for items.
+func (b *Bridge) cancelUploadLocked() {
+	b.sendLocked(mavlink.MsgMissionAck, mavlink.PackMissionAck(b.vehicle.sysID, b.vehicle.compID, mavlink.MissionCancelled))
 }
 
 // handleMission advances an upload in progress. Callers hold b.mu.
@@ -235,14 +283,24 @@ func (b *Bridge) handleMission(f mavlink.Frame) {
 	if u == nil {
 		return
 	}
+	if f.MsgID != mavlink.MsgMissionRequest && f.MsgID != mavlink.MsgMissionRequestInt && f.MsgID != mavlink.MsgMissionAck {
+		return
+	}
+	if err := b.uploadBlockedLocked(); err != nil {
+		b.cancelUploadLocked()
+		u.finish(err)
+		return
+	}
+
 	switch f.MsgID {
 	case mavlink.MsgMissionRequest, mavlink.MsgMissionRequestInt:
 		seq, targetSys, targetComp, missionType := mavlink.DecodeMissionRequest(f.Payload)
 		if targetSys != ownSysID || targetComp != ownCompID || missionType != mavlink.MissionTypeMission {
 			return
 		}
-		if int(seq) >= len(u.items) {
-			u.finish(missionResultError(13))
+		// Items go out strictly in order. A request from further ahead can't belong
+		// to this transfer, while an earlier one is a retry.
+		if int(seq) > u.next || int(seq) >= len(u.items) {
 			return
 		}
 		sys, comp := b.vehicle.sysID, b.vehicle.compID
@@ -250,7 +308,9 @@ func (b *Bridge) handleMission(f mavlink.Frame) {
 			b.sendLocked(mavlink.MsgMissionItemInt, mavlink.PackMissionItemInt(sys, comp, seq, u.items[seq]))
 		}
 		u.lastSent()
-		u.sawLast = int(seq) == len(u.items)-1
+		if int(seq) == u.next {
+			u.next++
+		}
 		select {
 		case u.progress <- struct{}{}:
 		default:
@@ -260,13 +320,16 @@ func (b *Bridge) handleMission(f mavlink.Frame) {
 		if targetSys != ownSysID || targetComp != ownCompID || missionType != mavlink.MissionTypeMission {
 			return
 		}
+		allSent := u.next == len(u.items)
 		switch {
-		case result != mavlink.MissionAccepted:
-			u.finish(missionResultError(result))
-		case u.sawLast:
+		case result == mavlink.MissionAccepted && allSent:
 			u.finish(nil)
+		case result == mavlink.MissionAccepted:
+			// Can't be for this transfer; leave it to time out rather than call it a success.
+		case allSent && u.resent:
+			u.finish(errUnconfirmed)
+		default:
+			u.finish(missionResultError(result))
 		}
-		// An "accepted" before the last item was requested is left to time out
-		// rather than reported as a success.
 	}
 }

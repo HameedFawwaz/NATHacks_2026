@@ -136,6 +136,16 @@ func TestParseToleratesBadInput(t *testing.T) {
 	}
 }
 
+func TestParseRejectsUnknownIncompatFlags(t *testing.T) {
+	f := mustHex(t, goldenHeartbeat)
+	f[2] = 0x80
+	sum := crc(f[1:len(f)-crcLen], messageInfo[MsgHeartbeat].crcExtra)
+	f[len(f)-2], f[len(f)-1] = byte(sum), byte(sum>>8)
+	if frames := Parse(f); len(frames) != 0 {
+		t.Fatalf("accepted: %+v", frames)
+	}
+}
+
 func TestParseMavlink1(t *testing.T) {
 	// A v1 heartbeat, with the CRC computed the same way v1 senders do.
 	payload := PackGCSHeartbeat()

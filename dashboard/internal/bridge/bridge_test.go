@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -136,16 +137,16 @@ func TestSensorHealthAndBattery(t *testing.T) {
 		return p
 	}
 
-	all := uint32(mavlink.SensorGyro | mavlink.SensorAccel | mavlink.SensorMotorOutputs)
+	all := uint32(mavlink.SensorGyro | mavlink.SensorAccel)
 	v.apply(frame(1, 1, mavlink.MsgSysStatus, status(all, all, 87)), 1100)
 	s := v.snapshot(1100)
-	if s.IMU.Value != 1 || s.Motors.Value != 1 || s.Battery.Value != 0.87 {
+	if s.IMU.Value != 1 || s.Battery.Value != 0.87 {
 		t.Fatalf("healthy: %+v", s)
 	}
 
 	v.apply(frame(1, 1, mavlink.MsgSysStatus, status(all, mavlink.SensorGyro, mavlink.UnknownBattery)), 1200)
 	s = v.snapshot(1200)
-	if s.IMU.Value != 0 || s.Motors.Value != 0 {
+	if s.IMU.Value != 0 {
 		t.Fatalf("unhealthy: %+v", s)
 	}
 	if s.Battery != (model.Reading{Value: 0.87, AtMs: 1100}) {
@@ -155,8 +156,55 @@ func TestSensorHealthAndBattery(t *testing.T) {
 	// Not fitted means no data, not healthy.
 	w := identified(t)
 	w.apply(frame(1, 1, mavlink.MsgSysStatus, status(0, 0, 50)), 1100)
-	if got := w.snapshot(1100).Motors.AtMs; got != 0 {
-		t.Fatalf("absent motors reported at %d", got)
+	if got := w.snapshot(1100).IMU.AtMs; got != 0 {
+		t.Fatalf("absent IMU reported at %d", got)
+	}
+
+	// ArduPilot always sets this bit, so it must not read as motor health.
+	const motorOutputs = 1 << 15
+	w.apply(frame(1, 1, mavlink.MsgSysStatus, status(motorOutputs, motorOutputs, 50)), 1200)
+	if got := w.snapshot(1200).Motors.AtMs; got != 0 {
+		t.Fatalf("motor outputs bit treated as motor health at %d", got)
+	}
+}
+
+func TestTelemetryExpiresWhileHeartbeatsContinue(t *testing.T) {
+	v := identified(t)
+	v.apply(mavlink.Parse(mustGolden(t, "fd1e000002010118000015cd5b070000000094feebea12cfe85840e908007900c80052032823030e0da3"))[0], 1000)
+	v.apply(mavlink.Parse(mustGolden(t, "fd1c0000030101210000881300000001ecea88d1e85860370900204e00002c0170feceffbe146353"))[0], 1000)
+	if s := v.snapshot(1000); !s.HasPosition || !s.HasEstimate || !s.HasFlightData || !s.HasGPS {
+		t.Fatalf("fresh: %+v", s)
+	}
+
+	const later = 1000 + model.StaleAfterMs + 1
+	v.apply(frame(1, 1, mavlink.MsgHeartbeat, heartbeatPayload(2, 3, 209, 3)), later)
+	s := v.snapshot(later)
+	if !s.Connected {
+		t.Fatal("should be connected")
+	}
+	if s.HasPosition || s.HasEstimate || s.HasFlightData || s.HasGPS {
+		t.Fatalf("stale data shown as current: %+v", s)
+	}
+}
+
+func TestBeforeFirstMessagesNothingIsCurrent(t *testing.T) {
+	s := identified(t).snapshot(1000)
+	if s.HasPosition || s.HasEstimate || s.HasFlightData || s.HasGPS {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestOutOfRangeScoresDontPoisonTheStream(t *testing.T) {
+	v := identified(t)
+	for _, bad := range []float32{float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN()), 1.5, -0.5} {
+		v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("TRUST_NAV", bad)), 1100)
+	}
+	s := v.snapshot(1100)
+	if s.Nav.AtMs != 0 {
+		t.Fatalf("accepted a bad score: %+v", s.Nav)
+	}
+	if _, err := json.Marshal(s); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -224,6 +272,7 @@ func TestValidatePlan(t *testing.T) {
 		return p
 	}
 	bad := map[string]model.Plan{
+		"far away":     mutate(func(p *model.Plan) { p.Home = model.LatLon{Lat: 53.5, Lon: -113.5} }),
 		"no waypoints": mutate(func(p *model.Plan) { p.Waypoints = nil }),
 		"high":         mutate(func(p *model.Plan) { p.Waypoints[1].AltM = 500 }),
 		"ground":       mutate(func(p *model.Plan) { p.Waypoints[1].AltM = 0 }),
@@ -240,14 +289,15 @@ func TestValidatePlan(t *testing.T) {
 
 // fakeVehicle speaks the mission protocol over real UDP.
 type fakeVehicle struct {
-	t        *testing.T
-	conn     *net.UDPConn
-	bridge   *net.UDPAddr
-	armed    bool
-	ackWith  uint8
-	dropOnce bool // ignore the first item request's reply, to exercise a retry
-	silent   bool
-	received chan []mavlink.Frame
+	t                 *testing.T
+	conn              *net.UDPConn
+	bridge            *net.UDPAddr
+	armed             bool
+	ackWith           uint8
+	dropOnce          bool // ignore the first item request's reply, to exercise a retry
+	silent            bool
+	loseFirstFinalAck bool // installs the mission but loses the ack, as a real link can
+	received          chan []mavlink.Frame
 }
 
 func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
@@ -305,9 +355,17 @@ func (f *fakeVehicle) serve(ctx context.Context) {
 					continue
 				}
 				if seq != len(items) {
+					if want == -1 { // like ArduPilot: not receiving any more
+						f.send(mavlink.MsgMissionAck, []byte{ownSysID, ownCompID, 1, 0, 0, 0, 0, 0})
+					}
 					continue
 				}
 				items = append(items, fr)
+				if len(items) == want && f.loseFirstFinalAck {
+					f.loseFirstFinalAck = false
+					want, items = -1, nil
+					continue
+				}
 				if len(items) == want {
 					f.send(mavlink.MsgMissionAck, []byte{ownSysID, ownCompID, 0, 0, 0, 0, 0, 0})
 					f.received <- items
@@ -410,11 +468,87 @@ func TestUploadStopsWhenCancelled(t *testing.T) {
 	}
 }
 
+func TestAcceptanceWithoutAllItemsIsNotSuccess(t *testing.T) {
+	b, f, ctx := setup(t)
+	connect(t, b, f)
+
+	short, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- b.UploadPlan(short, model.DefaultPlan()) }()
+	time.Sleep(50 * time.Millisecond)
+
+	// A stale request for the last item, then ACCEPTED, as from an earlier transfer.
+	last := len(BuildMission(model.DefaultPlan())) - 1
+	f.request(last)
+	f.send(mavlink.MsgMissionAck, []byte{ownSysID, ownCompID, 0, 0, 0, 0, 0, 0})
+	if err := <-result; err == nil {
+		t.Fatal("reported success without transferring the items")
+	}
+}
+
+func TestLostFinalAckIsRetried(t *testing.T) {
+	b, f, ctx := setup(t)
+	f.loseFirstFinalAck = true
+	go f.serve(ctx)
+	connect(t, b, f)
+
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatalf("should recover by sending the mission again: %v", err)
+	}
+	select {
+	case <-f.received:
+	case <-time.After(time.Second):
+		t.Fatal("second transfer never finished")
+	}
+}
+
+func TestArmingDuringUploadStopsIt(t *testing.T) {
+	b, f, ctx := setup(t)
+	connect(t, b, f)
+
+	result := make(chan error, 1)
+	go func() { result <- b.UploadPlan(ctx, model.DefaultPlan()) }()
+	time.Sleep(50 * time.Millisecond)
+	f.request(0)
+	time.Sleep(50 * time.Millisecond)
+	f.armed = true
+	f.heartbeat()
+	time.Sleep(50 * time.Millisecond)
+	f.request(1)
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "armed") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload kept going after arming")
+	}
+}
+
+func TestHostAllowlist(t *testing.T) {
+	cases := map[string]bool{
+		"127.0.0.1:8080":    true,
+		"localhost:8080":    true,
+		"[::1]:8080":        true,
+		"192.168.1.5:8080":  true, // the configured dashboard address
+		"evil.example:8080": false,
+		"evil.example":      false,
+		"192.168.1.6:8080":  false,
+	}
+	for host, want := range cases {
+		if got := allowedHost(host, "192.168.1.5:8080"); got != want {
+			t.Errorf("%s = %v", host, got)
+		}
+	}
+}
+
 func TestHTTPMission(t *testing.T) {
 	b, f, ctx := setup(t)
 	go f.serve(ctx)
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler())
+	srv := httptest.NewServer(b.Handler(""))
 	defer srv.Close()
 
 	body, _ := json.Marshal(model.DefaultPlan())
@@ -453,7 +587,7 @@ func TestHTTPMissionRefusedWhileArmed(t *testing.T) {
 	b, f, _ := setup(t)
 	f.armed = true
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler())
+	srv := httptest.NewServer(b.Handler(""))
 	defer srv.Close()
 
 	body, _ := json.Marshal(model.DefaultPlan())
@@ -470,7 +604,7 @@ func TestHTTPMissionRefusedWhileArmed(t *testing.T) {
 func TestHTTPTelemetryStream(t *testing.T) {
 	b, f, _ := setup(t)
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler())
+	srv := httptest.NewServer(b.Handler(""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/telemetry")

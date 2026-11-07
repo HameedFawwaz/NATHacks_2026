@@ -102,22 +102,21 @@ func (a *app) renderSource() {
 
 func (a *app) renderInstruments() {
 	s := a.snap
-	if !s.Connected {
-		for _, id := range []string{"i-alt", "i-speed", "i-heading", "i-sats", "i-drift"} {
-			setText(byID(id), "--")
-			setClass(byID(id), "alert", false)
+	show := func(id string, current bool, value string) {
+		if !current {
+			value = "--"
 		}
-		return
+		setText(byID(id), value)
 	}
-	setText(byID("i-alt"), fmt.Sprintf("%.0f m", s.AltM))
-	setText(byID("i-speed"), fmt.Sprintf("%.1f m/s", s.SpeedMS))
-	setText(byID("i-heading"), fmt.Sprintf("%03.0f°", s.HeadingDeg))
-	setText(byID("i-sats"), strconv.Itoa(s.Satellites))
+	show("i-alt", s.HasFlightData, fmt.Sprintf("%.0f m", s.AltM))
+	show("i-speed", s.HasFlightData, fmt.Sprintf("%.1f m/s", s.SpeedMS))
+	show("i-heading", s.HasFlightData, fmt.Sprintf("%03.0f°", s.HeadingDeg))
+	show("i-sats", s.HasGPS, strconv.Itoa(s.Satellites))
 	driftEl := byID("i-drift")
 	drift, showDrift := s.Drift()
 	switch {
 	case !s.HasPosition || !s.HasEstimate:
-		setText(driftEl, "n/a")
+		setText(driftEl, "--")
 	case showDrift:
 		setText(driftEl, fmt.Sprintf("%.0f m", drift))
 	default:
@@ -219,8 +218,12 @@ func (p *healthPanel) render(subsystems []model.Subsystem) {
 	for len(p.cards) < len(subsystems) {
 		p.cards = append(p.cards, newHealthCard())
 	}
-	for i, sub := range subsystems {
-		p.cards[i].render(sub)
+	for i, card := range p.cards {
+		// A card with no subsystem must not keep showing its last score.
+		card.root.Set("hidden", i >= len(subsystems))
+		if i < len(subsystems) {
+			card.render(subsystems[i])
+		}
 	}
 }
 

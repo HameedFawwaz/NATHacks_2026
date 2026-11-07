@@ -23,6 +23,10 @@ const (
 	MaxAltM = 120.0
 )
 
+// MaxLegM is the longest leg a plan may have. A longer one almost always means a
+// plan saved somewhere else, not an intended flight.
+const MaxLegM = 5000.0
+
 // DefaultHome is ArduPilot SITL's default start location, so the map lines up
 // with a SITL flight out of the box.
 var DefaultHome = LatLon{Lat: -35.363262, Lon: 149.165237}
@@ -78,12 +82,15 @@ func (p Plan) Clone() Plan {
 }
 
 // DefaultPlan returns the plan shown on first launch.
-func DefaultPlan() Plan {
+func DefaultPlan() Plan { return DefaultPlanAt(DefaultHome) }
+
+// DefaultPlanAt returns the first-launch route around the given home.
+func DefaultPlanAt(home LatLon) Plan {
 	at := func(eastM, northM float64) Waypoint {
-		return Waypoint{LatLon: FromLocal(DefaultHome, eastM, northM), AltM: DefaultAltM}
+		return Waypoint{LatLon: FromLocal(home, eastM, northM), AltM: DefaultAltM}
 	}
 	return Plan{
-		Home:      DefaultHome,
+		Home:      home,
 		Waypoints: []Waypoint{at(120, 90), at(300, 110), at(340, -80), at(160, -150)},
 	}
 }

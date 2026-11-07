@@ -26,7 +26,7 @@ func main() {
 			log.Fatal(err)
 		}
 		go func() { log.Fatal(b.Run(context.Background())) }()
-		mux.Handle("/api/", b.Handler())
+		mux.Handle("/api/", b.Handler(*addr))
 		log.Printf("listening for MAVLink on udp %s", b.Addr())
 	}
 

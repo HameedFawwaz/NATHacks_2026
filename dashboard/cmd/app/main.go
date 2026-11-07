@@ -33,6 +33,7 @@ const (
 type app struct {
 	tab       tab
 	plan      model.Plan // the plan being edited
+	planSaved bool       // the plan came from storage, rather than being the default
 	flownPlan model.Plan // the route shown on the Fly tab; edits don't touch it
 	snap      model.Snapshot
 
@@ -49,7 +50,8 @@ type app struct {
 }
 
 func main() {
-	a := &app{plan: loadPlan()}
+	a := &app{}
+	a.plan, a.planSaved = loadPlan()
 	a.flownPlan = a.plan.Clone()
 	a.mapView = newMapView(a)
 	a.health = newHealthPanel()
@@ -117,7 +119,11 @@ func (a *app) syncHome(s model.Snapshot) {
 		return
 	}
 	a.live.homeSynced = true
-	a.plan.Home = s.Reported
+	if a.planSaved {
+		a.plan.Home = s.Reported // the waypoints stay put: they're real places
+	} else {
+		a.plan = model.DefaultPlanAt(s.Reported)
+	}
 	a.savePlan()
 	a.syncFlownPlan()
 	if a.tab == tabPlan {
@@ -181,19 +187,20 @@ func (a *app) newFlight() {
 	a.setSnapshot(a.sim.Snapshot())
 }
 
-func loadPlan() model.Plan {
+func loadPlan() (plan model.Plan, saved bool) {
 	stored := js.Global().Get("localStorage").Call("getItem", planStorageKey)
 	if stored.IsNull() {
-		return model.DefaultPlan()
+		return model.DefaultPlan(), false
 	}
 	var p model.Plan
 	if err := json.Unmarshal([]byte(stored.String()), &p); err != nil || p.Home == (model.LatLon{}) {
-		return model.DefaultPlan()
+		return model.DefaultPlan(), false
 	}
-	return p
+	return p, true
 }
 
 func (a *app) savePlan() {
+	a.planSaved = true
 	data, err := json.Marshal(a.plan)
 	if err != nil {
 		return
