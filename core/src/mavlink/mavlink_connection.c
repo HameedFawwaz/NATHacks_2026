@@ -196,6 +196,10 @@ int core_mavlink_conn_poll(core_mavlink_conn_t *conn) {
         }
     }
 
+    /* Re-read the clock: a heartbeat decoded above can be stamped later than the
+     * `now` taken on entry, which would underflow this unsigned subtraction and
+     * look like a timeout. */
+    now = core_now_ms();
     if (conn->state == CORE_MAVLINK_CONN_CONNECTED &&
         conn->last_heartbeat_rx_ms != 0 &&
         now - conn->last_heartbeat_rx_ms > conn->cfg.heartbeat_timeout_ms) {
