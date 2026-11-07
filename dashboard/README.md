@@ -1,4 +1,4 @@
-# dashboard
+# Trust Issues — Mission Control
 
 Operator dashboard, written in Go and compiled to WebAssembly. It runs entirely in the
 browser and doesn't share a build system with `../core`.
@@ -7,7 +7,8 @@ browser and doesn't share a build system with `../core`.
   estimate, with a drift line when those two disagree by 10 m or more. A panel shows
   the health of each subsystem in plain language.
 - **Plan**: click the map to add waypoints, drag to move them, and set altitudes. The
-  plan is saved in the browser's local storage.
+  plan is saved in the browser's local storage. Shift-click a waypoint to remove it;
+  Shift-clicking empty space or home does nothing.
 
 ## Run
 
@@ -84,4 +85,46 @@ internal/bridge/   MAVLink over UDP to telemetry stream and mission upload over 
 web/               page and styles; `make build` adds app.wasm and wasm_exec.js
 ```
 
-The map has no internet tiles, only a metric grid, so it works offline.
+## Map and critical alerts
+
+The cockpit-inspired interface has a navigation rail, a large map, a telemetry dock,
+and a live heading dial (not a flight control). Choose **Satellite** (Esri World Imagery)
+or **Street** (OpenStreetMap); no API key is needed for these endpoints. Satellite
+imagery is explicitly labeled as a basemap, not a live camera feed. Tile requests go
+directly to the selected provider and reveal the viewed area to that provider.
+Only visible tiles are requested, with a bounded in-memory cache.
+If the network or provider is unavailable, the metric grid remains usable for planning.
+Map attribution stays visible in both Fly and Plan.
+
+Critical subsystem assessments turn the console red and show a persistent warning
+banner, even while planning. Yellow/caution adds mild RGB separation and fine digital
+line jitter; red/critical turns up the channel splitting, static, and HUD ghosting.
+A single WebGL pass is capped at 20 fps and 1024×720, rather than using expensive SVG
+turbulence or displacement. No liquid warping, large tear blocks or rapid strobes.
+The effect stops entirely when healthy, hidden, reduced-motion, or switched off;
+unsupported graphics/CORS falls back to the ordinary map and cheap CSS warnings.
+Base map redraws are capped at 30 fps rather than tracking 60/120 Hz displays.
+This is a labeled cosmetic alert,
+not corrupted telemetry. **Glitch FX on** toggles these effects
+without muting the alarm or hiding the critical banner. Reduced-motion preferences
+disable them automatically. Canvas layout, telemetry, and pointer coordinates are
+unchanged; a pointer-transparent GPU canvas supplies only the cosmetic effect.
+After the first click or keypress, a sourced emergency-siren recording loops during critical
+states. Use **Alarm sound on** to mute it; visual warnings stay active. Browser autoplay
+restrictions may require **Enable alarm**. Sound stops on recovery, stale/no-contact
+assessments, reset, mute, or when the page is hidden. No thresholds or autonomy behavior
+are changed: trust below 40% and battery below 15% use the existing critical rules.
+The recording is bundled locally as `web/audio/critical-siren.mp3`, with attribution
+and license details in `web/audio/README.md` and the console's **Sound credits** link.
+There are no synthesized oscillator beeps. If the file cannot load, visual warnings
+continue and **Retry alarm audio** allows another attempt.
+
+Visual styling (`web/mission.css`, `web/glitch.css`), GPU effects (`web/glitch.js`), alerts (`web/mission.js`), the basemap
+(`web/map-tiles.js`), and read-only instrument mirrors (`web/cockpit.js`) are isolated
+from the telemetry and planning code. Canvas resizing follows panel/banner layout changes.
+
+Optional presentation tests (Node.js, no dependencies):
+
+```
+node --test web/mission.test.cjs
+```

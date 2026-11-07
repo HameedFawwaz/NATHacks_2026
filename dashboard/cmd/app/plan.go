@@ -36,9 +36,8 @@ func (a *app) bindPlan() {
 		if index.IsNull() {
 			return
 		}
-		if i, err := strconv.Atoi(index.String()); err == nil && i < len(a.plan.Waypoints) {
-			a.plan.Waypoints = slices.Delete(a.plan.Waypoints, i, i+1)
-			a.planChanged()
+		if i, err := strconv.Atoi(index.String()); err == nil {
+			a.removeWaypoint(i)
 		}
 	})
 	on(list, "change", func(e js.Value) {
@@ -61,6 +60,14 @@ func (a *app) bindPlan() {
 
 func (a *app) addWaypoint(p model.LatLon) {
 	a.plan.Waypoints = append(a.plan.Waypoints, model.Waypoint{LatLon: p, AltM: model.DefaultAltM})
+	a.planChanged()
+}
+
+func (a *app) removeWaypoint(i int) {
+	if i < 0 || i >= len(a.plan.Waypoints) {
+		return
+	}
+	a.plan.Waypoints = slices.Delete(a.plan.Waypoints, i, i+1)
 	a.planChanged()
 }
 

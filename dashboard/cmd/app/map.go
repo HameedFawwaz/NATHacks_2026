@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	colorPlan      = "#4aa8ff"
+	colorPlan      = "#23baff"
 	colorReported  = "#ffffff"
 	colorEstimated = "#3ecf8e"
 	colorDrift     = "#ff5c5c"
@@ -28,8 +28,8 @@ const (
 	fitMarginPx      = 90.0
 )
 
-// mapView draws onto a canvas with a flat projection: there are no tiles, so it
-// works without internet. Positions are metres east and north of the plan's home.
+// mapView draws onto a canvas with a flat projection and optional basemap tiles.
+// Positions are metres east and north of the plan's home; the grid works offline.
 type mapView struct {
 	app    *app
 	canvas js.Value
@@ -70,6 +70,14 @@ func newMapView(a *app) *mapView {
 	}), map[string]any{"passive": false})
 
 	on(js.Global().Get("window"), "resize", func(js.Value) { m.resize() })
+	// Banners and responsive cockpit panels can resize the map without a window
+	// resize. Keep pointer coordinates and the canvas backing size in sync.
+	if observer := js.Global().Get("ResizeObserver"); !observer.IsUndefined() {
+		observer.New(js.FuncOf(func(js.Value, []js.Value) any {
+			m.resize()
+			return nil
+		})).Call("observe", canvas)
+	}
 	m.resize()
 	return m
 }
@@ -192,6 +200,12 @@ func (m *mapView) onPointerUp(e js.Value) {
 	switch {
 	case m.dragging && m.dragWaypoint >= 0:
 		m.app.planChanged()
+	case !m.dragging && m.app.tab == tabPlan && e.Get("shiftKey").Bool():
+		// Shift-click only removes an existing waypoint; empty space and home
+		// are left alone. A Shift-drag still moves the point normally.
+		if e.Get("button").Int() == 0 {
+			m.app.removeWaypoint(m.dragWaypoint)
+		}
 	case !m.dragging && m.dragWaypoint < 0 && m.app.tab == tabPlan:
 		x, y := pointerPos(e)
 		m.app.addWaypoint(m.fromScreen(x, y))
@@ -214,8 +228,16 @@ func (m *mapView) onWheel(e js.Value) {
 
 func (m *mapView) startDrawing() {
 	var frame js.Func
-	frame = js.FuncOf(func(js.Value, []js.Value) any {
-		m.draw()
+	var lastFrame float64
+	frame = js.FuncOf(func(_ js.Value, args []js.Value) any {
+		// Telemetry arrives at 10 Hz. 30 fps keeps interaction smooth without
+		// redrawing the entire map at 60/120 Hz on high-refresh displays.
+		now := args[0].Float()
+		const interval = 1000.0 / 30
+		if now-lastFrame >= interval {
+			lastFrame = now - math.Mod(now-lastFrame, interval)
+			m.draw()
+		}
 		js.Global().Call("requestAnimationFrame", frame)
 		return nil
 	})
@@ -229,6 +251,12 @@ func (m *mapView) draw() {
 	c.Call("fillRect", 0, 0, m.width, m.height)
 
 	m.drawGrid()
+	// The optional presentation layer uses the same local-metre projection. Keep
+	// the grid underneath so missing/offline tiles don't affect flight planning.
+	if tiles := js.Global().Get("TrustIssuesMap"); !tiles.IsUndefined() && !tiles.IsNull() {
+		origin := m.origin()
+		tiles.Call("draw", c, m.width, m.height, origin.Lat, origin.Lon, m.centerEast, m.centerNorth, m.scale)
+	}
 	m.drawRoute(m.activePlan())
 	if m.app.tab == tabFly {
 		m.drawFlight()
