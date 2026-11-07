@@ -53,9 +53,10 @@ type Snapshot struct {
 	AltM          float64
 	SpeedMS       float64
 	HeadingDeg    float64
-	HasFlightData bool // AltM, SpeedMS and HeadingDeg are current
+	HasHeading    bool // HeadingDeg is current and known
+	HasFlightData bool // AltM and SpeedMS are current
 	Satellites    int
-	HasGPS        bool // Satellites is current
+	HasGPS        bool // Satellites is current and known
 
 	Overall, Nav, Link, IMU, Motors, Battery Reading
 

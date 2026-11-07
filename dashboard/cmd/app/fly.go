@@ -110,7 +110,7 @@ func (a *app) renderInstruments() {
 	}
 	show("i-alt", s.HasFlightData, fmt.Sprintf("%.0f m", s.AltM))
 	show("i-speed", s.HasFlightData, fmt.Sprintf("%.1f m/s", s.SpeedMS))
-	show("i-heading", s.HasFlightData, fmt.Sprintf("%03.0f°", s.HeadingDeg))
+	show("i-heading", s.HasHeading, fmt.Sprintf("%03.0f°", s.HeadingDeg))
 	show("i-sats", s.HasGPS, strconv.Itoa(s.Satellites))
 	driftEl := byID("i-drift")
 	drift, showDrift := s.Drift()

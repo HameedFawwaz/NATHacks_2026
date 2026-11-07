@@ -371,8 +371,15 @@ func (m *mapView) drawFlight() {
 		return
 	}
 
-	// The GPS position, as an arrow pointing along the heading.
+	// The GPS position, as an arrow pointing along the heading, or a dot without one.
 	rx, ry := m.toScreen(s.Reported)
+	if !s.HasHeading {
+		c.Set("fillStyle", colorReported)
+		c.Call("beginPath")
+		c.Call("arc", rx, ry, 7, 0, 2*math.Pi)
+		c.Call("fill")
+		return
+	}
 	heading := s.HeadingDeg * math.Pi / 180
 	c.Call("save")
 	c.Call("translate", rx, ry)

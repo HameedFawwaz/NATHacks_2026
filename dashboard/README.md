@@ -32,7 +32,8 @@ arducopter ... --serial2=udpclient:127.0.0.1:14552
 ```
 
 The Plan tab's button becomes "Upload to drone". It refuses while the drone is armed,
-and a plan with a leg over 5 km, which usually means it was made for somewhere else.
+and a plan with a leg over 5 km, including the return home, which usually means it was
+made for somewhere else.
 The dashboard doesn't arm or fly the vehicle: start the mission from your ground
 control, e.g. in MAVProxy: `mode guided`, `arm throttle`, `mode auto`,
 `long MISSION_START`. The Fly tab shows the last plan uploaded from the page, or the
@@ -40,7 +41,8 @@ plan being edited if there hasn't been one.
 
 The API has no authentication, and neither does MAVLink itself until #4 is done. It
 only answers to the dashboard's own address and localhost, which stops other websites
-reaching it through the browser, but keep both on localhost or a trusted network.
+reaching it through the browser, but keep both on localhost or a trusted network. To
+open the dashboard from another machine, use `-addr 0.0.0.0:8080 -public-host <its IP>`.
 
 | Dashboard field | MAVLink source |
 |---|---|

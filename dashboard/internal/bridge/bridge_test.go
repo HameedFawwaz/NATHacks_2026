@@ -272,6 +272,12 @@ func TestValidatePlan(t *testing.T) {
 		return p
 	}
 	bad := map[string]model.Plan{
+		"long return": mutate(func(p *model.Plan) {
+			p.Waypoints = []model.Waypoint{
+				{LatLon: model.FromLocal(p.Home, 4000, 0), AltM: 20},
+				{LatLon: model.FromLocal(p.Home, 8000, 0), AltM: 20},
+			}
+		}),
 		"far away":     mutate(func(p *model.Plan) { p.Home = model.LatLon{Lat: 53.5, Lon: -113.5} }),
 		"no waypoints": mutate(func(p *model.Plan) { p.Waypoints = nil }),
 		"high":         mutate(func(p *model.Plan) { p.Waypoints[1].AltM = 500 }),
@@ -503,6 +509,87 @@ func TestLostFinalAckIsRetried(t *testing.T) {
 	}
 }
 
+func TestCancelledContextSendsNothing(t *testing.T) {
+	b, f, ctx := setup(t)
+	connect(t, b, f)
+	time.Sleep(20 * time.Millisecond)
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := b.transfer(cancelled, BuildMission(model.DefaultPlan())); err == nil {
+		t.Fatal("cancelled transfer reported success")
+	}
+
+	buf := make([]byte, 2048)
+	f.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	for {
+		n, _, err := f.conn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		for _, fr := range mavlink.Parse(buf[:n]) {
+			if fr.MsgID == mavlink.MsgMissionCount {
+				t.Fatal("sent MISSION_COUNT, which can clear the stored mission")
+			}
+		}
+	}
+}
+
+func TestAcceptanceAfterArmingStillConfirms(t *testing.T) {
+	b, f, ctx := setup(t)
+	connect(t, b, f)
+
+	result := make(chan error, 1)
+	items := BuildMission(model.DefaultPlan())
+	go func() { result <- b.transfer(ctx, items) }()
+	time.Sleep(50 * time.Millisecond)
+	for i := range items {
+		f.request(i)
+	}
+	time.Sleep(50 * time.Millisecond)
+	f.armed = true
+	f.heartbeat()
+	time.Sleep(50 * time.Millisecond)
+	f.send(mavlink.MsgMissionAck, []byte{ownSysID, ownCompID, 0, 0, 0, 0, 0, 0})
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("a stored mission was reported as failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no result")
+	}
+}
+
+func TestUnknownFieldsDontShowOldValues(t *testing.T) {
+	v := identified(t)
+	gps := func(sats uint8) []byte {
+		p := make([]byte, 52)
+		p[28], p[29] = 3, sats
+		return p
+	}
+	global := func(heading uint16) []byte {
+		p := make([]byte, 28)
+		p[26], p[27] = byte(heading), byte(heading>>8)
+		return p
+	}
+	v.apply(frame(1, 1, mavlink.MsgGPSRawInt, gps(14)), 1000)
+	v.apply(frame(1, 1, mavlink.MsgGlobalPositionInt, global(9000)), 1000)
+	if s := v.snapshot(1000); !s.HasGPS || !s.HasHeading || s.HeadingDeg != 90 {
+		t.Fatalf("known: %+v", s)
+	}
+	v.apply(frame(1, 1, mavlink.MsgGPSRawInt, gps(mavlink.UnknownU8)), 1100)
+	v.apply(frame(1, 1, mavlink.MsgGlobalPositionInt, global(mavlink.UnknownU16)), 1100)
+	s := v.snapshot(1100)
+	if s.HasGPS || s.HasHeading {
+		t.Fatalf("unknown values shown as current: %+v", s)
+	}
+	if !s.HasFlightData || !s.HasPosition {
+		t.Fatalf("the rest of the message should still count: %+v", s)
+	}
+}
+
 func TestArmingDuringUploadStopsIt(t *testing.T) {
 	b, f, ctx := setup(t)
 	connect(t, b, f)
@@ -532,13 +619,14 @@ func TestHostAllowlist(t *testing.T) {
 		"127.0.0.1:8080":    true,
 		"localhost:8080":    true,
 		"[::1]:8080":        true,
-		"192.168.1.5:8080":  true, // the configured dashboard address
+		"192.168.1.5:8080":  true, // the configured public host, by name
+		"192.168.1.5:9000":  true,
 		"evil.example:8080": false,
 		"evil.example":      false,
 		"192.168.1.6:8080":  false,
 	}
 	for host, want := range cases {
-		if got := allowedHost(host, "192.168.1.5:8080"); got != want {
+		if got := allowedHost(host, []string{":8080", "192.168.1.5"}); got != want {
 			t.Errorf("%s = %v", host, got)
 		}
 	}

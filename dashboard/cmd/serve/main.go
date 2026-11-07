@@ -15,6 +15,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "address to serve the dashboard on")
 	dir := flag.String("dir", "web", "directory to serve")
 	mavlinkAddr := flag.String("mavlink", "", "UDP address to receive MAVLink on, e.g. 127.0.0.1:14552 (empty = simulation only)")
+	publicHost := flag.String("public-host", "", "name or IP the dashboard is reached by from other machines, if any")
 	flag.Parse()
 
 	mux := http.NewServeMux()
@@ -26,7 +27,7 @@ func main() {
 			log.Fatal(err)
 		}
 		go func() { log.Fatal(b.Run(context.Background())) }()
-		mux.Handle("/api/", b.Handler(*addr))
+		mux.Handle("/api/", b.Handler(*addr, *publicHost))
 		log.Printf("listening for MAVLink on udp %s", b.Addr())
 	}
 

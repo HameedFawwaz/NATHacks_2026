@@ -38,6 +38,8 @@ type vehicleState struct {
 	snap          model.Snapshot
 	gpsAt         int64 // when GPS_RAW_INT last arrived
 	globalAt      int64 // when GLOBAL_POSITION_INT last arrived
+	satsKnown     bool
+	headingKnown  bool
 	events        []model.Event
 	nextEventSeq  int
 }
@@ -156,7 +158,8 @@ func (v *vehicleState) applySysStatus(s mavlink.SysStatus, nowMs int64) {
 }
 
 func (v *vehicleState) applyGPS(g mavlink.GPSRawInt) {
-	if g.Satellites != mavlink.UnknownU8 {
+	v.satsKnown = g.Satellites != mavlink.UnknownU8
+	if v.satsKnown {
 		v.snap.Satellites = int(g.Satellites)
 	}
 	if g.FixType < mavlink.GPSFix2D {
@@ -174,7 +177,8 @@ func (v *vehicleState) applyGPS(g mavlink.GPSRawInt) {
 func (v *vehicleState) applyGlobalPosition(g mavlink.GlobalPositionInt) {
 	v.snap.AltM = g.RelativeAltM
 	v.snap.SpeedMS = math.Hypot(g.VNorth, g.VEast)
-	if g.HeadingCdeg != mavlink.UnknownU16 {
+	v.headingKnown = g.HeadingCdeg != mavlink.UnknownU16
+	if v.headingKnown {
 		v.snap.HeadingDeg = float64(g.HeadingCdeg) / 100
 	}
 	if g.Lat == 0 && g.Lon == 0 {
@@ -218,9 +222,10 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 
 	gpsFresh := v.gpsAt != 0 && nowMs-v.gpsAt <= model.StaleAfterMs
 	globalFresh := v.globalAt != 0 && nowMs-v.globalAt <= model.StaleAfterMs
-	s.HasGPS = s.Connected && gpsFresh
-	s.HasPosition = s.HasPosition && s.HasGPS
+	s.HasGPS = s.Connected && gpsFresh && v.satsKnown
+	s.HasPosition = s.HasPosition && s.Connected && gpsFresh
 	s.HasFlightData = s.Connected && globalFresh
+	s.HasHeading = s.HasFlightData && v.headingKnown
 	s.HasEstimate = s.HasEstimate && s.HasFlightData
 	return s
 }

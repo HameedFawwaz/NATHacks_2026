@@ -64,6 +64,9 @@ func ValidatePlan(plan model.Plan) error {
 		}
 		prev = w.LatLon
 	}
+	if d := model.DistanceM(prev, plan.Home); d > model.MaxLegM {
+		return fmt.Errorf("the last waypoint is %.0f km from home; was this plan made for somewhere else?", d/1000)
+	}
 	return nil
 }
 

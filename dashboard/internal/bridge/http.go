@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/model"
@@ -26,9 +28,9 @@ type Status struct {
 	Listen string `json:"listen"`
 }
 
-// Handler serves the bridge's API under /api/. dashboardAddr is the address the
-// page is served on.
-func (b *Bridge) Handler(dashboardAddr string) http.Handler {
+// Handler serves the bridge's API under /api/. allowedHosts are the names or
+// host:port pairs the dashboard is reached by, besides localhost.
+func (b *Bridge) Handler(allowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, Status{Listen: b.Addr().String()})
@@ -36,7 +38,7 @@ func (b *Bridge) Handler(dashboardAddr string) http.Handler {
 	mux.HandleFunc("GET /api/telemetry", b.serveTelemetry)
 	mux.HandleFunc("POST /api/mission", b.serveMission)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !allowedHost(r.Host, dashboardAddr) {
+		if !allowedHost(r.Host, allowedHosts) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
 			return
 		}
@@ -46,19 +48,16 @@ func (b *Bridge) Handler(dashboardAddr string) http.Handler {
 
 // allowedHost defeats DNS rebinding, where an attacker's domain resolves to this
 // machine so that its page counts as same-origin with the API.
-func allowedHost(host, dashboardAddr string) bool {
-	if host == dashboardAddr {
-		return true
-	}
+func allowedHost(host string, allowed []string) bool {
 	name, _, err := net.SplitHostPort(host)
 	if err != nil {
-		name = host
+		name = strings.Trim(host, "[]")
 	}
 	switch name {
 	case "localhost", "127.0.0.1", "::1":
 		return true
 	}
-	return false
+	return slices.Contains(allowed, host) || slices.Contains(allowed, name)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

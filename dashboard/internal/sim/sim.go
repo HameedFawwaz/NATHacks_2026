@@ -278,6 +278,7 @@ func (s *Sim) Snapshot() model.Snapshot {
 		Connected:     true,
 		HasPosition:   true,
 		HasFlightData: true,
+		HasHeading:    true,
 		HasGPS:        true,
 		Armed:         s.Flying(),
 		Mode:          s.mode(),

@@ -39,16 +39,23 @@ func await(promise js.Value) (js.Value, error) {
 	}
 }
 
-// detectBridge asks the page's server whether it runs a bridge. A plain static
-// server answers 404, which means simulation.
+// detectBridge asks the page's server whether it runs a bridge. Only a 404, from a
+// plain static server, means simulation. Any other failure stays in live mode and
+// shows as offline, so a broken bridge can't pass for a simulated flight or vice versa.
 func detectBridge() (listen string, ok bool) {
 	resp, err := await(js.Global().Call("fetch", "api/status"))
-	if err != nil || !resp.Get("ok").Bool() {
+	if err != nil {
+		return "", true
+	}
+	if resp.Get("status").Int() == 404 {
 		return "", false
+	}
+	if !resp.Get("ok").Bool() {
+		return "", true
 	}
 	body, err := await(resp.Call("json"))
 	if err != nil {
-		return "", false
+		return "", true
 	}
 	return body.Get("listen").String(), true
 }

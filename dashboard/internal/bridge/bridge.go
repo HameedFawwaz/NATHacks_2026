@@ -186,6 +186,11 @@ func (b *Bridge) UploadPlan(ctx context.Context, plan model.Plan) error {
 }
 
 func (b *Bridge) transfer(ctx context.Context, items []mavlink.MissionItem) error {
+	// Checked first because MISSION_COUNT alone can clear the stored mission.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	u := &upload{
 		items:    items,
 		progress: make(chan struct{}, 1),
@@ -272,7 +277,9 @@ func (b *Bridge) cancelUpload() {
 	b.cancelUploadLocked()
 }
 
-// cancelUploadLocked tells the vehicle to stop waiting for items.
+// cancelUploadLocked tells the vehicle to stop waiting for items. It's best effort:
+// ArduPilot ignores this and waits for its own timeout, which doesn't stop this
+// bridge starting a new transfer but can briefly refuse another ground station's.
 func (b *Bridge) cancelUploadLocked() {
 	b.sendLocked(mavlink.MsgMissionAck, mavlink.PackMissionAck(b.vehicle.sysID, b.vehicle.compID, mavlink.MissionCancelled))
 }
@@ -286,16 +293,18 @@ func (b *Bridge) handleMission(f mavlink.Frame) {
 	if f.MsgID != mavlink.MsgMissionRequest && f.MsgID != mavlink.MsgMissionRequestInt && f.MsgID != mavlink.MsgMissionAck {
 		return
 	}
-	if err := b.uploadBlockedLocked(); err != nil {
-		b.cancelUploadLocked()
-		u.finish(err)
-		return
-	}
 
 	switch f.MsgID {
 	case mavlink.MsgMissionRequest, mavlink.MsgMissionRequestInt:
 		seq, targetSys, targetComp, missionType := mavlink.DecodeMissionRequest(f.Payload)
 		if targetSys != ownSysID || targetComp != ownCompID || missionType != mavlink.MissionTypeMission {
+			return
+		}
+		// Only sending more is unsafe. An ack that arrives after arming can still
+		// confirm a mission that was fully stored before it.
+		if err := b.uploadBlockedLocked(); err != nil {
+			b.cancelUploadLocked()
+			u.finish(err)
 			return
 		}
 		// Items go out strictly in order. A request from further ahead can't belong
