@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NATHacks Operator Dashboard</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Operator Dashboard</div>
+    <nav class="tabs" role="tablist">
+      <button id="tab-fly" class="tab" role="tab">Fly</button>
+      <button id="tab-plan" class="tab" role="tab">Plan</button>
+    </nav>
+    <div class="vehicle">
+      <span class="pill" id="vehicle-armed"></span>
+      <span class="pill" id="vehicle-mode"></span>
+    </div>
+    <div class="sim-badge" title="Telemetry is generated in the browser. No drone is connected.">Simulated data</div>
+  </header>
+
+  <main class="layout">
+    <section class="map-pane">
+      <canvas id="map" aria-label="Map of the planned route and the drone's position"></canvas>
+      <div class="map-note">Offline map: grid only</div>
+      <button id="map-fit" class="btn map-fit">Fit route</button>
+
+      <div id="legend" class="legend">
+        <div><i class="key key-plan"></i>Planned route</div>
+        <div><i class="key key-reported"></i>GPS position</div>
+        <div><i class="key key-estimated"></i>Drone's own estimate</div>
+        <div><i class="key key-drift"></i>Disagreement</div>
+      </div>
+
+      <div id="plan-hint" class="plan-hint">Click the map to add a waypoint. Drag a waypoint to move it.</div>
+
+      <div id="instruments" class="instruments">
+        <div class="instrument"><label>Altitude</label><output id="i-alt"></output></div>
+        <div class="instrument"><label>Speed</label><output id="i-speed"></output></div>
+        <div class="instrument"><label>Heading</label><output id="i-heading"></output></div>
+        <div class="instrument"><label>Satellites</label><output id="i-sats"></output></div>
+        <div class="instrument"><label>GPS drift</label><output id="i-drift"></output></div>
+      </div>
+    </section>
+
+    <aside class="side" id="side-fly">
+      <div class="summary" id="summary">
+        <div class="summary-title" id="summary-title"></div>
+        <div class="summary-text" id="summary-text"></div>
+      </div>
+
+      <div class="actions">
+        <button id="flight-start" class="btn btn-primary">Start flight</button>
+        <button id="flight-reset" class="btn">Reset</button>
+      </div>
+
+      <h2>System health</h2>
+      <div id="health" class="health"></div>
+
+      <h2>Demo: inject a problem</h2>
+      <div id="scenarios" class="scenarios">
+        <button class="btn" data-scenario="0">None</button>
+        <button class="btn" data-scenario="1">GPS spoof</button>
+        <button class="btn" data-scenario="2">Link jam</button>
+        <button class="btn" data-scenario="3">Motor fault</button>
+      </div>
+
+      <h2>Events</h2>
+      <ol id="events" class="events"></ol>
+    </aside>
+
+    <aside class="side" id="side-plan" hidden>
+      <div class="plan-stats">
+        <div><label>Waypoints</label><output id="p-count"></output></div>
+        <div><label>Distance</label><output id="p-distance"></output></div>
+        <div><label>Est. time</label><output id="p-time"></output></div>
+      </div>
+
+      <div class="actions">
+        <button id="plan-fly" class="btn btn-primary">Fly this plan</button>
+        <button id="plan-clear" class="btn">Clear</button>
+      </div>
+
+      <h2>Route</h2>
+      <ol id="waypoints" class="waypoints"></ol>
+      <p id="waypoints-empty" class="empty">No waypoints yet. Click the map to add one.</p>
+    </aside>
+  </main>
+
+  <div id="load-status" class="load-status">Loading&hellip;</div>
+
+  <script src="wasm_exec.js"></script>
+  <script>
+    const go = new Go();
+    WebAssembly.instantiateStreaming(fetch("app.wasm"), go.importObject)
+      .then((result) => {
+        document.getElementById("load-status").remove();
+        go.run(result.instance);
+      })
+      .catch((err) => {
+        document.getElementById("load-status").textContent =
+          "The dashboard failed to load: " + err + ". Did you run `make build`?";
+      });
+  </script>
+</body>
+</html>
