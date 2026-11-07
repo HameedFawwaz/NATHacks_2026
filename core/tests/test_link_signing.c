@@ -19,8 +19,9 @@
 #include "core/crypto/link_signing.h"
 #include "core/mavlink/mavlink.h"
 
-/* Channels the test's "remote peer" uses; high enough not to collide with the connection's own (allocated from 0). */
-#define PEER_TX_CHAN 14
+/* Peer channels index this test file's private vendored channel array,
+ * separate from core_lib's shared channel array. */
+#define PEER_TX_CHAN 0
 #define PEER_RX_CHAN 15
 
 static const uint8_t KEY_A[32] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
@@ -296,6 +297,50 @@ static bool recv_and_verify(peer_t *p, uint8_t expected_msgid) {
     return false;
 }
 
+static void assert_frame(peer_t *p, uint8_t msgid, bool signed_frame, uint8_t seq) {
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    ssize_t n = -1;
+    for (int i = 0; i < 1000 && n < 0; i++) {
+        n = recv(p->fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n < 0) usleep(1000);
+    }
+    assert(n >= 12);
+    assert(buf[0] == 0xFD);
+    assert((buf[2] & 0x01) == (signed_frame ? 1 : 0));
+    assert(buf[4] == seq);
+    assert(buf[7] == msgid && buf[8] == 0 && buf[9] == 0);
+}
+
+static void test_connection_isolation(bool signed_first) {
+    core_mavlink_conn_t *first = open_conn(14571, signed_first ? KEY_A : NULL);
+    core_mavlink_conn_t *second = open_conn(14572, signed_first ? NULL : KEY_A);
+    core_mavlink_conn_t *signed_conn = signed_first ? first : second;
+    core_mavlink_conn_t *plain_conn = signed_first ? second : first;
+    peer_t ps, pp;
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    peer_init(&ps, signed_first ? 14571 : 14572, KEY_A, NULL);
+    send_bytes(&ps, buf, build_heartbeat(buf));
+    pump(signed_conn, 10);
+    peer_init(&pp, signed_first ? 14572 : 14571, NULL, NULL);
+    send_bytes(&pp, buf, build_heartbeat(buf));
+    pump(plain_conn, 10);
+
+    assert(core_mavlink_send_heartbeat(plain_conn));
+    assert_frame(&pp, MAVLINK_MSG_ID_HEARTBEAT, false, 0);
+    assert(core_mavlink_send_heartbeat(signed_conn));
+    assert_frame(&ps, MAVLINK_MSG_ID_HEARTBEAT, true, 0);
+    assert(core_mavlink_send_statustext(plain_conn, CORE_MAV_SEVERITY_INFO, "plain hello"));
+    assert_frame(&pp, MAVLINK_MSG_ID_STATUSTEXT, false, 1);
+    assert(core_mavlink_send_statustext(signed_conn, CORE_MAV_SEVERITY_INFO, "signed hello"));
+    assert_frame(&ps, MAVLINK_MSG_ID_STATUSTEXT, true, 1);
+
+    peer_close(&ps);
+    peer_close(&pp);
+    core_mavlink_conn_close(first);
+    core_mavlink_conn_close(second);
+    printf("  ok: connection signing isolation (signed first: %d)\n", signed_first);
+}
+
 static void test_outbound_signed(void) {
     core_mavlink_conn_t *conn = open_conn(14567, KEY_A);
     peer_t p;
@@ -386,6 +431,8 @@ static void test_key_helpers(void) {
 
 int main(void) {
     printf("test_link_signing:\n");
+    test_connection_isolation(true);
+    test_connection_isolation(false);
     test_key_helpers();
     test_signing_off_unchanged();
     test_signed_accepted();

@@ -12,11 +12,13 @@
 #include "core/common/time.h"
 
 /* MAVLink's per-channel parse buffers are indexed by chan, so each connection
- * gets its own channel to avoid cross-talk if more than one is ever open. */
+ * gets its own channel to avoid cross-talk if more than one is ever open.
+ * Channel 0 is pack-only scratch for vendored *_pack() helpers and must never
+ * have a connection's signing state attached. */
 static mavlink_channel_t allocate_channel(void) {
-    static int next_channel = 0;
-    mavlink_channel_t chan = (mavlink_channel_t)(next_channel % MAVLINK_COMM_NUM_BUFFERS);
-    next_channel++;
+    static unsigned next_channel = 1;
+    mavlink_channel_t chan = (mavlink_channel_t)next_channel;
+    next_channel = next_channel % (MAVLINK_COMM_NUM_BUFFERS - 1) + 1;
     return chan;
 }
 
