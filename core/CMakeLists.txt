@@ -29,5 +29,7 @@ add_library(core_lib STATIC ${CORE_LIB_SOURCES})
 add_executable(core_main src/main.c)
 target_link_libraries(core_main PRIVATE core_lib)
 
+add_subdirectory(tools)
+
 enable_testing()
 add_subdirectory(tests)
