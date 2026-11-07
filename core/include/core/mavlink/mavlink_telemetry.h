@@ -43,7 +43,9 @@ typedef struct {
     uint16_t eph;         /* GPS HDOP, 100 = 1.0 */
     uint16_t epv;         /* GPS VDOP, 100 = 1.0 */
     uint16_t vel_cms;
+    uint16_t cog_cdeg;    /* course over ground, centidegrees, UINT16_MAX = unknown */
     uint8_t satellites_visible;
+    uint64_t time_usec;   /* GPS receiver's own clock (usec since boot/epoch per receiver) - distinct from last_update_ms */
     uint64_t last_update_ms;
     bool valid;
 } core_gps_raw_t;
@@ -54,6 +56,19 @@ typedef struct {
     uint64_t last_update_ms;
     bool valid;
 } core_attitude_t;
+
+typedef struct {
+    float xacc_mps2, yacc_mps2, zacc_mps2; /* body-frame specific force, m/s^2 */
+    float xgyro_rps, ygyro_rps, zgyro_rps; /* body-frame angular rate, rad/s */
+    uint64_t last_update_ms;
+    bool valid;
+} core_imu_t; /* from SCALED_IMU2 */
+
+typedef struct {
+    float press_abs_hpa; /* absolute pressure, hPa */
+    uint64_t last_update_ms;
+    bool valid;
+} core_baro_t; /* from SCALED_PRESSURE */
 
 typedef struct {
     uint8_t rssi;
@@ -72,6 +87,8 @@ typedef struct {
     core_global_position_t global_position;
     core_gps_raw_t gps_raw;
     core_attitude_t attitude;
+    core_imu_t imu;
+    core_baro_t baro;
     core_radio_status_t radio_status;
 } core_telemetry_t;
 
