@@ -83,7 +83,12 @@ unsigned link itself). Both ends must hold the same key.
 
 ```c
 core_mavlink_conn_config_t cfg = { /* ... as before ... */ };
-cfg.signing_enabled = core_signing_key_load_from_env(cfg.signing_key); /* CORE_SIGNING_KEY_FILE=signing.key */
+/* CORE_SIGNING_KEY_FILE=signing.key; a bad configured key must fail closed. */
+core_signing_env_result_t result = core_signing_key_load_from_env(cfg.signing_key);
+if (result == CORE_SIGNING_ENV_ERROR) {
+    return EXIT_FAILURE;  /* in main; include <stdlib.h> */
+}
+cfg.signing_enabled = (result == CORE_SIGNING_ENV_LOADED); /* UNSET leaves it off */
 cfg.signing_link_id = 0;   /* unique per link if you run several */
 ```
 

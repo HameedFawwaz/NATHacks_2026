@@ -429,11 +429,46 @@ static void test_key_helpers(void) {
     printf("  ok: key helpers\n");
 }
 
+static void test_key_environment(void) {
+    const char *old = getenv("CORE_SIGNING_KEY_FILE");
+    char *saved = old ? strdup(old) : NULL;
+    assert(!old || saved);
+    uint8_t key[CORE_SIGNING_KEY_LEN];
+    assert(unsetenv("CORE_SIGNING_KEY_FILE") == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_UNSET);
+    assert(setenv("CORE_SIGNING_KEY_FILE", "", 1) == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_ERROR);
+
+    char path[] = "/tmp/core_signing_envXXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    assert(write(fd, "bad key\n", 8) == 8);
+    assert(close(fd) == 0);
+    assert(setenv("CORE_SIGNING_KEY_FILE", path, 1) == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_ERROR);
+    assert(unlink(path) == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_ERROR);
+    assert(core_signing_key_generate_file(path));
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_LOADED);
+    uint8_t expected[CORE_SIGNING_KEY_LEN];
+    assert(core_signing_key_load_file(path, expected));
+    assert(memcmp(key, expected, sizeof(key)) == 0);
+    assert(unlink(path) == 0);
+    if (saved) {
+        assert(setenv("CORE_SIGNING_KEY_FILE", saved, 1) == 0);
+        free(saved);
+    } else {
+        assert(unsetenv("CORE_SIGNING_KEY_FILE") == 0);
+    }
+    printf("  ok: environment distinguishes unset, loaded, and unusable keys\n");
+}
+
 int main(void) {
     printf("test_link_signing:\n");
     test_connection_isolation(true);
     test_connection_isolation(false);
     test_key_helpers();
+    test_key_environment();
     test_signing_off_unchanged();
     test_signed_accepted();
     test_unsigned_rejected();

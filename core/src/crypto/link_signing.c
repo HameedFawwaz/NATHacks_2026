@@ -138,10 +138,10 @@ bool core_signing_key_generate_file(const char *path) {
     return ok;
 }
 
-bool core_signing_key_load_from_env(uint8_t key_out[CORE_SIGNING_KEY_LEN]) {
+core_signing_env_result_t core_signing_key_load_from_env(uint8_t key_out[CORE_SIGNING_KEY_LEN]) {
     const char *path = getenv("CORE_SIGNING_KEY_FILE");
-    if (!path || path[0] == '\0') {
-        return false;
+    if (!path) {
+        return CORE_SIGNING_ENV_UNSET;
     }
-    return core_signing_key_load_file(path, key_out);
+    return core_signing_key_load_file(path, key_out) ? CORE_SIGNING_ENV_LOADED : CORE_SIGNING_ENV_ERROR;
 }
