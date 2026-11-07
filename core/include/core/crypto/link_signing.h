@@ -32,6 +32,13 @@ bool core_signing_key_load_file(const char *path, uint8_t key_out[CORE_SIGNING_K
 /* Fills key_out from the OS CSPRNG (/dev/urandom). */
 bool core_signing_key_generate(uint8_t key_out[CORE_SIGNING_KEY_LEN]);
 
+/* SHA-256 matching MAVProxy signing setup. Requires a nonempty passphrase
+ * containing only printable ASCII 0x21..0x7e (no whitespace or controls). */
+bool core_signing_key_from_passphrase(const char *passphrase, uint8_t key_out[CORE_SIGNING_KEY_LEN]);
+
+/* Writes a key as hex, mode 0600, refusing to overwrite an existing file. */
+bool core_signing_key_write_file(const char *path, const uint8_t key[CORE_SIGNING_KEY_LEN]);
+
 /* Generates a fresh key and writes it to path with mode 0600. Refuses to overwrite an existing file. */
 bool core_signing_key_generate_file(const char *path);
 

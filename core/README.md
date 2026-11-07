@@ -69,10 +69,31 @@ an eavesdropper, but commands and alerts cannot be forged or replayed.
 
 ### Provisioning a key
 
+For MAVProxy/ArduPilot, derive the key from the **same nonempty ASCII
+passphrase** used in MAVProxy's `signing setup <same passphrase>`. Only printable
+ASCII bytes `0x21..0x7e` are accepted: no whitespace or control characters.
+MAVProxy splits its command line on whitespace and uses only the first argument,
+so a multiword passphrase would otherwise produce mismatched keys.
+
+```sh
+./build/tools/signing_keygen signing.key --from-passphrase
+# Enter the passphrase on stdin (one line); do not pass it as a command argument.
 ```
-./build/tools/signing_keygen signing.key          # 32 random bytes, hex, mode 0600
-./build/tools/signing_keygen signing.key --print-hex   # (new file) also print the hex
+
+This writes SHA-256 of the passphrase bytes, matching MAVProxy exactly. The
+trailing line ending is stripped. Use a strong, unique passphrase and a private
+terminal: stdin is not hidden when entered interactively.
+
+Random keys are for links where **both ends are our own code**:
+
+```sh
+./build/tools/signing_keygen signing.key              # random key, hex file, mode 0600
+./build/tools/signing_keygen other.key --print-hex     # also expose raw key on stdout
 ```
+
+`--print-hex` is not a MAVProxy provisioning command: MAVProxy hashes its
+passphrase argument and cannot take a raw hex key. It can be combined with
+`--from-passphrase`, but avoid exposing key material unnecessarily.
 
 `signing_keygen` refuses to overwrite an existing key. `*.key` is gitignored -
 never commit a key. Copy the same file to the ground station and the companion
@@ -102,7 +123,7 @@ indicator.
 
 ### Rotation
 
-1. Generate a new key with `signing_keygen`.
+1. Generate a new key with `signing_keygen` (use `--from-passphrase` for MAVProxy).
 2. Stop the drone link, copy the new key to both ends, restart both.
 3. Delete the old key file.
 
@@ -114,9 +135,10 @@ suspected key exposure and before each event/flight day.
 The autopilot must be given the same key so it accepts our signed commands
 (and signs its telemetry). ArduPilot stores it via the `SETUP_SIGNING` MAVLink
 message; MAVProxy's `signing setup <passphrase>` command does this, deriving
-the 32-byte key as the SHA-256 of the passphrase. **Not yet verified against
-our SITL setup** - until it is, run the autopilot link unsigned and sign only
-the companion<->GCS hop, or confirm the key handshake first.
+the 32-byte key as the SHA-256 of the ASCII passphrase. Use the passphrase route
+above, and provision over a trusted local link, not an exposed unsigned link.
+**Not yet verified against our SITL setup**: confirm the handshake and signature
+verification before flight; do not silently fall back to an unsigned autopilot link.
 
 ## Dashboard
 

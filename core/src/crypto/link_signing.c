@@ -108,11 +108,18 @@ bool core_signing_key_generate(uint8_t key_out[CORE_SIGNING_KEY_LEN]) {
 }
 
 bool core_signing_key_generate_file(const char *path) {
-    if (!path) {
-        return false;
-    }
     uint8_t key[CORE_SIGNING_KEY_LEN];
     if (!core_signing_key_generate(key)) {
+        return false;
+    }
+    bool ok = core_signing_key_write_file(path, key);
+    volatile uint8_t *k = key;
+    for (size_t i = 0; i < sizeof(key); i++) k[i] = 0;
+    return ok;
+}
+
+bool core_signing_key_write_file(const char *path, const uint8_t key[CORE_SIGNING_KEY_LEN]) {
+    if (!path || !key) {
         return false;
     }
 
@@ -126,15 +133,21 @@ bool core_signing_key_generate_file(const char *path) {
     char hex[2 * CORE_SIGNING_KEY_LEN + 2];
     core_signing_key_to_hex(key, hex);
     hex[2 * CORE_SIGNING_KEY_LEN] = '\n';
-    ssize_t w = write(fd, hex, sizeof(hex) - 1);
-    bool ok = (w == (ssize_t)(sizeof(hex) - 1));
-    close(fd);
+    size_t written = 0;
+    while (written < sizeof(hex) - 1) {
+        ssize_t w = write(fd, hex + written, sizeof(hex) - 1 - written);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) break;
+        written += (size_t)w;
+    }
+    bool ok = (written == sizeof(hex) - 1);
+    if (close(fd) != 0) ok = false;
     if (!ok) {
         CORE_LOG_ERROR("failed writing key file %s", path);
         unlink(path);
     }
-    volatile uint8_t *k = key;
-    for (size_t i = 0; i < sizeof(key); i++) k[i] = 0;
+    volatile char *p = hex;
+    for (size_t i = 0; i < sizeof(hex); i++) p[i] = 0;
     return ok;
 }
 
