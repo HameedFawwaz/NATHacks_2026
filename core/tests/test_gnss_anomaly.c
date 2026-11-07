@@ -189,7 +189,10 @@ static void test_slow_drift(void) {
 
     const uint32_t imu_dt_ms = 20;
     const uint32_t gps_every_n_ticks = 10;
-    const float drift_rate_mps = 2.0f; /* applied to reported position only */
+    /* Needs to clear the long-horizon warn threshold (20m) within one
+     * 8s re-anchor window (32m at this rate) while staying under the
+     * short-horizon warn threshold (10m) within its own 1.5s window (6m). */
+    const float drift_rate_mps = 4.0f; /* applied to reported position only */
 
     uint32_t flags_seen = 0;
     double drift_m = 0.0;

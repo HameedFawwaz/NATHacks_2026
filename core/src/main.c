@@ -98,10 +98,35 @@ int main(int argc, char **argv) {
     uint64_t last_own_heartbeat_sent_ms = 0;
     uint64_t last_publish_ms = 0;
     uint64_t last_print_ms = 0;
+    uint64_t last_rate_request_ms = 0;
     uint32_t prev_flags = 0;
+
+    /* SITL/MAVProxy's default forwarding rate for SCALED_IMU2 is only a few
+     * Hz - far too coarse for the dead-reckoning filter to integrate
+     * accurately during real maneuvering flight. Re-requested periodically
+     * (not just once) so it survives a reconnect to a flight controller
+     * that reset its stream rates.
+     *
+     * Deliberately NOT boosting GPS_RAW_INT: the underlying simulated GPS
+     * only refreshes at its own native rate (commonly 5Hz in SITL), so
+     * requesting it faster just makes the autopilot re-send the same cached
+     * fix with an unchanged time_usec to fill the gap - which our replay/
+     * timestamp check correctly (if confusingly, self-inflictedly) flags as
+     * suspicious, since a non-advancing timestamp is indistinguishable from
+     * a genuine stale replay. Only request a rate at or below what the
+     * underlying sensor can actually produce. */
+    const uint32_t MSGID_SCALED_PRESSURE = 29;
+    const uint32_t MSGID_SCALED_IMU2 = 116;
 
     while (g_running) {
         core_mavlink_conn_poll(conn);
+
+        uint64_t rate_now = core_now_ms();
+        if (rate_now - last_rate_request_ms >= 5000) {
+            core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);      /* 50Hz */
+            core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000); /* 10Hz */
+            last_rate_request_ms = rate_now;
+        }
 
         core_telemetry_t telemetry;
         core_mavlink_conn_get_telemetry(conn, &telemetry);

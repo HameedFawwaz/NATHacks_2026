@@ -51,6 +51,19 @@ flag can't be averaged away, then published as `nav_trust` with asymmetric slew 
 `core_main` is the real integration loop: connect → detect → publish, against a live
 flight controller.
 
+**Known limitation**: the long-horizon KF divergence check was calibrated against real
+flight (`core/sitl/fly_square.py`, not just synthetic/stationary data) and can still
+occasionally false-positive for a few seconds during normal maneuvering. Root cause:
+this filter has no accel/gyro bias calibration, and in testing only received ~4Hz IMU
+samples (SITL/MAVProxy didn't honor our `MAV_CMD_SET_MESSAGE_INTERVAL` request to speed
+`SCALED_IMU2` up to 50Hz — see `core_mavlink_request_message_interval` in
+`core/include/core/mavlink/mavlink_send.h`), so integration error compounds faster than a
+properly-sampled filter would see. Thresholds were loosened and the long horizon shortened
+(15s → 8s) based on measured real-flight divergence, which shortened the false-positive
+window substantially but didn't eliminate it. Follow-up: figure out why the rate request
+isn't taking effect (possibly a MAVProxy pass-through quirk, worth checking against a
+direct SITL connection without MAVProxy in between), or add basic bias estimation.
+
 ## Testing against ArduPilot SITL
 
 `tools/mavlink_monitor` is a standalone connectivity check: it opens a MAVLink
@@ -101,6 +114,23 @@ sim_vehicle.py -v ArduCopter --out=udp:127.0.0.1:14551
 In every case, watch for the EKF-divergence sub-score (`ekf=`) - since the proxy only
 mutates `GPS_RAW_INT`, the flight controller's own `GLOBAL_POSITION_INT` keeps reflecting
 ground truth, making that check the most durable signal for a sustained attack.
+
+### Flying the vehicle for a real (non-stationary) test
+
+A stationary SITL instance doesn't exercise the IMU-based filter or the KF-divergence
+checks (nothing is moving for them to track) — some scenarios above only show a real
+signal with the vehicle actually flying. `core/sitl/fly_square.py` (Python + pymavlink)
+arms, takes off, and flies an autonomous square via GUIDED-mode
+`SET_POSITION_TARGET_LOCAL_NED` commands:
+
+```
+sim_vehicle.py -v ArduCopter --out=udp:127.0.0.1:14551 --out=udp:127.0.0.1:14553
+python3 core/sitl/fly_square.py                     # defaults to udpin:0.0.0.0:14553
+```
+
+It talks directly to the vehicle (arm/mode/takeoff/position commands), separately from
+`core_main`/`gnss_spoof_proxy`, which only observe telemetry — run it independently,
+before or during a `core_main` session on a different port, with no conflict.
 
 ## Dashboard
 

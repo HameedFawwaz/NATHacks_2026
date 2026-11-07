@@ -4,13 +4,27 @@ void core_nav_config_default(core_nav_config_t *cfg) {
     cfg->max_plausible_speed_mps = 35.0f;
     cfg->jump_hard_reject_m = 30.0f;
 
+    /*
+     * Thresholds below are calibrated against real ArduCopter SITL flight
+     * (core/sitl/fly_square.py), not just synthetic/stationary data: the
+     * simplified filter (no accel/gyro bias calibration, small-angle Euler
+     * integration, and in this environment only ~4Hz IMU samples rather
+     * than a proper 50Hz+ - SITL/MAVProxy didn't honor our
+     * SET_MESSAGE_INTERVAL request to speed it up) accumulates roughly
+     * bias-driven, ~quadratically-growing divergence during normal
+     * maneuvering: under ~2m through 10s, but growing fast after that
+     * (~16m by 15s). A long horizon that lets that compound unchecked was
+     * producing false positives on completely normal flight - shortening it
+     * has an outsized benefit precisely because the error grows with t^2,
+     * not linearly.
+     */
     cfg->dr_short_horizon_ms = 1500;
-    cfg->dr_short_divergence_warn_m = 8.0f;
+    cfg->dr_short_divergence_warn_m = 10.0f; /* real flight briefly touched ~9m */
     cfg->dr_short_divergence_reject_m = 20.0f;
 
-    cfg->dr_long_horizon_ms = 15000;
-    cfg->dr_long_divergence_warn_m = 15.0f;
-    cfg->dr_long_divergence_reject_m = 40.0f;
+    cfg->dr_long_horizon_ms = 8000; /* was 15000 - see above */
+    cfg->dr_long_divergence_warn_m = 20.0f;
+    cfg->dr_long_divergence_reject_m = 50.0f;
 
     cfg->ekf_divergence_warn_m = 10.0f;
     cfg->ekf_divergence_reject_m = 25.0f;

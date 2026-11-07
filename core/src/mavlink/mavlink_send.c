@@ -75,6 +75,19 @@ bool core_mavlink_send_named_value_float(core_mavlink_conn_t *conn, const char *
     return core_mavlink_internal_send_raw(conn, &msg);
 }
 
+bool core_mavlink_request_message_interval(core_mavlink_conn_t *conn, uint32_t message_id, int32_t interval_us) {
+    if (!conn) {
+        return false;
+    }
+
+    mavlink_message_t msg;
+    mavlink_msg_command_long_pack(conn->cfg.system_id, conn->cfg.component_id, &msg,
+                                   1, MAV_COMP_ID_AUTOPILOT1, /* single-vehicle-SITL simplification */
+                                   MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                                   (float)message_id, (float)interval_us, 0, 0, 0, 0, 0);
+    return core_mavlink_internal_send_raw(conn, &msg);
+}
+
 bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trust_score_t *score) {
     if (!conn || !score) {
         return false;

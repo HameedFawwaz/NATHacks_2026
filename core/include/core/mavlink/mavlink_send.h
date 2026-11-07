@@ -31,4 +31,18 @@ bool core_mavlink_send_named_value_float(core_mavlink_conn_t *conn, const char *
 /* Publishes score as four NAMED_VALUE_FLOAT messages: TRUST, TRUST_NAV, TRUST_LNK, TRUST_CRY. */
 bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trust_score_t *score);
 
+/*
+ * Requests the flight controller stream a given message (by its MAVLink
+ * message ID, e.g. 116 for SCALED_IMU2) at a given interval. interval_us <= 0
+ * requests the default rate; a positive value requests that exact interval.
+ * Targets system/component 1,1 (MAV_COMP_ID_AUTOPILOT1) - a documented
+ * single-vehicle-SITL simplification, not a general multi-vehicle API.
+ *
+ * Detection logic (nav/, link/, ...) needs IMU/baro data at a real sample
+ * rate to do dead-reckoning accurately - SITL/MAVProxy's default forwarding
+ * rate for SCALED_IMU2 is only a few Hz, far too coarse for that. Callers
+ * should request at least 50Hz (interval_us=20000) for SCALED_IMU2.
+ */
+bool core_mavlink_request_message_interval(core_mavlink_conn_t *conn, uint32_t message_id, int32_t interval_us);
+
 #endif /* CORE_MAVLINK_SEND_H */
