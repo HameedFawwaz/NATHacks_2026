@@ -27,7 +27,12 @@ core/
 git submodule update --init --recursive   # first time, pulls in MAVLink headers
 cmake -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
+
+`mavlink/` and `common/` are implemented (connection handling, telemetry decode, send
+helpers, shared trust-score struct — see `include/core/mavlink/mavlink.h` for the public
+API). `nav/`, `link/`, `autonomy/`, `crypto/` are still empty, scoped to their own issues.
 
 ## Dashboard
 
