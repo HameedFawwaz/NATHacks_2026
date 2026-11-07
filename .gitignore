@@ -1,0 +1,18 @@
+# C build artifacts
+core/build/
+*.o
+*.obj
+*.out
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
