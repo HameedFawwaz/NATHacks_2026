@@ -2,9 +2,22 @@
 #define CORE_MAVLINK_SEND_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "core/common/trust_score.h"
 #include "core/mavlink/mavlink_connection.h"
+
+/* ArduPilot-dialect command id, for matching against core_command_ack_t. */
+#define CORE_MAV_CMD_SET_EKF_SOURCE_SET 42007
+
+/* Mirrors MAV_RESULT, for reading core_command_ack_t. */
+typedef enum {
+    CORE_MAV_RESULT_ACCEPTED = 0,
+    CORE_MAV_RESULT_TEMPORARILY_REJECTED = 1,
+    CORE_MAV_RESULT_DENIED = 2,
+    CORE_MAV_RESULT_UNSUPPORTED = 3,
+    CORE_MAV_RESULT_FAILED = 4
+} core_mav_result_t;
 
 /* Mirrors MAV_SEVERITY_* without exposing the vendored enum. */
 typedef enum {
@@ -28,7 +41,19 @@ bool core_mavlink_send_statustext(core_mavlink_conn_t *conn, core_mav_severity_t
 /* name longer than MAVLink's NAMED_VALUE_FLOAT limit (10 bytes) is truncated. */
 bool core_mavlink_send_named_value_float(core_mavlink_conn_t *conn, const char *name, float value);
 
-/* Publishes score as four NAMED_VALUE_FLOAT messages: TRUST, TRUST_NAV, TRUST_LNK, TRUST_CRY. */
+/* Publishes score as five NAMED_VALUE_FLOAT messages: TRUST, TRUST_NAV, TRUST_LNK, TRUST_CRY, TRUST_HW. */
 bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trust_score_t *score);
+
+/*
+ * Commands to the autopilot. These also return false until a heartbeat has
+ * identified the vehicle. true only means the command was sent: confirm the
+ * mode from the heartbeat's custom_mode, and the source set from command_ack.
+ */
+
+/* MAV_CMD_DO_SET_MODE. custom_mode is firmware-specific, e.g. ArduCopter's LOITER = 5. */
+bool core_mavlink_send_set_mode(core_mavlink_conn_t *conn, uint32_t custom_mode);
+
+/* MAV_CMD_SET_EKF_SOURCE_SET: selects ArduPilot's EK3_SRC<source_set>_* parameters (1-3). */
+bool core_mavlink_send_set_ekf_source_set(core_mavlink_conn_t *conn, uint8_t source_set);
 
 #endif /* CORE_MAVLINK_SEND_H */

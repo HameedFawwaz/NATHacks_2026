@@ -1,0 +1,28 @@
+# Gives ArduCopter SITL a non-GPS source set for autonomy's GNSS failover.
+# Source set 1 stays the stock GPS setup; set 2 is optical flow plus rangefinder.
+
+# Simulated optical flow and rangefinder
+SIM_FLOW_ENABLE 1
+FLOW_TYPE 10
+RNGFND1_TYPE 1
+RNGFND1_PIN 0
+RNGFND1_SCALING 12.12
+# Range limits were renamed between ArduPilot releases; each version ignores the other's.
+RNGFND1_MIN_CM 0
+RNGFND1_MAX_CM 4000
+RNGFND1_MIN 0
+RNGFND1_MAX 40
+
+# Source set 2: flow velocity, no absolute horizontal position
+EK3_SRC2_POSXY 0
+EK3_SRC2_VELXY 5
+EK3_SRC2_POSZ 1
+EK3_SRC2_VELZ 0
+EK3_SRC2_YAW 1
+
+# Only fuse velocity from the active set, so a spoofed GPS stops influencing the EKF
+EK3_SRC_OPTIONS 0
+
+# No dataflash logs: the file backend hits a floating-point trap in macOS arm64
+# SITL builds of Copter-4.5, and the scenarios only need autonomy's own log.
+LOG_BACKEND_TYPE 0

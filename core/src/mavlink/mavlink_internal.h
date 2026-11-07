@@ -33,6 +33,9 @@ struct core_mavlink_conn {
     uint64_t last_reconnect_attempt_ms;
 
     core_telemetry_t telemetry;
+
+    uint8_t vehicle_sysid;  /* from the autopilot's heartbeat, 0 = not seen yet */
+    uint8_t vehicle_compid;
 };
 
 /* Packs msg's bytes and sends them to the known/learned peer. Returns false (and logs) on failure. */

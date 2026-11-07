@@ -1,2 +1,5 @@
 add_executable(mavlink_monitor mavlink_monitor.c)
 target_link_libraries(mavlink_monitor PRIVATE core_lib)
+
+add_executable(autonomy_runner autonomy_runner.c)
+target_link_libraries(autonomy_runner PRIVATE core_lib)

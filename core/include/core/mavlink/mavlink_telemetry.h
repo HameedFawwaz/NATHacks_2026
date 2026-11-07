@@ -14,6 +14,7 @@
  * consumers can judge freshness themselves.
  */
 
+/* Only the autopilot's heartbeat lands here; GCS and companion heartbeats are ignored. */
 typedef struct {
     uint8_t type;           /* MAV_TYPE */
     uint8_t autopilot;      /* MAV_AUTOPILOT */
@@ -67,12 +68,21 @@ typedef struct {
     bool valid;
 } core_radio_status_t;
 
+/* The most recent COMMAND_ACK; a newer ack for any command overwrites it. */
+typedef struct {
+    uint16_t command;  /* MAV_CMD */
+    uint8_t result;    /* MAV_RESULT */
+    uint64_t last_update_ms;
+    bool valid;
+} core_command_ack_t;
+
 typedef struct {
     core_heartbeat_t heartbeat;
     core_global_position_t global_position;
     core_gps_raw_t gps_raw;
     core_attitude_t attitude;
     core_radio_status_t radio_status;
+    core_command_ack_t command_ack;
 } core_telemetry_t;
 
 #endif /* CORE_MAVLINK_TELEMETRY_H */
