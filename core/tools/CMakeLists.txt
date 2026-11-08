@@ -3,3 +3,6 @@ target_link_libraries(mavlink_monitor PRIVATE core_lib)
 
 add_executable(autonomy_runner autonomy_runner.c)
 target_link_libraries(autonomy_runner PRIVATE core_lib)
+
+add_executable(signing_keygen signing_keygen.c)
+target_link_libraries(signing_keygen PRIVATE core_lib)

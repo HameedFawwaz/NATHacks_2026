@@ -9,3 +9,7 @@ add_test(NAME test_mavlink_loopback COMMAND test_mavlink_loopback)
 add_executable(test_autonomy test_autonomy.c)
 target_link_libraries(test_autonomy PRIVATE core_lib)
 add_test(NAME test_autonomy COMMAND test_autonomy)
+
+add_executable(test_link_signing test_link_signing.c)
+target_link_libraries(test_link_signing PRIVATE core_lib)
+add_test(NAME test_link_signing COMMAND test_link_signing)

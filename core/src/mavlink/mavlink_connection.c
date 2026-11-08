@@ -12,11 +12,13 @@
 #include "core/common/time.h"
 
 /* MAVLink's per-channel parse buffers are indexed by chan, so each connection
- * gets its own channel to avoid cross-talk if more than one is ever open. */
+ * gets its own channel to avoid cross-talk if more than one is ever open.
+ * Channel 0 is pack-only scratch for vendored *_pack() helpers and must never
+ * have a connection's signing state attached. */
 static mavlink_channel_t allocate_channel(void) {
-    static int next_channel = 0;
-    mavlink_channel_t chan = (mavlink_channel_t)(next_channel % MAVLINK_COMM_NUM_BUFFERS);
-    next_channel++;
+    static unsigned next_channel = 1;
+    mavlink_channel_t chan = (mavlink_channel_t)next_channel;
+    next_channel = next_channel % (MAVLINK_COMM_NUM_BUFFERS - 1) + 1;
     return chan;
 }
 
@@ -106,6 +108,8 @@ core_mavlink_conn_t *core_mavlink_conn_open(const core_mavlink_conn_config_t *cf
         return NULL;
     }
 
+    core_mavlink_internal_signing_attach(conn);
+
     conn->state = CORE_MAVLINK_CONN_CONNECTING;
     conn->last_reconnect_attempt_ms = core_now_ms();
     return conn;
@@ -118,6 +122,7 @@ void core_mavlink_conn_close(core_mavlink_conn_t *conn) {
     if (conn->sock_fd >= 0) {
         close(conn->sock_fd);
     }
+    core_mavlink_internal_signing_detach(conn);
     free(conn);
 }
 
@@ -179,7 +184,9 @@ int core_mavlink_conn_poll(core_mavlink_conn_t *conn) {
 
         for (ssize_t i = 0; i < n; i++) {
             mavlink_message_t msg;
-            if (mavlink_parse_char(conn->chan, buf[i], &msg, &conn->parse_status)) {
+            uint8_t got_msg = mavlink_parse_char(conn->chan, buf[i], &msg, &conn->parse_status);
+            core_mavlink_internal_signing_account(conn, got_msg != 0);
+            if (got_msg) {
                 decoded++;
                 conn->last_rx_ms = now;
                 if (conn->state == CORE_MAVLINK_CONN_CONNECTING) {

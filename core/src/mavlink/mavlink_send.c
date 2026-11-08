@@ -17,6 +17,25 @@ bool core_mavlink_internal_send_raw(core_mavlink_conn_t *conn, const mavlink_mes
         return false;
     }
 
+    /*
+     * The vendored *_pack() helpers always finalize on MAVLINK_COMM_0, so
+     * messages arrive here unsigned. Always re-finalize against this
+     * connection's channel for its own sequence number and signing state.
+     */
+    const mavlink_msg_entry_t *info = mavlink_get_msg_entry(msg->msgid);
+    if (!info) {
+        CORE_LOG_WARN("mavlink send failed: unknown message id %u", (unsigned)msg->msgid);
+        return false;
+    }
+    mavlink_message_t finalized_msg = *msg;
+    mavlink_status_t *chan_status = mavlink_get_channel_status(conn->chan);
+    if (mavlink_finalize_message_buffer(&finalized_msg, msg->sysid, msg->compid, chan_status,
+                                        info->min_msg_len, msg->len, info->crc_extra) == 0) {
+        CORE_LOG_WARN("mavlink send failed: could not finalize message");
+        return false;
+    }
+    msg = &finalized_msg;
+
     uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = mavlink_msg_to_send_buffer(buffer, msg);
 
