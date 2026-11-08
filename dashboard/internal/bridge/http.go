@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -28,17 +29,32 @@ type Status struct {
 	Listen string `json:"listen"`
 }
 
-// Handler serves the bridge's API under /api/. allowedHosts are the names or
-// host:port pairs the dashboard is reached by, besides localhost.
-func (b *Bridge) Handler(allowedHosts ...string) http.Handler {
+// HandlerOptions configures access to the bridge API.
+type HandlerOptions struct {
+	// AllowedHosts are names or host:port pairs used besides localhost.
+	AllowedHosts []string
+	// AllowRemoteUpload permits unauthenticated uploads from non-loopback clients.
+	AllowRemoteUpload bool
+}
+
+// Handler serves the bridge's API under /api/. Uploads are loopback-only unless
+// explicitly enabled; telemetry remains accessible to remote clients.
+func (b *Bridge) Handler(options HandlerOptions) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, Status{Listen: b.Addr().String()})
 	})
 	mux.HandleFunc("GET /api/telemetry", b.serveTelemetry)
-	mux.HandleFunc("POST /api/mission", b.serveMission)
+	mux.HandleFunc("POST /api/mission", func(w http.ResponseWriter, r *http.Request) {
+		client, err := netip.ParseAddrPort(r.RemoteAddr)
+		if err != nil || (!options.AllowRemoteUpload && !client.Addr().Unmap().IsLoopback()) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "mission uploads are localhost-only; enable -allow-remote-upload on the server only on a trusted network (no authentication)"})
+			return
+		}
+		b.serveMission(w, r)
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !allowedHost(r.Host, allowedHosts) {
+		if !allowedHost(r.Host, options.AllowedHosts) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
 			return
 		}
