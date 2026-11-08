@@ -76,11 +76,15 @@ typedef struct {
  * time replay activates - NOT recomputed from the (still-growing) ring
  * buffer on every call, otherwise the "replayed" window would just slide
  * forward in lockstep with real time and never actually replay anything
- * stale. */
+ * stale. The frozen window's samples are COPIED here (not referenced by
+ * index into the live ring), since replay_ring_push keeps overwriting the
+ * ring's contents while a replay is in progress (capacity 256 @ 5Hz =
+ * 51.2s) - without the copy, a long-running replay would silently start
+ * mixing in newer, non-frozen data once the ring wraps around. */
 typedef struct {
     bool frozen;
-    int window_start;
-    int window_count;
+    mavlink_gps_raw_int_t snapshot[REPLAY_BUFFER_CAPACITY];
+    int snapshot_count;
     int play_idx;
 } replay_playback_t;
 
@@ -246,18 +250,22 @@ static bool apply_replay(mavlink_gps_raw_int_t *gps, double elapsed_s, const pro
         int newest_idx = (ring->write_idx - 1 + REPLAY_BUFFER_CAPACITY) % REPLAY_BUFFER_CAPACITY;
         int span = newest_idx - window_start;
         if (span < 0) span += REPLAY_BUFFER_CAPACITY;
-        playback->window_start = window_start;
-        playback->window_count = span + 1;
+        int window_count = span + 1;
+
+        for (int i = 0; i < window_count; i++) {
+            int src_idx = (window_start + i) % REPLAY_BUFFER_CAPACITY;
+            playback->snapshot[i] = ring->fixes[src_idx];
+        }
+        playback->snapshot_count = window_count;
         playback->play_idx = 0;
         playback->frozen = true;
     }
 
-    int idx = (playback->window_start + (playback->play_idx % playback->window_count) + REPLAY_BUFFER_CAPACITY) %
-              REPLAY_BUFFER_CAPACITY;
+    int idx = playback->play_idx % playback->snapshot_count;
     playback->play_idx = playback->play_idx + 1;
 
-    uint64_t original_time_usec = ring->fixes[idx].time_usec;
-    *gps = ring->fixes[idx];
+    uint64_t original_time_usec = playback->snapshot[idx].time_usec;
+    *gps = playback->snapshot[idx];
     if (a->replay_mode == REPLAY_MODE_LIVE_TIMESTAMP) {
         /* Re-stamp to look fresh - only KF divergence should catch this one. */
         struct timespec ts;

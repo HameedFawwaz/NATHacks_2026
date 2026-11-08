@@ -52,18 +52,28 @@ flag can't be averaged away, then published as `nav_trust` with asymmetric slew 
 `core_main` is the real integration loop: connect → detect → publish, against a live
 flight controller.
 
-**Known limitation**: the long-horizon KF divergence check was calibrated against real
-flight (`core/sitl/fly_square.py`, not just synthetic/stationary data) and can still
-occasionally false-positive for a few seconds during normal maneuvering. Root cause:
-this filter has no accel/gyro bias calibration, and in testing only received ~4Hz IMU
-samples (SITL/MAVProxy didn't honor our `MAV_CMD_SET_MESSAGE_INTERVAL` request to speed
-`SCALED_IMU2` up to 50Hz — see `core_mavlink_request_message_interval` in
-`core/include/core/mavlink/mavlink_send.h`), so integration error compounds faster than a
-properly-sampled filter would see. Thresholds were loosened and the long horizon shortened
-(15s → 8s) based on measured real-flight divergence, which shortened the false-positive
-window substantially but didn't eliminate it. Follow-up: figure out why the rate request
-isn't taking effect (possibly a MAVProxy pass-through quirk, worth checking against a
-direct SITL connection without MAVProxy in between), or add basic bias estimation.
+**Known limitations**:
+
+- The long-horizon KF divergence check was calibrated against real flight
+  (`core/sitl/fly_square.py`, not just synthetic/stationary data) and can still
+  occasionally false-positive for a few seconds during normal maneuvering. Root cause:
+  this filter has no accel/gyro bias calibration, and in testing only received ~4Hz IMU
+  samples (SITL/MAVProxy didn't honor our `MAV_CMD_SET_MESSAGE_INTERVAL` request to speed
+  `SCALED_IMU2` up to 50Hz — see `core_mavlink_request_message_interval` in
+  `core/include/core/mavlink/mavlink_send.h`), so integration error compounds faster than a
+  properly-sampled filter would see. Follow-up: figure out why the rate request isn't
+  taking effect (possibly a MAVProxy pass-through quirk, worth checking against a direct
+  SITL connection without MAVProxy in between), or add basic bias estimation.
+- **Minimum detectable sustained-drift rate**: re-anchoring to GPS is now gated on the
+  filter's own divergence score staying at ceiling (see `gnss_anomaly.c`), so a slow spoof
+  no longer gets silently absorbed every re-anchor interval the way it used to — but the
+  detectable rate is still bounded by `warn_m / horizon_ms`. With the current long-horizon
+  defaults (10m / 8s) that's **~1.25 m/s**: a spoof patient enough to drift slower than
+  that, held indefinitely, remains undetectable by the KF-based checks alone. (The
+  raw-GPS-vs-EKF check can still catch it — see the caveat on that check above — but only
+  if the attacker fooled our telemetry relay without also fooling the flight controller's
+  own GPS reception.) Closing this gap for good needs real IMU bias estimation, not just
+  threshold tuning.
 
 ## Autonomy
 

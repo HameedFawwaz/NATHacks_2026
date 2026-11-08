@@ -32,7 +32,10 @@ void core_attitude_filter_update(core_attitude_filter_t *filter, const core_imu_
 
     if (!filter->initialized) {
         /* No prior gyro-integrated estimate to blend with yet - start level
-         * estimate straight from accel, yaw at zero (no reference available). */
+         * estimate straight from accel. Yaw starts at 0 (true north) only as
+         * a placeholder until core_attitude_filter_seed_yaw replaces it with
+         * a real heading reference; the caller is expected to seed it as
+         * soon as one is available. */
         filter->roll = roll_acc;
         filter->pitch = pitch_acc;
         filter->yaw = 0.0f;
@@ -56,4 +59,8 @@ void core_attitude_filter_update(core_attitude_filter_t *filter, const core_imu_
     filter->yaw = yaw;
 
     filter->last_update_ms = imu->last_update_ms;
+}
+
+void core_attitude_filter_seed_yaw(core_attitude_filter_t *filter, float yaw_rad) {
+    filter->yaw = yaw_rad;
 }

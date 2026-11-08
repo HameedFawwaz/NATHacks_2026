@@ -17,14 +17,23 @@ void core_nav_config_default(core_nav_config_t *cfg) {
      * producing false positives on completely normal flight - shortening it
      * has an outsized benefit precisely because the error grows with t^2,
      * not linearly.
+     *
+     * The long-horizon warn/reject below were tightened from an earlier,
+     * looser pass (20m/50m) once re-anchoring was gated on divergence (see
+     * gnss_anomaly.c): since a degraded filter no longer gets silently
+     * re-synced to GPS every horizon, the minimum sustained-drift rate this
+     * can detect is now warn_m / horizon_ms = 10/8 = 1.25 m/s, with ~5-7x
+     * margin over the observed normal-flight baseline above. A slower,
+     * more patient spoof than that remains undetectable without real IMU
+     * bias estimation - see core/README.md's "Known limitation".
      */
     cfg->dr_short_horizon_ms = 1500;
     cfg->dr_short_divergence_warn_m = 10.0f; /* real flight briefly touched ~9m */
     cfg->dr_short_divergence_reject_m = 20.0f;
 
-    cfg->dr_long_horizon_ms = 8000; /* was 15000 - see above */
-    cfg->dr_long_divergence_warn_m = 20.0f;
-    cfg->dr_long_divergence_reject_m = 50.0f;
+    cfg->dr_long_horizon_ms = 8000;
+    cfg->dr_long_divergence_warn_m = 10.0f;
+    cfg->dr_long_divergence_reject_m = 30.0f;
 
     cfg->ekf_divergence_warn_m = 10.0f;
     cfg->ekf_divergence_reject_m = 25.0f;
@@ -32,6 +41,11 @@ void core_nav_config_default(core_nav_config_t *cfg) {
     cfg->eph_nominal_max = 200;
     cfg->eph_reject = 500;
     cfg->eph_jump_threshold = 150;
+
+    cfg->gps_stale_warn_ms = 2000;
+    cfg->gps_stale_reject_ms = 5000;
+
+    cfg->imu_stale_ms = 2000;
 
     cfg->trust_recover_rate_per_s = 0.5f;
 

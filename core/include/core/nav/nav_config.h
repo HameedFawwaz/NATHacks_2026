@@ -14,22 +14,38 @@ typedef struct {
 
     /* Check 2: short-horizon KF divergence */
     uint32_t dr_short_horizon_ms;   /* default 1500 */
-    float dr_short_divergence_warn_m;   /* default 8.0 */
+    float dr_short_divergence_warn_m;   /* default 10.0 */
     float dr_short_divergence_reject_m; /* default 20.0 */
 
     /* Check 3: long-horizon cumulative drift */
-    uint32_t dr_long_horizon_ms;     /* default 15000 */
-    float dr_long_divergence_warn_m;    /* default 15.0 */
-    float dr_long_divergence_reject_m;  /* default 40.0 */
+    uint32_t dr_long_horizon_ms;     /* default 8000 */
+    float dr_long_divergence_warn_m;    /* default 10.0 */
+    float dr_long_divergence_reject_m;  /* default 30.0 */
 
-    /* Check 4: raw GPS vs EKF (GLOBAL_POSITION_INT) */
+    /* Check 4: raw GPS vs EKF (GLOBAL_POSITION_INT). Note: only catches a
+     * spoof that fools our telemetry relay but NOT the flight controller's
+     * own GPS reception - see core/README.md. */
     float ekf_divergence_warn_m;   /* default 10.0 */
     float ekf_divergence_reject_m; /* default 25.0 */
 
-    /* Check 6: HDOP/eph abnormality (C/N0 stand-in) */
+    /* Check 6: HDOP/eph abnormality (C/N0 stand-in). eph == UINT16_MAX
+     * ("unknown", MAVLink's documented sentinel) is excluded, not penalized. */
     uint16_t eph_nominal_max;     /* default 200 (HDOP 2.0) */
     uint16_t eph_reject;          /* default 500 (HDOP 5.0) */
     uint16_t eph_jump_threshold;  /* default 150 (HDOP 1.5) */
+
+    /* Check 7: GPS staleness (possible jamming) / fix-quality health.
+     * fix_type < 2 (no/weak fix) is an immediate hard signal for that tick;
+     * this ramp instead covers total silence (no GPS_RAW_INT at all). */
+    uint32_t gps_stale_warn_ms;   /* default 2000 */
+    uint32_t gps_stale_reject_ms; /* default 5000 */
+
+    /* IMU staleness: when the IMU stream itself goes quiet, the KF's own
+     * (now-frozen) prediction would otherwise look like growing divergence
+     * against a real, continuing GPS trajectory. Tracked against real
+     * wall-clock time, decoupled from the IMU-paced clock used elsewhere -
+     * see gnss_anomaly.c. */
+    uint32_t imu_stale_ms; /* default 2000 */
 
     /* Publish smoothing - the two hard checks (jump, replay/timestamp) latch
      * on a single unambiguous sample by design (see gnss_anomaly.c); this is
