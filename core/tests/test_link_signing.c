@@ -142,6 +142,22 @@ static core_link_security_t sec_of(core_mavlink_conn_t *conn) {
     return t.link_security;
 }
 
+/* Polls until the frame just sent has been counted one way or the other, so
+ * the assertions don't depend on how quickly loopback delivers it. */
+static core_link_security_t pump_until_counted(core_mavlink_conn_t *conn, const core_link_security_t *before) {
+    core_link_security_t now = sec_of(conn);
+    for (int i = 0; i < 2000; i++) {
+        if (now.signed_accepted + now.rejected_replay + now.rejected_bad_sig + now.rejected_unsigned >
+            before->signed_accepted + before->rejected_replay + before->rejected_bad_sig + before->rejected_unsigned) {
+            break;
+        }
+        core_mavlink_conn_poll(conn);
+        usleep(1000);
+        now = sec_of(conn);
+    }
+    return now;
+}
+
 static void test_signed_accepted(void) {
     core_mavlink_conn_t *conn = open_conn(14561, KEY_A);
     peer_t p;
@@ -237,22 +253,22 @@ static void test_replay_rejected(void) {
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
+    core_link_security_t s = sec_of(conn);
     send_bytes(&p, buf, len);
-    pump(conn, 30);
-    assert(sec_of(conn).signed_accepted == 1);
+    s = pump_until_counted(conn, &s);
+    assert(s.signed_accepted == 1);
 
     /* An attacker who recorded the frame re-sends it verbatim. */
     send_bytes(&p, buf, len);
-    pump(conn, 30);
-    core_link_security_t s = sec_of(conn);
+    s = pump_until_counted(conn, &s);
     assert(s.signed_accepted == 1 && "replayed frame must not be accepted again");
     assert(s.rejected_replay == 1);
 
     /* A fresh frame from the real sender still works afterwards. */
     len = build_heartbeat(buf);
     send_bytes(&p, buf, len);
-    pump(conn, 30);
-    assert(sec_of(conn).signed_accepted == 2);
+    s = pump_until_counted(conn, &s);
+    assert(s.signed_accepted == 2);
 
     peer_close(&p);
     core_mavlink_conn_close(conn);
