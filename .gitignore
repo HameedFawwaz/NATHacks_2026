@@ -17,6 +17,9 @@ Makefile
 *.swp
 .DS_Store
 
+# Autonomy transition logs
+autonomy_transitions.csv
+
 # Link signing secrets - never commit
 *.key
 signing.key

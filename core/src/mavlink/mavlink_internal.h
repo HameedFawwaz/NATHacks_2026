@@ -48,6 +48,9 @@ struct core_mavlink_conn {
     mavlink_signing_streams_t signing_streams;
 
     core_telemetry_t telemetry;
+
+    uint8_t vehicle_sysid;  /* from the autopilot's heartbeat, 0 = not seen yet */
+    uint8_t vehicle_compid;
 };
 
 /* Enables/disables signing on conn's channel per conn->cfg. Called from conn_open and close. */

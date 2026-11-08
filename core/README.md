@@ -34,7 +34,37 @@ ctest --test-dir build --output-on-failure
 
 `mavlink/` and `common/` are implemented (connection handling, telemetry decode, send
 helpers, shared trust-score struct — see `include/core/mavlink/mavlink.h` for the public
-API). `nav/`, `link/`, `autonomy/`, `crypto/` are still empty, scoped to their own issues.
+API), and so is `autonomy/` (see below). `nav/`, `link/`, `crypto/` are still empty,
+scoped to their own issues.
+
+## Autonomy
+
+`autonomy/` turns trust scores into a response. The table of behaviors is at the top of
+`include/core/autonomy/autonomy.h`. Each transition goes to stderr, to a STATUSTEXT, and
+to a CSV log.
+
+The nav and link detectors aren't merged yet, so `tools/autonomy_runner` stands in for
+them: it reads scores from stdin (`nav 0.1`, `link 0`, `hw 1`, `crypto 1`) and otherwise
+runs the real decision loop. Once the detectors exist they should write through
+`core_trust_score_set_component()` and call `core_autonomy_tick()` from the main loop.
+
+`sitl/run_autonomy_scenario.py` runs this end to end against ArduPilot SITL. It flies a
+copter, injects an attack, and checks the vehicle's response:
+
+```
+python3 sitl/run_autonomy_scenario.py --ardupilot /path/to/ardupilot --runner build/tools/autonomy_runner gnss
+python3 sitl/run_autonomy_scenario.py --ardupilot /path/to/ardupilot --runner build/tools/autonomy_runner link
+python3 sitl/run_autonomy_scenario.py --ardupilot /path/to/ardupilot --runner build/tools/autonomy_runner multi
+```
+
+`--ardupilot` is a checkout with `./waf configure --board sitl && ./waf copter` already
+run. The script needs `pymavlink`. GNSS failover needs a non-GPS source set on the vehicle; see
+`sitl/autonomy_failover.parm` for the optical-flow setup the scenario uses.
+
+Building Copter-4.5 SITL on Apple Silicon needed three workarounds: `setuptools<81` in
+the venv (`dronecan` imports `pkg_resources`, and without it the build hangs instead of
+failing), `CC=/usr/bin/clang CXX=/usr/bin/clang++`, and `LDFLAGS=-Wl,-no_fixup_chains`
+at `./waf configure`.
 
 ## Testing against ArduPilot SITL
 
