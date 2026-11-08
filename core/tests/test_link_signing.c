@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -19,8 +20,9 @@
 #include "core/crypto/link_signing.h"
 #include "core/mavlink/mavlink.h"
 
-/* Channels the test's "remote peer" uses; high enough not to collide with the connection's own (allocated from 0). */
-#define PEER_TX_CHAN 14
+/* Peer channels index this test file's private vendored channel array,
+ * separate from core_lib's shared channel array. */
+#define PEER_TX_CHAN 0
 #define PEER_RX_CHAN 15
 
 static const uint8_t KEY_A[32] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
@@ -140,6 +142,22 @@ static core_link_security_t sec_of(core_mavlink_conn_t *conn) {
     return t.link_security;
 }
 
+/* Polls until the frame just sent has been counted one way or the other, so
+ * the assertions don't depend on how quickly loopback delivers it. */
+static core_link_security_t pump_until_counted(core_mavlink_conn_t *conn, const core_link_security_t *before) {
+    core_link_security_t now = sec_of(conn);
+    for (int i = 0; i < 2000; i++) {
+        if (now.signed_accepted + now.rejected_replay + now.rejected_bad_sig + now.rejected_unsigned >
+            before->signed_accepted + before->rejected_replay + before->rejected_bad_sig + before->rejected_unsigned) {
+            break;
+        }
+        core_mavlink_conn_poll(conn);
+        usleep(1000);
+        now = sec_of(conn);
+    }
+    return now;
+}
+
 static void test_signed_accepted(void) {
     core_mavlink_conn_t *conn = open_conn(14561, KEY_A);
     peer_t p;
@@ -235,22 +253,22 @@ static void test_replay_rejected(void) {
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
+    core_link_security_t s = sec_of(conn);
     send_bytes(&p, buf, len);
-    pump(conn, 30);
-    assert(sec_of(conn).signed_accepted == 1);
+    s = pump_until_counted(conn, &s);
+    assert(s.signed_accepted == 1);
 
     /* An attacker who recorded the frame re-sends it verbatim. */
     send_bytes(&p, buf, len);
-    pump(conn, 30);
-    core_link_security_t s = sec_of(conn);
+    s = pump_until_counted(conn, &s);
     assert(s.signed_accepted == 1 && "replayed frame must not be accepted again");
     assert(s.rejected_replay == 1);
 
     /* A fresh frame from the real sender still works afterwards. */
     len = build_heartbeat(buf);
     send_bytes(&p, buf, len);
-    pump(conn, 30);
-    assert(sec_of(conn).signed_accepted == 2);
+    s = pump_until_counted(conn, &s);
+    assert(s.signed_accepted == 2);
 
     peer_close(&p);
     core_mavlink_conn_close(conn);
@@ -294,6 +312,50 @@ static bool recv_and_verify(peer_t *p, uint8_t expected_msgid) {
         }
     }
     return false;
+}
+
+static void assert_frame(peer_t *p, uint8_t msgid, bool signed_frame, uint8_t seq) {
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    ssize_t n = -1;
+    for (int i = 0; i < 1000 && n < 0; i++) {
+        n = recv(p->fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n < 0) usleep(1000);
+    }
+    assert(n >= 12);
+    assert(buf[0] == 0xFD);
+    assert((buf[2] & 0x01) == (signed_frame ? 1 : 0));
+    assert(buf[4] == seq);
+    assert(buf[7] == msgid && buf[8] == 0 && buf[9] == 0);
+}
+
+static void test_connection_isolation(bool signed_first) {
+    core_mavlink_conn_t *first = open_conn(14571, signed_first ? KEY_A : NULL);
+    core_mavlink_conn_t *second = open_conn(14572, signed_first ? NULL : KEY_A);
+    core_mavlink_conn_t *signed_conn = signed_first ? first : second;
+    core_mavlink_conn_t *plain_conn = signed_first ? second : first;
+    peer_t ps, pp;
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    peer_init(&ps, signed_first ? 14571 : 14572, KEY_A, NULL);
+    send_bytes(&ps, buf, build_heartbeat(buf));
+    pump(signed_conn, 10);
+    peer_init(&pp, signed_first ? 14572 : 14571, NULL, NULL);
+    send_bytes(&pp, buf, build_heartbeat(buf));
+    pump(plain_conn, 10);
+
+    assert(core_mavlink_send_heartbeat(plain_conn));
+    assert_frame(&pp, MAVLINK_MSG_ID_HEARTBEAT, false, 0);
+    assert(core_mavlink_send_heartbeat(signed_conn));
+    assert_frame(&ps, MAVLINK_MSG_ID_HEARTBEAT, true, 0);
+    assert(core_mavlink_send_statustext(plain_conn, CORE_MAV_SEVERITY_INFO, "plain hello"));
+    assert_frame(&pp, MAVLINK_MSG_ID_STATUSTEXT, false, 1);
+    assert(core_mavlink_send_statustext(signed_conn, CORE_MAV_SEVERITY_INFO, "signed hello"));
+    assert_frame(&ps, MAVLINK_MSG_ID_STATUSTEXT, true, 1);
+
+    peer_close(&ps);
+    peer_close(&pp);
+    core_mavlink_conn_close(first);
+    core_mavlink_conn_close(second);
+    printf("  ok: connection signing isolation (signed first: %d)\n", signed_first);
 }
 
 static void test_outbound_signed(void) {
@@ -384,9 +446,99 @@ static void test_key_helpers(void) {
     printf("  ok: key helpers\n");
 }
 
+static void test_key_environment(void) {
+    const char *old = getenv("CORE_SIGNING_KEY_FILE");
+    char *saved = old ? strdup(old) : NULL;
+    assert(!old || saved);
+    uint8_t key[CORE_SIGNING_KEY_LEN];
+    assert(unsetenv("CORE_SIGNING_KEY_FILE") == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_UNSET);
+    assert(setenv("CORE_SIGNING_KEY_FILE", "", 1) == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_ERROR);
+
+    char path[] = "/tmp/core_signing_envXXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    assert(write(fd, "bad key\n", 8) == 8);
+    assert(close(fd) == 0);
+    assert(setenv("CORE_SIGNING_KEY_FILE", path, 1) == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_ERROR);
+    assert(unlink(path) == 0);
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_ERROR);
+    assert(core_signing_key_generate_file(path));
+    assert(core_signing_key_load_from_env(key) == CORE_SIGNING_ENV_LOADED);
+    uint8_t expected[CORE_SIGNING_KEY_LEN];
+    assert(core_signing_key_load_file(path, expected));
+    assert(memcmp(key, expected, sizeof(key)) == 0);
+    assert(unlink(path) == 0);
+    if (saved) {
+        assert(setenv("CORE_SIGNING_KEY_FILE", saved, 1) == 0);
+        free(saved);
+    } else {
+        assert(unsetenv("CORE_SIGNING_KEY_FILE") == 0);
+    }
+    printf("  ok: environment distinguishes unset, loaded, and unusable keys\n");
+}
+
+static void test_passphrase_keys(void) {
+    uint8_t key[CORE_SIGNING_KEY_LEN], loaded[CORE_SIGNING_KEY_LEN];
+    char hex[2 * CORE_SIGNING_KEY_LEN + 1];
+    assert(!core_signing_key_from_passphrase(NULL, key));
+    assert(!core_signing_key_from_passphrase("abc", NULL));
+    assert(!core_signing_key_from_passphrase("", key));
+    assert(!core_signing_key_from_passphrase("non-ascii\x80", key));
+    assert(!core_signing_key_from_passphrase("correct horse", key));
+    assert(!core_signing_key_from_passphrase("tab\there", key));
+    assert(!core_signing_key_from_passphrase("control\x01", key));
+    assert(!core_signing_key_from_passphrase("delete\x7f", key));
+    assert(!core_signing_key_from_passphrase("newline\n", key));
+    assert(core_signing_key_from_passphrase("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", key));
+    assert(core_signing_key_from_passphrase("abc", key));
+    core_signing_key_to_hex(key, hex);
+    assert(strcmp(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0);
+
+    /* Verified independently with shasum -a 256 before adding these vectors. */
+    const struct { size_t len; const char *digest; } vectors[] = {
+        {55, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"},
+        {56, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"},
+        {64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"},
+        {119, "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb"},
+        {1000000, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"}
+    };
+    char *input = malloc(1000001);
+    assert(input);
+    for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+        memset(input, 'a', vectors[i].len);
+        input[vectors[i].len] = '\0';
+        assert(core_signing_key_from_passphrase(input, key));
+        core_signing_key_to_hex(key, hex);
+        assert(strcmp(hex, vectors[i].digest) == 0);
+    }
+    free(input);
+
+    char path[] = "/tmp/core_signing_passphraseXXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    assert(close(fd) == 0);
+    assert(unlink(path) == 0);
+    assert(core_signing_key_write_file(path, key));
+    assert(!core_signing_key_write_file(path, KEY_B));
+    struct stat st;
+    assert(stat(path, &st) == 0);
+    assert((st.st_mode & 0777) == 0600);
+    assert(core_signing_key_load_file(path, loaded));
+    assert(memcmp(key, loaded, sizeof(key)) == 0);
+    assert(unlink(path) == 0);
+    printf("  ok: MAVProxy passphrase SHA-256 vectors and exclusive key writes\n");
+}
+
 int main(void) {
     printf("test_link_signing:\n");
+    test_connection_isolation(true);
+    test_connection_isolation(false);
     test_key_helpers();
+    test_key_environment();
+    test_passphrase_keys();
     test_signing_off_unchanged();
     test_signed_accepted();
     test_unsigned_rejected();

@@ -32,13 +32,24 @@ bool core_signing_key_load_file(const char *path, uint8_t key_out[CORE_SIGNING_K
 /* Fills key_out from the OS CSPRNG (/dev/urandom). */
 bool core_signing_key_generate(uint8_t key_out[CORE_SIGNING_KEY_LEN]);
 
+/* SHA-256 matching MAVProxy signing setup. Requires a nonempty passphrase
+ * containing only printable ASCII 0x21..0x7e (no whitespace or controls). */
+bool core_signing_key_from_passphrase(const char *passphrase, uint8_t key_out[CORE_SIGNING_KEY_LEN]);
+
+/* Writes a key as hex, mode 0600, refusing to overwrite an existing file. */
+bool core_signing_key_write_file(const char *path, const uint8_t key[CORE_SIGNING_KEY_LEN]);
+
 /* Generates a fresh key and writes it to path with mode 0600. Refuses to overwrite an existing file. */
 bool core_signing_key_generate_file(const char *path);
 
-/*
- * Convenience: loads the key named by the CORE_SIGNING_KEY_FILE environment
- * variable. Returns false if the variable is unset or the file is unusable.
- */
-bool core_signing_key_load_from_env(uint8_t key_out[CORE_SIGNING_KEY_LEN]);
+typedef enum {
+    CORE_SIGNING_ENV_UNSET = 0,
+    CORE_SIGNING_ENV_LOADED,
+    CORE_SIGNING_ENV_ERROR
+} core_signing_env_result_t;
+
+/* Loads CORE_SIGNING_KEY_FILE. A set but empty/unusable path is an ERROR;
+ * callers must stop rather than silently falling back to unsigned traffic. */
+core_signing_env_result_t core_signing_key_load_from_env(uint8_t key_out[CORE_SIGNING_KEY_LEN]);
 
 #endif /* CORE_CRYPTO_LINK_SIGNING_H */

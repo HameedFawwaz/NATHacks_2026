@@ -12,11 +12,13 @@
 #include "core/common/time.h"
 
 /* MAVLink's per-channel parse buffers are indexed by chan, so each connection
- * gets its own channel to avoid cross-talk if more than one is ever open. */
+ * gets its own channel to avoid cross-talk if more than one is ever open.
+ * Channel 0 is pack-only scratch for vendored *_pack() helpers and must never
+ * have a connection's signing state attached. */
 static mavlink_channel_t allocate_channel(void) {
-    static int next_channel = 0;
-    mavlink_channel_t chan = (mavlink_channel_t)(next_channel % MAVLINK_COMM_NUM_BUFFERS);
-    next_channel++;
+    static unsigned next_channel = 1;
+    mavlink_channel_t chan = (mavlink_channel_t)next_channel;
+    next_channel = next_channel % (MAVLINK_COMM_NUM_BUFFERS - 1) + 1;
     return chan;
 }
 
@@ -201,6 +203,10 @@ int core_mavlink_conn_poll(core_mavlink_conn_t *conn) {
         }
     }
 
+    /* Re-read the clock: a heartbeat decoded above can be stamped later than the
+     * `now` taken on entry, which would underflow this unsigned subtraction and
+     * look like a timeout. */
+    now = core_now_ms();
     if (conn->state == CORE_MAVLINK_CONN_CONNECTED &&
         conn->last_heartbeat_rx_ms != 0 &&
         now - conn->last_heartbeat_rx_ms > conn->cfg.heartbeat_timeout_ms) {
