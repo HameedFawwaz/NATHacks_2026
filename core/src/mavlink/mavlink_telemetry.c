@@ -51,7 +51,9 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         conn->telemetry.gps_raw.eph = gps.eph;
         conn->telemetry.gps_raw.epv = gps.epv;
         conn->telemetry.gps_raw.vel_cms = gps.vel;
+        conn->telemetry.gps_raw.cog_cdeg = gps.cog;
         conn->telemetry.gps_raw.satellites_visible = gps.satellites_visible;
+        conn->telemetry.gps_raw.time_usec = gps.time_usec;
         conn->telemetry.gps_raw.last_update_ms = now;
         conn->telemetry.gps_raw.valid = true;
         break;
@@ -67,6 +69,27 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         conn->telemetry.attitude.yawspeed = att.yawspeed;
         conn->telemetry.attitude.last_update_ms = now;
         conn->telemetry.attitude.valid = true;
+        break;
+    }
+    case MAVLINK_MSG_ID_SCALED_IMU2: {
+        mavlink_scaled_imu2_t imu;
+        mavlink_msg_scaled_imu2_decode(msg, &imu);
+        conn->telemetry.imu.xacc_mps2 = (float)imu.xacc * 9.80665f / 1000.0f;
+        conn->telemetry.imu.yacc_mps2 = (float)imu.yacc * 9.80665f / 1000.0f;
+        conn->telemetry.imu.zacc_mps2 = (float)imu.zacc * 9.80665f / 1000.0f;
+        conn->telemetry.imu.xgyro_rps = (float)imu.xgyro / 1000.0f;
+        conn->telemetry.imu.ygyro_rps = (float)imu.ygyro / 1000.0f;
+        conn->telemetry.imu.zgyro_rps = (float)imu.zgyro / 1000.0f;
+        conn->telemetry.imu.last_update_ms = now;
+        conn->telemetry.imu.valid = true;
+        break;
+    }
+    case MAVLINK_MSG_ID_SCALED_PRESSURE: {
+        mavlink_scaled_pressure_t baro;
+        mavlink_msg_scaled_pressure_decode(msg, &baro);
+        conn->telemetry.baro.press_abs_hpa = baro.press_abs;
+        conn->telemetry.baro.last_update_ms = now;
+        conn->telemetry.baro.valid = true;
         break;
     }
     case MAVLINK_MSG_ID_RADIO_STATUS: {

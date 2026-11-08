@@ -56,4 +56,19 @@ bool core_mavlink_send_set_mode(core_mavlink_conn_t *conn, uint32_t custom_mode)
 /* MAV_CMD_SET_EKF_SOURCE_SET: selects ArduPilot's EK3_SRC<source_set>_* parameters (1-3). */
 bool core_mavlink_send_set_ekf_source_set(core_mavlink_conn_t *conn, uint8_t source_set);
 
+/*
+ * Requests the flight controller stream a given message (by its MAVLink
+ * message ID, e.g. 116 for SCALED_IMU2) at a given interval. interval_us <= 0
+ * requests the default rate; a positive value requests that exact interval.
+ * Targets the vehicle identified from its heartbeat (see
+ * core_mavlink_send_set_mode's doc above) - also returns false until that's
+ * happened.
+ *
+ * Detection logic (nav/, link/, ...) needs IMU/baro data at a real sample
+ * rate to do dead-reckoning accurately - SITL/MAVProxy's default forwarding
+ * rate for SCALED_IMU2 is only a few Hz, far too coarse for that. Callers
+ * should request at least 50Hz (interval_us=20000) for SCALED_IMU2.
+ */
+bool core_mavlink_request_message_interval(core_mavlink_conn_t *conn, uint32_t message_id, int32_t interval_us);
+
 #endif /* CORE_MAVLINK_SEND_H */

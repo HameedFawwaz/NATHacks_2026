@@ -131,3 +131,7 @@ bool core_mavlink_send_set_mode(core_mavlink_conn_t *conn, uint32_t custom_mode)
 bool core_mavlink_send_set_ekf_source_set(core_mavlink_conn_t *conn, uint8_t source_set) {
     return send_command_long(conn, CORE_MAV_CMD_SET_EKF_SOURCE_SET, (float)source_set, 0);
 }
+
+bool core_mavlink_request_message_interval(core_mavlink_conn_t *conn, uint32_t message_id, int32_t interval_us) {
+    return send_command_long(conn, MAV_CMD_SET_MESSAGE_INTERVAL, (float)message_id, (float)interval_us);
+}

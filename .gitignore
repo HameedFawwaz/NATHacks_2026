@@ -11,6 +11,10 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 
+# Python
+__pycache__/
+*.pyc
+
 # Editors / OS
 .vscode/
 .idea/

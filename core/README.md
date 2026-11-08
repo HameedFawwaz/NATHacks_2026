@@ -34,8 +34,46 @@ ctest --test-dir build --output-on-failure
 
 `mavlink/` and `common/` are implemented (connection handling, telemetry decode, send
 helpers, shared trust-score struct — see `include/core/mavlink/mavlink.h` for the public
-API), and so is `autonomy/` (see below). `nav/`, `link/`, `crypto/` are still empty,
-scoped to their own issues.
+API). `nav/` (GNSS spoofing detection), `autonomy/` (decision layer), and `crypto/`
+(link signing) are also implemented — see below. `link/` (lost-link detection/failover)
+is still empty, scoped to its own issue.
+
+## GNSS spoofing detection (`nav/`)
+
+Maintains an independent position estimate (a Kalman filter fusing accelerometer, gyro,
+and barometer — never GPS) and cross-checks incoming GPS against it. Six checks (jump,
+short- and long-horizon KF divergence, raw-GPS-vs-EKF divergence, timestamp/replay, HDOP
+abnormality) each produce a sub-score in `[0,1]`, fused via `min()` so one unambiguous red
+flag can't be averaged away, then published as `nav_trust` with asymmetric slew limiting
+(drops instantly, recovers slowly). See `include/core/nav/nav.h` for the public API,
+`include/core/nav/gnss_anomaly.h` for the six checks, and `core/tests/test_gnss_anomaly.c`
+/ `test_nav_kf.c` for fully synthetic (no SITL needed) scenario and filter-math tests.
+
+`core_main` is the real integration loop: connect → detect → publish, against a live
+flight controller.
+
+**Known limitations**:
+
+- The long-horizon KF divergence check was calibrated against real flight
+  (`core/sitl/fly_square.py`, not just synthetic/stationary data) and can still
+  occasionally false-positive for a few seconds during normal maneuvering. Root cause:
+  this filter has no accel/gyro bias calibration, and in testing only received ~4Hz IMU
+  samples (SITL/MAVProxy didn't honor our `MAV_CMD_SET_MESSAGE_INTERVAL` request to speed
+  `SCALED_IMU2` up to 50Hz — see `core_mavlink_request_message_interval` in
+  `core/include/core/mavlink/mavlink_send.h`), so integration error compounds faster than a
+  properly-sampled filter would see. Follow-up: figure out why the rate request isn't
+  taking effect (possibly a MAVProxy pass-through quirk, worth checking against a direct
+  SITL connection without MAVProxy in between), or add basic bias estimation.
+- **Minimum detectable sustained-drift rate**: re-anchoring to GPS is now gated on the
+  filter's own divergence score staying at ceiling (see `gnss_anomaly.c`), so a slow spoof
+  no longer gets silently absorbed every re-anchor interval the way it used to — but the
+  detectable rate is still bounded by `warn_m / horizon_ms`. With the current long-horizon
+  defaults (10m / 8s) that's **~1.25 m/s**: a spoof patient enough to drift slower than
+  that, held indefinitely, remains undetectable by the KF-based checks alone. (The
+  raw-GPS-vs-EKF check can still catch it — see the caveat on that check above — but only
+  if the attacker fooled our telemetry relay without also fooling the flight controller's
+  own GPS reception.) Closing this gap for good needs real IMU bias estimation, not just
+  threshold tuning.
 
 ## Autonomy
 
@@ -84,6 +122,60 @@ connection and prints the heartbeat plus whatever other telemetry has been decod
    ```
    You should see a `[HEARTBEAT]` line (plus GPS/position/attitude once SITL has a
    fix) roughly once per second. Ctrl+C to stop.
+
+### Running the real detector, and injecting spoofing scenarios
+
+`core_main [port]` (default 14551) is the real GNSS spoofing detector: point it at SITL
+the same way as `mavlink_monitor` above, and it prints `nav_trust` plus each sub-score
+once a second. With no attack running, `nav_trust` should stay at/near 1.0.
+
+To inject a scripted attack on top of a live SITL instance, run
+`core/sitl/gnss_spoof_proxy` between SITL and `core_main` — it relays everything
+transparently except `GPS_RAW_INT`, which it mutates per `--scenario`:
+
+```
+sim_vehicle.py -v ArduCopter --out=udp:127.0.0.1:14551
+./build/sitl/gnss_spoof_proxy --scenario=jump --out-port=14552      # or drift / replay
+./build/core_main 14552
+```
+
+- `--scenario=jump` (`--jump-at-sec`, `--jump-offset-m`, `--jump-heading-deg`): one
+  fixed-offset teleport, held afterward. `nav_trust` should drop to 0 immediately.
+- `--scenario=drift` (`--drift-rate-mps`, `--drift-heading-deg`, `--drift-start-sec`):
+  self-consistent position+velocity drift. `nav_trust` decays smoothly as divergence
+  accumulates.
+- `--scenario=replay` (`--replay-at-sec`, `--replay-buffer-sec`, `--replay-mode`):
+  loops a buffered window of real past fixes. `looped-live-timestamp` re-stamps time to
+  look fresh (caught by KF divergence - needs the vehicle actually moving to show a
+  signal); `stale-timestamp` leaves the original timestamps in place (caught by the
+  replay/monotonicity check once the loop wraps - a smaller `--replay-buffer-sec` makes
+  this wrap, and the detection, more frequent/visible in a live demo).
+
+In every case, watch for the EKF-divergence sub-score (`ekf=`) - since the proxy only
+mutates `GPS_RAW_INT`, the flight controller's own `GLOBAL_POSITION_INT` keeps reflecting
+ground truth, so the EKF-divergence check reliably fires in this specific harness. **This
+is a property of the harness, not a durability guarantee**: a real spoof that fools the
+GPS receiver itself would make `GLOBAL_POSITION_INT` agree with the spoofed
+`GPS_RAW_INT` too, and the EKF-divergence check would show nothing — in that case
+detection rests entirely on the IMU-based KF checks (`dr=`/`drift=`), which never ingest
+GPS at all.
+
+### Flying the vehicle for a real (non-stationary) test
+
+A stationary SITL instance doesn't exercise the IMU-based filter or the KF-divergence
+checks (nothing is moving for them to track) — some scenarios above only show a real
+signal with the vehicle actually flying. `core/sitl/fly_square.py` (Python + pymavlink)
+arms, takes off, and flies an autonomous square via GUIDED-mode
+`SET_POSITION_TARGET_LOCAL_NED` commands:
+
+```
+sim_vehicle.py -v ArduCopter --out=udp:127.0.0.1:14551 --out=udp:127.0.0.1:14553
+python3 core/sitl/fly_square.py                     # defaults to udpin:0.0.0.0:14553
+```
+
+It talks directly to the vehicle (arm/mode/takeoff/position commands), separately from
+`core_main`/`gnss_spoof_proxy`, which only observe telemetry — run it independently,
+before or during a `core_main` session on a different port, with no conflict.
 
 ## Link signing (operator <-> drone authentication)
 

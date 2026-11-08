@@ -6,6 +6,14 @@ add_executable(test_mavlink_loopback test_mavlink_loopback.c)
 target_link_libraries(test_mavlink_loopback PRIVATE core_lib)
 add_test(NAME test_mavlink_loopback COMMAND test_mavlink_loopback)
 
+add_executable(test_nav_kf test_nav_kf.c)
+target_link_libraries(test_nav_kf PRIVATE core_lib)
+add_test(NAME test_nav_kf COMMAND test_nav_kf)
+
+add_executable(test_gnss_anomaly test_gnss_anomaly.c)
+target_link_libraries(test_gnss_anomaly PRIVATE core_lib)
+add_test(NAME test_gnss_anomaly COMMAND test_gnss_anomaly)
+
 add_executable(test_autonomy test_autonomy.c)
 target_link_libraries(test_autonomy PRIVATE core_lib)
 add_test(NAME test_autonomy COMMAND test_autonomy)
