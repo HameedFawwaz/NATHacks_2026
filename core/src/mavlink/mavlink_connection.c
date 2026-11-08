@@ -184,8 +184,13 @@ int core_mavlink_conn_poll(core_mavlink_conn_t *conn) {
 
         for (ssize_t i = 0; i < n; i++) {
             mavlink_message_t msg;
-            uint8_t got_msg = mavlink_parse_char(conn->chan, buf[i], &msg, &conn->parse_status);
-            core_mavlink_internal_signing_account(conn, got_msg != 0);
+            /* Use the framing API, not parse_char's error recovery: the latter
+             * reuses a rejected frame's last byte as STX if it is 0xFD. A
+             * replayed signature can legitimately end in 0xFD, seeding a
+             * phantom frame that consumes the next genuine heartbeat. */
+            uint8_t framing = mavlink_frame_char(conn->chan, buf[i], &msg, &conn->parse_status);
+            bool got_msg = framing == MAVLINK_FRAMING_OK;
+            core_mavlink_internal_signing_account(conn, got_msg);
             if (got_msg) {
                 decoded++;
                 conn->last_rx_ms = now;

@@ -246,13 +246,22 @@ static void test_tampered_rejected(void) {
     printf("  ok: tampered frame rejected\n");
 }
 
-static void test_replay_rejected(void) {
+static void test_replay_rejected(bool stx_tail) {
     core_mavlink_conn_t *conn = open_conn(14565, KEY_A);
     peer_t p;
     peer_init(&p, 14565, KEY_A, NULL);
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
+    if (stx_tail) {
+        /* A rejected signature ending in STX must not seed a phantom frame.
+         * Search signed frames, rather than corrupting the signature: this
+         * must exercise replay rejection of an otherwise authentic frame. */
+        for (unsigned i = 0; buf[len - 1] != MAVLINK_STX && i < 65536; i++) {
+            len = build_heartbeat(buf);
+        }
+        assert(buf[len - 1] == MAVLINK_STX);
+    }
     core_link_security_t s = sec_of(conn);
     send_bytes(&p, buf, len);
     s = pump_until_counted(conn, &s);
@@ -272,7 +281,7 @@ static void test_replay_rejected(void) {
 
     peer_close(&p);
     core_mavlink_conn_close(conn);
-    printf("  ok: replayed frame rejected, fresh frame still accepted\n");
+    printf("  ok: replayed frame rejected, fresh frame still accepted (STX tail: %d)\n", stx_tail);
 }
 
 static void test_signing_off_unchanged(void) {
@@ -544,7 +553,8 @@ int main(void) {
     test_unsigned_rejected();
     test_wrong_key_rejected();
     test_tampered_rejected();
-    test_replay_rejected();
+    test_replay_rejected(false);
+    test_replay_rejected(true);
     test_outbound_signed();
     test_latency();
     printf("test_link_signing: all assertions passed\n");
