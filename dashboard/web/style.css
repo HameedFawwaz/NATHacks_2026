@@ -65,7 +65,7 @@ body { display: flex; flex-direction: column; }
 }
 .pill.armed { color: #1a0d00; background: var(--caution); }
 
-.sim-badge {
+.source-badge {
   padding: 3px 10px;
   color: var(--caution);
   font-size: 12px;
@@ -73,6 +73,8 @@ body { display: flex; flex-direction: column; }
   border: 1px dashed var(--caution);
   border-radius: 6px;
 }
+
+.source-badge.live { color: var(--healthy); border: 1px solid var(--healthy); }
 
 .layout { display: flex; flex: 1; min-height: 0; }
 
@@ -221,6 +223,8 @@ label { color: var(--muted); font-size: 11px; font-weight: 500; }
 .card-fill { background: var(--level); }
 .card.level-critical { background: rgba(255, 92, 92, .12); border-color: var(--critical); }
 
+#sim-demo h2 { margin-bottom: 10px; }
+
 .scenarios { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 
 .events {
@@ -238,6 +242,9 @@ label { color: var(--muted); font-size: 11px; font-weight: 500; }
 .plan-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .plan-stats > div { padding: 8px; background: var(--panel-2); border-radius: 6px; }
 .plan-stats output { display: block; font: 600 15px var(--mono); }
+
+.plan-status { margin: 0; padding: 8px 10px; background: var(--panel-2); border-radius: 6px; }
+.plan-status.error { color: var(--critical); }
 
 .waypoints { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .waypoints li {

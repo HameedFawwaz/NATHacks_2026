@@ -6,6 +6,7 @@ package sim
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
 
 	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/model"
 )
@@ -23,9 +24,7 @@ const (
 	climbRateMS     = 3.0
 	descentRateMS   = 2.0
 	arriveRadiusM   = 3.0
-	spoofRateMS     = 3.0
-	spoofMaxM       = 80.0
-	spoofTrustSpanM = 40.0 // spoof offset at which nav trust reaches 0
+	spoofTrustSpanM = 40.0 // distance from the truth at which nav trust reaches 0
 	linkDecayPerS   = 0.25
 	motorDecayPerS  = 0.08
 	recoverPerS     = 0.1
@@ -43,12 +42,6 @@ const (
 	phaseLanding
 )
 
-// Event is one entry in the operator's event log.
-type Event struct {
-	AtMs int64
-	Text string
-}
-
 // Sim is a single simulated flight. Create it with New.
 type Sim struct {
 	plan     model.Plan
@@ -62,23 +55,26 @@ type Sim struct {
 	speedMS    float64
 	headingDeg float64
 
-	spoofOffsetM float64
-	navTrust     float64
-	linkTrust    float64
-	motorHealth  float64
-	battery      float64
+	rng         *rand.Rand // chooses the spoofed route; differs every flight
+	spoof       spoofTrack
+	navTrust    float64
+	linkTrust   float64
+	motorHealth float64
+	battery     float64
 
 	behavior    string
 	holdSeconds float64
 	landLatched bool
 
-	events []Event
+	events   []model.Event
+	eventSeq int
 }
 
 // New returns a drone sitting at the plan's home, ready to start.
 func New(plan model.Plan) *Sim {
 	return &Sim{
 		plan:        plan,
+		rng:         rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
 		nowMs:       1,
 		pos:         plan.Home,
 		navTrust:    1,
@@ -89,9 +85,9 @@ func New(plan model.Plan) *Sim {
 	}
 }
 
-func (s *Sim) Plan() model.Plan   { return s.plan }
-func (s *Sim) Scenario() Scenario { return s.scenario }
-func (s *Sim) Events() []Event    { return s.events }
+func (s *Sim) Plan() model.Plan      { return s.plan }
+func (s *Sim) Scenario() Scenario    { return s.scenario }
+func (s *Sim) Events() []model.Event { return s.events }
 
 // Flying reports whether a flight is under way.
 func (s *Sim) Flying() bool { return s.phase != phaseIdle }
@@ -129,6 +125,7 @@ func (s *Sim) SetScenario(c Scenario) {
 // Step advances the simulation by dt seconds.
 func (s *Sim) Step(dt float64) {
 	s.nowMs += int64(dt * 1000)
+	s.updateSpoof(dt)
 	s.updateHealth(dt)
 	if !s.Flying() {
 		s.speedMS = 0
@@ -140,12 +137,14 @@ func (s *Sim) Step(dt float64) {
 }
 
 func (s *Sim) updateHealth(dt float64) {
-	if s.scenario == ScenarioGNSSSpoof {
-		s.spoofOffsetM = math.Min(spoofMaxM, s.spoofOffsetM+spoofRateMS*dt)
-	} else {
-		s.spoofOffsetM = math.Max(0, s.spoofOffsetM-spoofRateMS*dt)
+	// Drops at once on evidence and recovers slowly, as core's nav trust does, so
+	// the false route crossing the real one doesn't make it look trustworthy again.
+	apart := 0.0
+	if s.spoof.active {
+		apart = model.DistanceM(s.spoof.pos, s.pos)
 	}
-	s.navTrust = clamp01(1 - s.spoofOffsetM/spoofTrustSpanM)
+	evidence := clamp01(1 - apart/spoofTrustSpanM)
+	s.navTrust = math.Min(evidence, s.navTrust+recoverPerS*dt)
 
 	if s.scenario == ScenarioLinkJam {
 		s.linkTrust = clamp01(s.linkTrust - linkDecayPerS*dt)
@@ -274,28 +273,36 @@ func (s *Sim) Snapshot() model.Snapshot {
 	reading := func(v float64) model.Reading { return model.Reading{Value: v, AtMs: now} }
 	imu := 0.97 + 0.02*math.Sin(float64(now)/4000)
 
-	// The spoof pushes the reported position off to the north-east, while the
-	// independent estimate stays near the truth with a small wander.
-	const diagonal = math.Sqrt2 / 2
+	// GPS reports the spoof's route while it runs, including its speed and course.
+	// The independent estimate stays near the truth with a small wander.
+	reported, speed, heading := s.pos, s.speedMS, s.headingDeg
+	if s.spoof.active {
+		reported, speed, heading = s.spoof.pos, model.CruiseSpeedMS, s.spoof.headingDeg
+	}
 	t := float64(now) / 1000
 	return model.Snapshot{
-		NowMs:       now,
-		Armed:       s.Flying(),
-		Mode:        s.mode(),
-		Behavior:    s.behavior,
-		Reported:    model.FromLocal(s.pos, s.spoofOffsetM*diagonal, s.spoofOffsetM*diagonal),
-		Estimated:   model.FromLocal(s.pos, 1.5*math.Sin(t/3), 1.5*math.Cos(t/5)),
-		HasEstimate: true,
-		AltM:        s.altM,
-		SpeedMS:     s.speedMS,
-		HeadingDeg:  s.headingDeg,
-		Satellites:  14,
-		Overall:     reading(min(s.navTrust, s.linkTrust, s.motorHealth)),
-		Nav:         reading(s.navTrust),
-		Link:        reading(s.linkTrust),
-		IMU:         reading(imu),
-		Motors:      reading(s.motorHealth),
-		Battery:     reading(s.battery),
+		NowMs:         now,
+		Connected:     true,
+		HasPosition:   true,
+		HasFlightData: true,
+		HasHeading:    true,
+		HasGPS:        true,
+		Armed:         s.Flying(),
+		Mode:          s.mode(),
+		Behavior:      s.behavior,
+		Reported:      reported,
+		Estimated:     model.FromLocal(s.pos, 1.5*math.Sin(t/3), 1.5*math.Cos(t/5)),
+		HasEstimate:   true,
+		AltM:          s.altM,
+		SpeedMS:       speed,
+		HeadingDeg:    heading,
+		Satellites:    14,
+		Overall:       reading(min(s.navTrust, s.linkTrust, s.motorHealth)),
+		Nav:           reading(s.navTrust),
+		Link:          reading(s.linkTrust),
+		IMU:           reading(imu),
+		Motors:        reading(s.motorHealth),
+		Battery:       reading(s.battery),
 	}
 }
 
@@ -323,7 +330,8 @@ func (s *Sim) mode() string {
 func clamp01(v float64) float64 { return math.Max(0, math.Min(1, v)) }
 
 func (s *Sim) logf(format string, args ...any) {
-	s.events = append(s.events, Event{AtMs: s.nowMs, Text: fmt.Sprintf(format, args...)})
+	s.eventSeq++
+	s.events = append(s.events, model.Event{Seq: s.eventSeq, AtMs: s.nowMs, Text: fmt.Sprintf(format, args...)})
 	if len(s.events) > maxEvents {
 		s.events = s.events[len(s.events)-maxEvents:]
 	}

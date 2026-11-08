@@ -34,7 +34,7 @@ func TestPlanLengthIncludesReturnHome(t *testing.T) {
 }
 
 func TestDriftOnlyShownAboveThreshold(t *testing.T) {
-	s := Snapshot{Reported: DefaultHome, Estimated: FromLocal(DefaultHome, 5, 0), HasEstimate: true}
+	s := Snapshot{Reported: DefaultHome, HasPosition: true, Estimated: FromLocal(DefaultHome, 5, 0), HasEstimate: true}
 	if _, show := s.Drift(); show {
 		t.Fatal("5 m of drift should not show")
 	}
@@ -45,6 +45,10 @@ func TestDriftOnlyShownAboveThreshold(t *testing.T) {
 	s.HasEstimate = false
 	if _, show := s.Drift(); show {
 		t.Fatal("drift should not show without an estimate")
+	}
+	s.HasEstimate, s.HasPosition = true, false
+	if _, show := s.Drift(); show {
+		t.Fatal("drift should not show without a GPS position")
 	}
 }
 
@@ -76,7 +80,7 @@ func TestAssessLevels(t *testing.T) {
 		{"Battery", func(s *Snapshot, r Reading) { s.Battery = r }, 0.1, LevelCritical},
 	}
 	for _, c := range cases {
-		s := Snapshot{NowMs: now}
+		s := Snapshot{NowMs: now, Connected: true}
 		c.set(&s, Reading{Value: c.value, AtMs: now})
 		if got := subsystemNamed(t, s, c.name).Level; got != c.want {
 			t.Errorf("%s at %.2f = %s, want %s", c.name, c.value, got, c.want)
@@ -85,7 +89,7 @@ func TestAssessLevels(t *testing.T) {
 }
 
 func TestAssessNoData(t *testing.T) {
-	s := Snapshot{NowMs: 10000}
+	s := Snapshot{NowMs: 10000, Connected: true}
 	if got := subsystemNamed(t, s, "Link").Level; got != LevelNoData {
 		t.Errorf("never received = %s, want no data", got)
 	}
@@ -99,5 +103,44 @@ func TestAssessNoData(t *testing.T) {
 	s.Link = Reading{Value: 1, AtMs: 10000 - StaleAfterMs - 1}
 	if got := subsystemNamed(t, s, "Link").Level; got != LevelNoData {
 		t.Errorf("stale = %s, want no data", got)
+	}
+}
+
+func TestHardwareRowOnlyOnceReported(t *testing.T) {
+	s := Snapshot{NowMs: 1000, Connected: true}
+	if got := len(Assess(s)); got != 5 {
+		t.Fatalf("%d rows before TRUST_HW", got)
+	}
+	s.Hardware = Reading{Value: 0.1, AtMs: 1000}
+	if got := subsystemNamed(t, s, "Hardware").Level; got != LevelCritical {
+		t.Fatalf("Hardware = %s", got)
+	}
+}
+
+func TestPlanCloneSharesNothing(t *testing.T) {
+	p := DefaultPlan()
+	c := p.Clone()
+	c.Waypoints[0].AltM = 99
+	if p.Waypoints[0].AltM == 99 {
+		t.Fatal("clone shares waypoints with the original")
+	}
+}
+
+func TestNoContactMeansNoData(t *testing.T) {
+	// A companion computer can keep reporting after the autopilot has gone quiet.
+	s := Snapshot{NowMs: 1000, Connected: false, Nav: Reading{Value: 1, AtMs: 1000}}
+	if got := subsystemNamed(t, s, "GNSS").Level; got != LevelNoData {
+		t.Fatalf("GNSS = %s, want no data", got)
+	}
+}
+
+func TestDefaultPlanFollowsHome(t *testing.T) {
+	home := LatLon{Lat: 53.5, Lon: -113.5}
+	p := DefaultPlanAt(home)
+	if p.Home != home {
+		t.Fatalf("home = %+v", p.Home)
+	}
+	if d := DistanceM(home, p.Waypoints[0].LatLon); d > 1000 {
+		t.Fatalf("first waypoint is %f m from home", d)
 	}
 }

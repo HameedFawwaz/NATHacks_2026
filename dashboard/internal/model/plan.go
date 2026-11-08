@@ -4,6 +4,7 @@ package model
 
 import (
 	"math"
+	"slices"
 	"time"
 )
 
@@ -14,6 +15,17 @@ const CruiseSpeedMS = 8.0
 
 // DefaultAltM is the altitude given to a newly added waypoint.
 const DefaultAltM = 20.0
+
+// Altitude limits for a waypoint, in metres above home. The ceiling is the usual
+// legal limit for small drones.
+const (
+	MinAltM = 1.0
+	MaxAltM = 120.0
+)
+
+// MaxLegM is the longest leg a plan may have. A longer one almost always means a
+// plan saved somewhere else, not an intended flight.
+const MaxLegM = 5000.0
 
 // DefaultHome is ArduPilot SITL's default start location, so the map lines up
 // with a SITL flight out of the box.
@@ -63,13 +75,22 @@ type Plan struct {
 	Waypoints []Waypoint `json:"waypoints"`
 }
 
+// Clone returns a copy that shares nothing with p.
+func (p Plan) Clone() Plan {
+	p.Waypoints = slices.Clone(p.Waypoints)
+	return p
+}
+
 // DefaultPlan returns the plan shown on first launch.
-func DefaultPlan() Plan {
+func DefaultPlan() Plan { return DefaultPlanAt(DefaultHome) }
+
+// DefaultPlanAt returns the first-launch route around the given home.
+func DefaultPlanAt(home LatLon) Plan {
 	at := func(eastM, northM float64) Waypoint {
-		return Waypoint{LatLon: FromLocal(DefaultHome, eastM, northM), AltM: DefaultAltM}
+		return Waypoint{LatLon: FromLocal(home, eastM, northM), AltM: DefaultAltM}
 	}
 	return Plan{
-		Home:      DefaultHome,
+		Home:      home,
 		Waypoints: []Waypoint{at(120, 90), at(300, 110), at(340, -80), at(160, -150)},
 	}
 }

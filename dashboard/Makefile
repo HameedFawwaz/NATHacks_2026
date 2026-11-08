@@ -1,4 +1,4 @@
-.PHONY: build run test clean
+.PHONY: build run live test clean
 
 build:
 	GOOS=js GOARCH=wasm go build -ldflags="-s -w" -o web/app.wasm ./cmd/app
@@ -6,6 +6,9 @@ build:
 
 run: build
 	go run ./cmd/serve
+
+live: build
+	go run ./cmd/serve -mavlink 127.0.0.1:14552
 
 test:
 	go test ./...

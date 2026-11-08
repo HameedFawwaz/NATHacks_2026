@@ -12,13 +12,15 @@ import (
 	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/model"
 )
 
-const (
-	minAltM = 1.0
-	maxAltM = 120.0 // the usual legal ceiling for small drones
-)
-
 func (a *app) bindPlan() {
+	if a.live != nil {
+		setText(byID("plan-fly"), "Upload to drone")
+	}
 	onClick(byID("plan-fly"), func(js.Value) {
+		if a.live != nil {
+			go a.uploadPlan() // a goroutine, because it waits on the network
+			return
+		}
 		a.newFlight()
 		a.setTab(tabFly)
 	})
@@ -34,9 +36,8 @@ func (a *app) bindPlan() {
 		if index.IsNull() {
 			return
 		}
-		if i, err := strconv.Atoi(index.String()); err == nil && i < len(a.plan.Waypoints) {
-			a.plan.Waypoints = slices.Delete(a.plan.Waypoints, i, i+1)
-			a.planChanged()
+		if i, err := strconv.Atoi(index.String()); err == nil {
+			a.removeWaypoint(i)
 		}
 	})
 	on(list, "change", func(e js.Value) {
@@ -51,7 +52,7 @@ func (a *app) bindPlan() {
 		}
 		// An unusable entry is reverted rather than kept, by the re-render below.
 		if alt, err := strconv.ParseFloat(target.Get("value").String(), 64); err == nil {
-			a.plan.Waypoints[i].AltM = min(max(alt, minAltM), maxAltM)
+			a.plan.Waypoints[i].AltM = min(max(alt, model.MinAltM), model.MaxAltM)
 		}
 		a.planChanged()
 	})
@@ -62,8 +63,17 @@ func (a *app) addWaypoint(p model.LatLon) {
 	a.planChanged()
 }
 
+func (a *app) removeWaypoint(i int) {
+	if i < 0 || i >= len(a.plan.Waypoints) {
+		return
+	}
+	a.plan.Waypoints = slices.Delete(a.plan.Waypoints, i, i+1)
+	a.planChanged()
+}
+
 func (a *app) planChanged() {
 	a.savePlan()
+	a.showPlanStatus("", false)
 	a.renderPlan()
 }
 
@@ -72,7 +82,7 @@ func (a *app) renderPlan() {
 	setText(byID("p-count"), strconv.Itoa(len(wps)))
 	setText(byID("p-distance"), formatDistance(a.plan.LengthM()))
 	setText(byID("p-time"), formatDuration(a.plan.EstimatedDuration()))
-	byID("plan-fly").Set("disabled", len(wps) == 0)
+	a.renderPlanAction()
 	byID("plan-clear").Set("disabled", len(wps) == 0)
 	byID("waypoints-empty").Set("hidden", len(wps) > 0)
 
@@ -87,8 +97,8 @@ func (a *app) renderPlan() {
 		alt := newEl("label", "wp-alt", "Alt")
 		input := newEl("input", "", "")
 		input.Set("type", "number")
-		input.Set("min", minAltM)
-		input.Set("max", maxAltM)
+		input.Set("min", model.MinAltM)
+		input.Set("max", model.MaxAltM)
 		input.Set("value", fmt.Sprintf("%.0f", w.AltM))
 		input.Call("setAttribute", "data-alt", strconv.Itoa(i))
 		alt.Call("append", input, "m")
@@ -102,6 +112,33 @@ func (a *app) renderPlan() {
 		list.Call("append", li)
 		prev = w.LatLon
 	}
+}
+
+// renderPlanAction enables the main button only when it can succeed, and says
+// why when it can't. The bridge enforces the same rules.
+func (a *app) renderPlanAction() {
+	button := byID("plan-fly")
+	hint := ""
+	switch {
+	case len(a.plan.Waypoints) == 0:
+		hint = "Add a waypoint first."
+	case a.live == nil:
+	case a.live.uploading:
+		hint = "Upload in progress."
+	case !a.snap.Connected:
+		hint = "No drone connected."
+	case a.snap.Armed:
+		hint = "Land before changing the drone's mission."
+	}
+	button.Set("disabled", hint != "")
+	button.Set("title", hint)
+}
+
+func (a *app) showPlanStatus(text string, isError bool) {
+	status := byID("plan-status")
+	setText(status, text)
+	status.Set("hidden", text == "")
+	setClass(status, "error", isError)
 }
 
 func formatDistance(m float64) string {

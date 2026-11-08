@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	colorPlan      = "#4aa8ff"
+	colorPlan      = "#23baff"
 	colorReported  = "#ffffff"
 	colorEstimated = "#3ecf8e"
 	colorDrift     = "#ff5c5c"
@@ -28,8 +28,8 @@ const (
 	fitMarginPx      = 90.0
 )
 
-// mapView draws onto a canvas with a flat projection: there are no tiles, so it
-// works without internet. Positions are metres east and north of the plan's home.
+// mapView draws onto a canvas with a flat projection and optional basemap tiles.
+// Positions are metres east and north of the plan's home; the grid works offline.
 type mapView struct {
 	app    *app
 	canvas js.Value
@@ -70,6 +70,14 @@ func newMapView(a *app) *mapView {
 	}), map[string]any{"passive": false})
 
 	on(js.Global().Get("window"), "resize", func(js.Value) { m.resize() })
+	// Banners and responsive cockpit panels can resize the map without a window
+	// resize. Keep pointer coordinates and the canvas backing size in sync.
+	if observer := js.Global().Get("ResizeObserver"); !observer.IsUndefined() {
+		observer.New(js.FuncOf(func(js.Value, []js.Value) any {
+			m.resize()
+			return nil
+		})).Call("observe", canvas)
+	}
 	m.resize()
 	return m
 }
@@ -82,12 +90,12 @@ func (m *mapView) resize() {
 	m.canvas.Set("height", int(m.height*m.dpr))
 }
 
-// activePlan is the plan being edited on the Plan tab, or the one being flown.
+// activePlan is the plan being edited on the Plan tab, or the route on the Fly tab.
 func (m *mapView) activePlan() model.Plan {
 	if m.app.tab == tabPlan {
 		return m.app.plan
 	}
-	return m.app.sim.Plan()
+	return m.app.flownPlan
 }
 
 // origin is fixed to the home location so a view survives edits to the waypoints.
@@ -104,14 +112,25 @@ func (m *mapView) fromScreen(x, y float64) model.LatLon {
 	return model.FromLocal(m.origin(), east, north)
 }
 
-// fit frames the home location and the whole active route.
+// fit frames home and the whole route, and on the Fly tab where the drone has been.
 func (m *mapView) fit() {
 	plan := m.activePlan()
 	minE, maxE, minN, maxN := -50.0, 50.0, -50.0, 50.0 // keeps a lone home point from over-zooming
-	for _, w := range plan.Waypoints {
-		e, n := model.ToLocal(m.origin(), w.LatLon)
+	include := func(p model.LatLon) {
+		e, n := model.ToLocal(m.origin(), p)
 		minE, maxE = min(minE, e), max(maxE, e)
 		minN, maxN = min(minN, n), max(maxN, n)
+	}
+	for _, w := range plan.Waypoints {
+		include(w.LatLon)
+	}
+	if m.app.tab == tabFly {
+		for _, p := range m.app.reportedTrail {
+			include(p)
+		}
+		for _, p := range m.app.estimatedTrail {
+			include(p)
+		}
 	}
 	m.centerEast, m.centerNorth = (minE+maxE)/2, (minN+maxN)/2
 	availW := max(m.width-2*fitMarginPx, 100)
@@ -181,6 +200,12 @@ func (m *mapView) onPointerUp(e js.Value) {
 	switch {
 	case m.dragging && m.dragWaypoint >= 0:
 		m.app.planChanged()
+	case !m.dragging && m.app.tab == tabPlan && e.Get("shiftKey").Bool():
+		// Shift-click only removes an existing waypoint; empty space and home
+		// are left alone. A Shift-drag still moves the point normally.
+		if e.Get("button").Int() == 0 {
+			m.app.removeWaypoint(m.dragWaypoint)
+		}
 	case !m.dragging && m.dragWaypoint < 0 && m.app.tab == tabPlan:
 		x, y := pointerPos(e)
 		m.app.addWaypoint(m.fromScreen(x, y))
@@ -203,8 +228,16 @@ func (m *mapView) onWheel(e js.Value) {
 
 func (m *mapView) startDrawing() {
 	var frame js.Func
-	frame = js.FuncOf(func(js.Value, []js.Value) any {
-		m.draw()
+	var lastFrame float64
+	frame = js.FuncOf(func(_ js.Value, args []js.Value) any {
+		// Telemetry arrives at 10 Hz. 30 fps keeps interaction smooth without
+		// redrawing the entire map at 60/120 Hz on high-refresh displays.
+		now := args[0].Float()
+		const interval = 1000.0 / 30
+		if now-lastFrame >= interval {
+			lastFrame = now - math.Mod(now-lastFrame, interval)
+			m.draw()
+		}
 		js.Global().Call("requestAnimationFrame", frame)
 		return nil
 	})
@@ -218,6 +251,12 @@ func (m *mapView) draw() {
 	c.Call("fillRect", 0, 0, m.width, m.height)
 
 	m.drawGrid()
+	// The optional presentation layer uses the same local-metre projection. Keep
+	// the grid underneath so missing/offline tiles don't affect flight planning.
+	if tiles := js.Global().Get("TrustIssuesMap"); !tiles.IsUndefined() && !tiles.IsNull() {
+		origin := m.origin()
+		tiles.Call("draw", c, m.width, m.height, origin.Lat, origin.Lon, m.centerEast, m.centerNorth, m.scale)
+	}
 	m.drawRoute(m.activePlan())
 	if m.app.tab == tabFly {
 		m.drawFlight()
@@ -337,16 +376,23 @@ func (m *mapView) drawFlight() {
 	c := m.ctx
 	s := m.app.snap
 
+	// Dimmed once contact is lost: it's where the drone was, not where it is.
+	c.Call("save")
+	defer c.Call("restore")
+	if !s.Connected {
+		c.Set("globalAlpha", 0.35)
+	}
+
 	c.Set("lineWidth", 2)
 	c.Set("strokeStyle", colorEstimated)
 	m.polyline(m.app.estimatedTrail)
 	c.Set("strokeStyle", colorReported)
 	m.polyline(m.app.reportedTrail)
 
-	rx, ry := m.toScreen(s.Reported)
 	if s.HasEstimate {
 		ex, ey := m.toScreen(s.Estimated)
 		if meters, show := s.Drift(); show {
+			rx, ry := m.toScreen(s.Reported)
 			m.drawDrift(rx, ry, ex, ey, meters)
 		}
 		// A diamond, so it stays distinct from the GPS arrow when they overlap.
@@ -360,7 +406,19 @@ func (m *mapView) drawFlight() {
 		c.Call("fill")
 	}
 
-	// The GPS position, as an arrow pointing along the heading.
+	if !s.HasPosition {
+		return
+	}
+
+	// The GPS position, as an arrow pointing along the heading, or a dot without one.
+	rx, ry := m.toScreen(s.Reported)
+	if !s.HasHeading {
+		c.Set("fillStyle", colorReported)
+		c.Call("beginPath")
+		c.Call("arc", rx, ry, 7, 0, 2*math.Pi)
+		c.Call("fill")
+		return
+	}
 	heading := s.HeadingDeg * math.Pi / 180
 	c.Call("save")
 	c.Call("translate", rx, ry)
@@ -389,9 +447,11 @@ func (m *mapView) drawDrift(rx, ry, ex, ey, meters float64) {
 	c.Call("stroke")
 
 	label := fmt.Sprintf("%.0f m apart", meters)
-	x, y := (rx+ex)/2, (ry+ey)/2
 	c.Set("font", "700 12px system-ui, sans-serif")
 	width := c.Call("measureText", label).Get("width").Float()
+	// Kept on screen: the GPS position can be spoofed far outside the view.
+	x := max(width/2+8, min(m.width-width/2-8, (rx+ex)/2))
+	y := max(60, min(m.height-20, (ry+ey)/2))
 	c.Set("fillStyle", colorDrift)
 	c.Call("beginPath")
 	c.Call("roundRect", x-width/2-6, y-10, width+12, 20, 4)
