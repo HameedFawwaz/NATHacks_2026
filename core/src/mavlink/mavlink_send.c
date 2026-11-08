@@ -17,6 +17,25 @@ bool core_mavlink_internal_send_raw(core_mavlink_conn_t *conn, const mavlink_mes
         return false;
     }
 
+    /*
+     * The vendored *_pack() helpers always finalize on MAVLINK_COMM_0, so
+     * messages arrive here unsigned. Always re-finalize against this
+     * connection's channel for its own sequence number and signing state.
+     */
+    const mavlink_msg_entry_t *info = mavlink_get_msg_entry(msg->msgid);
+    if (!info) {
+        CORE_LOG_WARN("mavlink send failed: unknown message id %u", (unsigned)msg->msgid);
+        return false;
+    }
+    mavlink_message_t finalized_msg = *msg;
+    mavlink_status_t *chan_status = mavlink_get_channel_status(conn->chan);
+    if (mavlink_finalize_message_buffer(&finalized_msg, msg->sysid, msg->compid, chan_status,
+                                        info->min_msg_len, msg->len, info->crc_extra) == 0) {
+        CORE_LOG_WARN("mavlink send failed: could not finalize message");
+        return false;
+    }
+    msg = &finalized_msg;
+
     uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = mavlink_msg_to_send_buffer(buffer, msg);
 
@@ -75,19 +94,6 @@ bool core_mavlink_send_named_value_float(core_mavlink_conn_t *conn, const char *
     return core_mavlink_internal_send_raw(conn, &msg);
 }
 
-bool core_mavlink_request_message_interval(core_mavlink_conn_t *conn, uint32_t message_id, int32_t interval_us) {
-    if (!conn) {
-        return false;
-    }
-
-    mavlink_message_t msg;
-    mavlink_msg_command_long_pack(conn->cfg.system_id, conn->cfg.component_id, &msg,
-                                   1, MAV_COMP_ID_AUTOPILOT1, /* single-vehicle-SITL simplification */
-                                   MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-                                   (float)message_id, (float)interval_us, 0, 0, 0, 0, 0);
-    return core_mavlink_internal_send_raw(conn, &msg);
-}
-
 bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trust_score_t *score) {
     if (!conn || !score) {
         return false;
@@ -98,5 +104,34 @@ bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trus
     ok = core_mavlink_send_named_value_float(conn, "TRUST_NAV", score->nav_trust) && ok;
     ok = core_mavlink_send_named_value_float(conn, "TRUST_LNK", score->link_trust) && ok;
     ok = core_mavlink_send_named_value_float(conn, "TRUST_CRY", score->crypto_trust) && ok;
+    ok = core_mavlink_send_named_value_float(conn, "TRUST_HW", score->hardware_trust) && ok;
     return ok;
+}
+
+static bool send_command_long(core_mavlink_conn_t *conn, uint16_t command, float param1, float param2) {
+    if (!conn) {
+        return false;
+    }
+    if (conn->vehicle_sysid == 0) {
+        CORE_LOG_WARN("mavlink command %u not sent: vehicle not identified yet", command);
+        return false;
+    }
+
+    mavlink_message_t msg;
+    mavlink_msg_command_long_pack(conn->cfg.system_id, conn->cfg.component_id, &msg,
+                                   conn->vehicle_sysid, conn->vehicle_compid, command, 0,
+                                   param1, param2, 0, 0, 0, 0, 0);
+    return core_mavlink_internal_send_raw(conn, &msg);
+}
+
+bool core_mavlink_send_set_mode(core_mavlink_conn_t *conn, uint32_t custom_mode) {
+    return send_command_long(conn, MAV_CMD_DO_SET_MODE, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, (float)custom_mode);
+}
+
+bool core_mavlink_send_set_ekf_source_set(core_mavlink_conn_t *conn, uint8_t source_set) {
+    return send_command_long(conn, CORE_MAV_CMD_SET_EKF_SOURCE_SET, (float)source_set, 0);
+}
+
+bool core_mavlink_request_message_interval(core_mavlink_conn_t *conn, uint32_t message_id, int32_t interval_us) {
+    return send_command_long(conn, MAV_CMD_SET_MESSAGE_INTERVAL, (float)message_id, (float)interval_us);
 }

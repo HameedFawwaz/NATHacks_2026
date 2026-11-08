@@ -14,6 +14,7 @@
  * consumers can judge freshness themselves.
  */
 
+/* Only the autopilot's heartbeat lands here; GCS and companion heartbeats are ignored. */
 typedef struct {
     uint8_t type;           /* MAV_TYPE */
     uint8_t autopilot;      /* MAV_AUTOPILOT */
@@ -82,6 +83,28 @@ typedef struct {
     bool valid;
 } core_radio_status_t;
 
+/* The most recent COMMAND_ACK; a newer ack for any command overwrites it. */
+typedef struct {
+    uint16_t command;  /* MAV_CMD */
+    uint8_t result;    /* MAV_RESULT */
+    uint64_t last_update_ms;
+    bool valid;
+} core_command_ack_t;
+
+/*
+ * Counters for MAVLink signing enforcement. All zero while signing is off.
+ * A rising rejected_* count is direct evidence of someone injecting or
+ * replaying frames on the link.
+ */
+typedef struct {
+    bool signing_enabled;
+    uint32_t signed_accepted;     /* frames with a valid signature */
+    uint32_t rejected_unsigned;   /* frames with no signature at all */
+    uint32_t rejected_bad_sig;    /* signature present but wrong key/tampered */
+    uint32_t rejected_replay;     /* valid-looking signature but stale/repeated timestamp */
+    uint64_t last_reject_ms;      /* core_now_ms() of most recent rejection, 0 = never */
+} core_link_security_t;
+
 typedef struct {
     core_heartbeat_t heartbeat;
     core_global_position_t global_position;
@@ -90,6 +113,9 @@ typedef struct {
     core_imu_t imu;
     core_baro_t baro;
     core_radio_status_t radio_status;
+    core_command_ack_t command_ack;
+
+    core_link_security_t link_security;
 } core_telemetry_t;
 
 #endif /* CORE_MAVLINK_TELEMETRY_H */

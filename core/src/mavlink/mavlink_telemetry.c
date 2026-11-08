@@ -9,6 +9,13 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
     case MAVLINK_MSG_ID_HEARTBEAT: {
         mavlink_heartbeat_t hb;
         mavlink_msg_heartbeat_decode(msg, &hb);
+        /* A GCS or companion on the same link must not be mistaken for the
+         * vehicle: autonomy reads armed state and flight mode from this. */
+        if (hb.autopilot == MAV_AUTOPILOT_INVALID) {
+            break;
+        }
+        conn->vehicle_sysid = msg->sysid;
+        conn->vehicle_compid = msg->compid;
         conn->telemetry.heartbeat.type = hb.type;
         conn->telemetry.heartbeat.autopilot = hb.autopilot;
         conn->telemetry.heartbeat.base_mode = hb.base_mode;
@@ -97,6 +104,15 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         conn->telemetry.radio_status.fixed = radio.fixed;
         conn->telemetry.radio_status.last_update_ms = now;
         conn->telemetry.radio_status.valid = true;
+        break;
+    }
+    case MAVLINK_MSG_ID_COMMAND_ACK: {
+        mavlink_command_ack_t ack;
+        mavlink_msg_command_ack_decode(msg, &ack);
+        conn->telemetry.command_ack.command = ack.command;
+        conn->telemetry.command_ack.result = ack.result;
+        conn->telemetry.command_ack.last_update_ms = now;
+        conn->telemetry.command_ack.valid = true;
         break;
     }
     default:

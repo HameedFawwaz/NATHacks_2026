@@ -34,8 +34,9 @@ ctest --test-dir build --output-on-failure
 
 `mavlink/` and `common/` are implemented (connection handling, telemetry decode, send
 helpers, shared trust-score struct — see `include/core/mavlink/mavlink.h` for the public
-API). `nav/` (GNSS spoofing detection) is implemented — see below. `link/`, `autonomy/`,
-`crypto/` are still empty, scoped to their own issues.
+API). `nav/` (GNSS spoofing detection), `autonomy/` (decision layer), and `crypto/`
+(link signing) are also implemented — see below. `link/` (lost-link detection/failover)
+is still empty, scoped to its own issue.
 
 ## GNSS spoofing detection (`nav/`)
 
@@ -63,6 +64,35 @@ properly-sampled filter would see. Thresholds were loosened and the long horizon
 window substantially but didn't eliminate it. Follow-up: figure out why the rate request
 isn't taking effect (possibly a MAVProxy pass-through quirk, worth checking against a
 direct SITL connection without MAVProxy in between), or add basic bias estimation.
+
+## Autonomy
+
+`autonomy/` turns trust scores into a response. The table of behaviors is at the top of
+`include/core/autonomy/autonomy.h`. Each transition goes to stderr, to a STATUSTEXT, and
+to a CSV log.
+
+The nav and link detectors aren't merged yet, so `tools/autonomy_runner` stands in for
+them: it reads scores from stdin (`nav 0.1`, `link 0`, `hw 1`, `crypto 1`) and otherwise
+runs the real decision loop. Once the detectors exist they should write through
+`core_trust_score_set_component()` and call `core_autonomy_tick()` from the main loop.
+
+`sitl/run_autonomy_scenario.py` runs this end to end against ArduPilot SITL. It flies a
+copter, injects an attack, and checks the vehicle's response:
+
+```
+python3 sitl/run_autonomy_scenario.py --ardupilot /path/to/ardupilot --runner build/tools/autonomy_runner gnss
+python3 sitl/run_autonomy_scenario.py --ardupilot /path/to/ardupilot --runner build/tools/autonomy_runner link
+python3 sitl/run_autonomy_scenario.py --ardupilot /path/to/ardupilot --runner build/tools/autonomy_runner multi
+```
+
+`--ardupilot` is a checkout with `./waf configure --board sitl && ./waf copter` already
+run. The script needs `pymavlink`. GNSS failover needs a non-GPS source set on the vehicle; see
+`sitl/autonomy_failover.parm` for the optical-flow setup the scenario uses.
+
+Building Copter-4.5 SITL on Apple Silicon needed three workarounds: `setuptools<81` in
+the venv (`dronecan` imports `pkg_resources`, and without it the build hangs instead of
+failing), `CC=/usr/bin/clang CXX=/usr/bin/clang++`, and `LDFLAGS=-Wl,-no_fixup_chains`
+at `./waf configure`.
 
 ## Testing against ArduPilot SITL
 
@@ -113,7 +143,12 @@ sim_vehicle.py -v ArduCopter --out=udp:127.0.0.1:14551
 
 In every case, watch for the EKF-divergence sub-score (`ekf=`) - since the proxy only
 mutates `GPS_RAW_INT`, the flight controller's own `GLOBAL_POSITION_INT` keeps reflecting
-ground truth, making that check the most durable signal for a sustained attack.
+ground truth, so the EKF-divergence check reliably fires in this specific harness. **This
+is a property of the harness, not a durability guarantee**: a real spoof that fools the
+GPS receiver itself would make `GLOBAL_POSITION_INT` agree with the spoofed
+`GPS_RAW_INT` too, and the EKF-divergence check would show nothing — in that case
+detection rests entirely on the IMU-based KF checks (`dr=`/`drift=`), which never ingest
+GPS at all.
 
 ### Flying the vehicle for a real (non-stationary) test
 
@@ -131,6 +166,91 @@ python3 core/sitl/fly_square.py                     # defaults to udpin:0.0.0.0:
 It talks directly to the vehicle (arm/mode/takeoff/position commands), separately from
 `core_main`/`gnss_spoof_proxy`, which only observe telemetry — run it independently,
 before or during a `core_main` session on a different port, with no conflict.
+
+## Link signing (operator <-> drone authentication)
+
+The link is protected with **MAVLink 2 message signing**: every frame carries a
+SHA-256 signature over the key, header, payload, link id and a timestamp. With
+signing on, `core_mavlink_conn_*` drops any inbound frame that is unsigned,
+signed with the wrong key, tampered with, or replayed (old/repeated timestamp),
+and signs everything it sends. Latency cost is a few microseconds per message
+(`test_link_signing` prints the measurement).
+
+Signing authenticates but does **not encrypt**: telemetry is still readable by
+an eavesdropper, but commands and alerts cannot be forged or replayed.
+
+### Provisioning a key
+
+For MAVProxy/ArduPilot, derive the key from the **same nonempty ASCII
+passphrase** used in MAVProxy's `signing setup <same passphrase>`. Only printable
+ASCII bytes `0x21..0x7e` are accepted: no whitespace or control characters.
+MAVProxy splits its command line on whitespace and uses only the first argument,
+so a multiword passphrase would otherwise produce mismatched keys.
+
+```sh
+./build/tools/signing_keygen signing.key --from-passphrase
+# Enter the passphrase on stdin (one line); do not pass it as a command argument.
+```
+
+This writes SHA-256 of the passphrase bytes, matching MAVProxy exactly. The
+trailing line ending is stripped. Use a strong, unique passphrase and a private
+terminal: stdin is not hidden when entered interactively.
+
+Random keys are for links where **both ends are our own code**:
+
+```sh
+./build/tools/signing_keygen signing.key              # random key, hex file, mode 0600
+./build/tools/signing_keygen other.key --print-hex     # also expose raw key on stdout
+```
+
+`--print-hex` is not a MAVProxy provisioning command: MAVProxy hashes its
+passphrase argument and cannot take a raw hex key. It can be combined with
+`--from-passphrase`, but avoid exposing key material unnecessarily.
+
+`signing_keygen` refuses to overwrite an existing key. `*.key` is gitignored -
+never commit a key. Copy the same file to the ground station and the companion
+computer over a trusted channel (physical media or `scp`; not over the
+unsigned link itself). Both ends must hold the same key.
+
+### Enabling it in code
+
+```c
+core_mavlink_conn_config_t cfg = { /* ... as before ... */ };
+/* CORE_SIGNING_KEY_FILE=signing.key; a bad configured key must fail closed. */
+core_signing_env_result_t result = core_signing_key_load_from_env(cfg.signing_key);
+if (result == CORE_SIGNING_ENV_ERROR) {
+    return EXIT_FAILURE;  /* in main; include <stdlib.h> */
+}
+cfg.signing_enabled = (result == CORE_SIGNING_ENV_LOADED); /* UNSET leaves it off */
+cfg.signing_link_id = 0;   /* unique per link if you run several */
+```
+
+or load a path directly with `core_signing_key_load_file()`. If signing is not
+enabled (default for a zero-initialised config), behaviour is unchanged.
+
+Rejections are counted in `core_telemetry_t.link_security`
+(`rejected_unsigned`, `rejected_bad_sig`, `rejected_replay`, `last_reject_ms`)
+so the dashboard and autonomy layer can treat a rising count as an attack
+indicator.
+
+### Rotation
+
+1. Generate a new key with `signing_keygen` (use `--from-passphrase` for MAVProxy).
+2. Stop the drone link, copy the new key to both ends, restart both.
+3. Delete the old key file.
+
+There is no live rekeying: both ends must switch together. Rotate after any
+suspected key exposure and before each event/flight day.
+
+### Flight-controller side
+
+The autopilot must be given the same key so it accepts our signed commands
+(and signs its telemetry). ArduPilot stores it via the `SETUP_SIGNING` MAVLink
+message; MAVProxy's `signing setup <passphrase>` command does this, deriving
+the 32-byte key as the SHA-256 of the ASCII passphrase. Use the passphrase route
+above, and provision over a trusted local link, not an exposed unsigned link.
+**Not yet verified against our SITL setup**: confirm the handshake and signature
+verification before flight; do not silently fall back to an unsigned autopilot link.
 
 ## Dashboard
 
