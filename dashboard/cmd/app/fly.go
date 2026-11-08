@@ -17,6 +17,12 @@ func (a *app) bindFly() {
 	if a.live != nil {
 		byID("sim-controls").Set("hidden", true)
 		byID("sim-demo").Set("hidden", true)
+		byID("live-controls").Set("hidden", false)
+		onClick(byID("live-start"), func(js.Value) {
+			if !a.live.starting {
+				go a.startFlight()
+			}
+		})
 		return
 	}
 	onClick(byID("flight-start"), func(js.Value) {
@@ -64,6 +70,10 @@ func (a *app) renderFly() {
 	a.renderSummary(subsystems)
 	a.renderInstruments()
 
+	if a.live != nil {
+		a.renderFlyAction()
+	}
+
 	if a.sim == nil {
 		return
 	}
@@ -73,6 +83,32 @@ func (a *app) renderFly() {
 		b := buttons.Index(i)
 		setClass(b, "active", b.Call("getAttribute", "data-scenario").String() == strconv.Itoa(int(a.sim.Scenario())))
 	}
+}
+
+// renderFlyAction enables the live "Start flight" button only when it can
+// succeed, mirroring renderPlanAction's convention for "Upload to drone".
+func (a *app) renderFlyAction() {
+	button := byID("live-start")
+	hint := ""
+	switch {
+	case !a.live.uploaded:
+		hint = "Upload a plan first."
+	case a.live.starting:
+		hint = "Starting…"
+	case !a.snap.Connected:
+		hint = "No drone connected."
+	case a.snap.Armed:
+		hint = "Already armed."
+	}
+	button.Set("disabled", hint != "")
+	button.Set("title", hint)
+}
+
+func (a *app) showLiveStatus(text string, isError bool) {
+	status := byID("live-status")
+	setText(status, text)
+	status.Set("hidden", text == "")
+	setClass(status, "error", isError)
 }
 
 // renderSource says where the data comes from. It stays visible so simulated

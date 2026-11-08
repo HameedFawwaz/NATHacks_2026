@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -30,9 +31,10 @@ const (
 )
 
 var (
-	ErrNoVehicle = errors.New("no drone connected")
-	ErrArmed     = errors.New("the drone is armed; land before changing its mission")
-	ErrBusy      = errors.New("another upload is in progress")
+	ErrNoVehicle    = errors.New("no drone connected")
+	ErrArmed        = errors.New("the drone is armed; land before changing its mission")
+	ErrAlreadyArmed = errors.New("the drone is already armed")
+	ErrBusy         = errors.New("another upload is in progress")
 )
 
 // Bridge talks MAVLink to one vehicle over UDP.
@@ -45,6 +47,7 @@ type Bridge struct {
 	peer    *net.UDPAddr // where the autopilot's heartbeats come from
 	seq     uint8
 	upload  *upload
+	command *command
 }
 
 // Listen opens the UDP socket a vehicle or MAVProxy sends telemetry to.
@@ -98,6 +101,7 @@ func (b *Bridge) handle(data []byte, from *net.UDPAddr) {
 				b.peer = from
 			}
 			b.handleMission(f)
+			b.handleCommand(f)
 		}
 	}
 	b.vehicle.update(now)
@@ -282,6 +286,112 @@ func (b *Bridge) cancelUpload() {
 // bridge starting a new transfer but can briefly refuse another ground station's.
 func (b *Bridge) cancelUploadLocked() {
 	b.sendLocked(mavlink.MsgMissionAck, mavlink.PackMissionAck(b.vehicle.sysID, b.vehicle.compID, mavlink.MissionCancelled))
+}
+
+// StartFlight arms the vehicle and starts the uploaded mission: GUIDED, arm,
+// AUTO, MISSION_START. Each step is retried until its COMMAND_ACK arrives.
+func (b *Bridge) StartFlight(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	c := &command{
+		steps:    startFlightSteps,
+		progress: make(chan struct{}, 1),
+		done:     make(chan error, 1),
+	}
+
+	b.mu.Lock()
+	now := b.nowMs()
+	switch {
+	case !b.vehicle.connected(now) || b.peer == nil:
+		b.mu.Unlock()
+		return ErrNoVehicle
+	case b.vehicle.snap.Armed:
+		b.mu.Unlock()
+		return ErrAlreadyArmed
+	case b.command != nil:
+		b.mu.Unlock()
+		return ErrBusy
+	}
+	b.command = c
+	b.sendCommandStepLocked(c)
+	b.mu.Unlock()
+
+	defer func() {
+		b.mu.Lock()
+		b.command = nil
+		b.mu.Unlock()
+	}()
+
+	retry := time.NewTimer(uploadRetryInterval)
+	defer retry.Stop()
+	retries := 0
+	for {
+		select {
+		case err := <-c.done:
+			return err
+		case <-c.progress:
+			retries = 0
+			retry.Reset(uploadRetryInterval)
+		case <-retry.C:
+			retries++
+			if retries > uploadMaxRetries {
+				return fmt.Errorf("the drone stopped responding while %s", commandName(c.steps[c.index].command))
+			}
+			b.mu.Lock()
+			if !b.vehicle.connected(b.nowMs()) {
+				b.mu.Unlock()
+				return errors.New("lost contact with the drone while starting the flight")
+			}
+			c.lastSent()
+			b.mu.Unlock()
+			retry.Reset(uploadRetryInterval)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// sendCommandStepLocked sends the command sequence's current step. Callers hold b.mu.
+func (b *Bridge) sendCommandStepLocked(c *command) {
+	step := c.steps[c.index]
+	sys, comp := b.vehicle.sysID, b.vehicle.compID
+	c.lastSent = func() {
+		b.sendLocked(mavlink.MsgCommandLong, mavlink.PackCommandLong(sys, comp, step.command, step.param1, step.param2))
+	}
+	c.lastSent()
+}
+
+// handleCommand advances a command sequence in progress. Callers hold b.mu.
+func (b *Bridge) handleCommand(f mavlink.Frame) {
+	c := b.command
+	if c == nil || f.MsgID != mavlink.MsgCommandAck {
+		return
+	}
+	cmd, result, targetSys, targetComp := mavlink.DecodeCommandAck(f.Payload)
+	if targetSys != ownSysID || targetComp != ownCompID || cmd != c.steps[c.index].command {
+		return // not an ack for the step currently waited on
+	}
+
+	switch result {
+	case mavlink.ResultInProgress:
+		// Still working on it; treat as progress so it isn't resent mid-flight.
+	case mavlink.ResultAccepted:
+		c.index++
+		if c.index == len(c.steps) {
+			c.finish(nil)
+			return
+		}
+		b.sendCommandStepLocked(c)
+	default:
+		c.finish(commandResultError(cmd, result))
+		return
+	}
+	select {
+	case c.progress <- struct{}{}:
+	default:
+	}
 }
 
 // handleMission advances an upload in progress. Callers hold b.mu.

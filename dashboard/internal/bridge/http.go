@@ -37,6 +37,7 @@ func (b *Bridge) Handler(allowedHosts ...string) http.Handler {
 	})
 	mux.HandleFunc("GET /api/telemetry", b.serveTelemetry)
 	mux.HandleFunc("POST /api/mission", b.serveMission)
+	mux.HandleFunc("POST /api/start", b.serveStart)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowedHost(r.Host, allowedHosts) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
@@ -138,6 +139,27 @@ func (b *Bridge) serveMission(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]int{"items": len(BuildMission(plan))})
 	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrArmed), errors.Is(err, ErrBusy):
+		fail(http.StatusConflict, err.Error())
+	default:
+		fail(http.StatusBadGateway, err.Error())
+	}
+}
+
+func (b *Bridge) serveStart(w http.ResponseWriter, r *http.Request) {
+	fail := func(status int, message string) {
+		writeJSON(w, status, map[string]string{"error": message})
+	}
+	if !sameOrigin(r) {
+		fail(http.StatusForbidden, "cross-origin request refused")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), uploadTimeout)
+	defer cancel()
+	switch err := b.StartFlight(ctx); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"started": true})
+	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrAlreadyArmed), errors.Is(err, ErrBusy):
 		fail(http.StatusConflict, err.Error())
 	default:
 		fail(http.StatusBadGateway, err.Error())

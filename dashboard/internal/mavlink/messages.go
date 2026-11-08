@@ -14,7 +14,8 @@ const (
 	TypeGCS               = 6
 	TypeOnboardController = 18
 
-	ModeFlagArmed = 128
+	ModeFlagArmed             = 128
+	ModeFlagCustomModeEnabled = 1
 
 	SensorGyro  = 1 << 0
 	SensorAccel = 1 << 1
@@ -25,6 +26,10 @@ const (
 	CmdNavRTL      = 20
 	CmdNavTakeoff  = 22
 
+	CmdDoSetMode          = 176
+	CmdComponentArmDisarm = 400
+	CmdMissionStart       = 300
+
 	FrameGlobal            = 0
 	FrameGlobalRelativeAlt = 3
 
@@ -33,6 +38,14 @@ const (
 	MissionCancelled   = 14
 
 	DataStreamAll = 0
+
+	// MAV_RESULT values, returned in COMMAND_ACK.
+	ResultAccepted            = 0
+	ResultTemporarilyRejected = 1
+	ResultDenied              = 2
+	ResultUnsupported         = 3
+	ResultFailed              = 4
+	ResultInProgress          = 5
 )
 
 // Field values meaning "unknown".
@@ -119,6 +132,10 @@ func DecodeMissionAck(p []byte) (targetSys, targetComp, result, missionType uint
 	return p[0], p[1], p[2], p[3]
 }
 
+func DecodeCommandAck(p []byte) (command uint16, result, targetSys, targetComp uint8) {
+	return u16(p), p[2], p[8], p[9]
+}
+
 func cString(b []byte) string {
 	if i := bytes.IndexByte(b, 0); i >= 0 {
 		b = b[:i]
@@ -152,6 +169,17 @@ func PackMissionCount(targetSys, targetComp uint8, count uint16) []byte {
 func PackMissionAck(targetSys, targetComp, result uint8) []byte {
 	p := make([]byte, 8)
 	p[0], p[1], p[2], p[3] = targetSys, targetComp, result, MissionTypeMission
+	return p
+}
+
+// PackCommandLong returns the payload of a COMMAND_LONG using only param1 and
+// param2; every command this package sends needs no more than that.
+func PackCommandLong(targetSys, targetComp uint8, command uint16, param1, param2 float32) []byte {
+	p := make([]byte, 33)
+	binary.LittleEndian.PutUint32(p[0:], math.Float32bits(param1))
+	binary.LittleEndian.PutUint32(p[4:], math.Float32bits(param2))
+	binary.LittleEndian.PutUint16(p[28:], command)
+	p[30], p[31] = targetSys, targetComp
 	return p
 }
 

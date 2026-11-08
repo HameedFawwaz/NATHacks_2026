@@ -18,6 +18,7 @@ type liveState struct {
 	lastMessage float64 // performance.now() of the newest message
 	uploaded    bool    // a plan has been sent to the drone from this page
 	uploading   bool
+	starting    bool // a start-flight request is in flight
 	homeSynced  bool
 }
 
@@ -136,4 +137,32 @@ func (a *app) uploadPlan() {
 	a.live.uploaded = true
 	a.flownPlan = plan
 	a.showPlanStatus("Uploaded. Arm and switch to AUTO from your ground control to fly it.", false)
+}
+
+// startFlight arms the drone and starts the uploaded mission. It runs as a goroutine.
+func (a *app) startFlight() {
+	a.live.starting = true
+	a.showLiveStatus("Starting…", false)
+	a.renderFlyAction()
+	defer func() {
+		a.live.starting = false
+		a.renderFlyAction()
+	}()
+
+	resp, err := await(js.Global().Call("fetch", "api/start", map[string]any{"method": "POST"}))
+	if err != nil {
+		a.showLiveStatus("Couldn't reach the bridge: "+err.Error(), true)
+		return
+	}
+	body, err := await(resp.Call("json"))
+	if err != nil {
+		a.showLiveStatus("The bridge sent an unreadable reply.", true)
+		return
+	}
+	if !resp.Get("ok").Bool() {
+		a.showLiveStatus(body.Get("error").String(), true)
+		return
+	}
+
+	a.showLiveStatus("Flight started.", false)
 }

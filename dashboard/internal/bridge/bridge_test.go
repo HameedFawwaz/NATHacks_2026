@@ -304,6 +304,7 @@ type fakeVehicle struct {
 	silent            bool
 	loseFirstFinalAck bool // installs the mission but loses the ack, as a real link can
 	received          chan []mavlink.Frame
+	commands          chan mavlink.Frame // every COMMAND_LONG received, for command-sequence tests
 }
 
 func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
@@ -313,7 +314,11 @@ func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return &fakeVehicle{t: t, conn: conn, bridge: b.Addr().(*net.UDPAddr), received: make(chan []mavlink.Frame, 1)}
+	return &fakeVehicle{
+		t: t, conn: conn, bridge: b.Addr().(*net.UDPAddr),
+		received: make(chan []mavlink.Frame, 1),
+		commands: make(chan mavlink.Frame, 10),
+	}
 }
 
 func (f *fakeVehicle) send(msgID uint32, payload []byte) {
@@ -378,9 +383,39 @@ func (f *fakeVehicle) serve(ctx context.Context) {
 					continue
 				}
 				f.request(len(items))
+			case mavlink.MsgCommandLong:
+				select {
+				case f.commands <- fr:
+				default:
+				}
 			}
 		}
 	}
+}
+
+// decodeCommand reads the command field of a COMMAND_LONG payload.
+func decodeCommand(fr mavlink.Frame) uint16 {
+	return uint16(fr.Payload[28]) | uint16(fr.Payload[29])<<8
+}
+
+// nextCommand waits for the vehicle to receive a COMMAND_LONG.
+func (f *fakeVehicle) nextCommand(t *testing.T) mavlink.Frame {
+	t.Helper()
+	select {
+	case fr := <-f.commands:
+		return fr
+	case <-time.After(2 * time.Second):
+		t.Fatal("vehicle never received the expected command")
+		return mavlink.Frame{}
+	}
+}
+
+func (f *fakeVehicle) ack(command uint16, result uint8) {
+	p := make([]byte, 10)
+	p[0], p[1] = byte(command), byte(command>>8)
+	p[2] = result
+	p[8], p[9] = ownSysID, ownCompID
+	f.send(mavlink.MsgCommandAck, p)
 }
 
 func (f *fakeVehicle) request(seq int) {
@@ -614,6 +649,78 @@ func TestArmingDuringUploadStopsIt(t *testing.T) {
 	}
 }
 
+func TestStartFlightSequence(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+
+	result := make(chan error, 1)
+	go func() { result <- b.StartFlight(ctx) }()
+
+	wantOrder := []uint16{mavlink.CmdDoSetMode, mavlink.CmdComponentArmDisarm, mavlink.CmdDoSetMode, mavlink.CmdMissionStart}
+	for _, want := range wantOrder {
+		fr := f.nextCommand(t)
+		if got := decodeCommand(fr); got != want {
+			t.Fatalf("command = %d, want %d", got, want)
+		}
+		f.ack(want, mavlink.ResultAccepted)
+	}
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("StartFlight: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no result")
+	}
+}
+
+func TestStartFlightRefusedWithoutVehicleOrWhileArmed(t *testing.T) {
+	b, f, ctx := setup(t)
+	if err := b.StartFlight(ctx); err != ErrNoVehicle {
+		t.Fatalf("no vehicle: %v", err)
+	}
+	f.armed = true
+	connect(t, b, f)
+	if err := b.StartFlight(ctx); err != ErrAlreadyArmed {
+		t.Fatalf("armed: %v", err)
+	}
+}
+
+func TestStartFlightReportsRejection(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+
+	result := make(chan error, 1)
+	go func() { result <- b.StartFlight(ctx) }()
+
+	fr := f.nextCommand(t)
+	f.ack(decodeCommand(fr), mavlink.ResultDenied)
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "denied") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no result")
+	}
+}
+
+func TestStartFlightBusy(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+
+	go b.StartFlight(ctx)
+	f.nextCommand(t) // wait for the sequence to actually start
+	if err := b.StartFlight(ctx); err != ErrBusy {
+		t.Fatalf("busy: %v", err)
+	}
+}
+
 func TestHostAllowlist(t *testing.T) {
 	cases := map[string]bool{
 		"127.0.0.1:8080":    true,
@@ -680,6 +787,51 @@ func TestHTTPMissionRefusedWhileArmed(t *testing.T) {
 
 	body, _ := json.Marshal(model.DefaultPlan())
 	resp, err := http.Post(srv.URL+"/api/mission", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPStart(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+	srv := httptest.NewServer(b.Handler(""))
+	defer srv.Close()
+
+	go func() {
+		for i := 0; i < len(startFlightSteps); i++ {
+			select {
+			case fr := <-f.commands:
+				f.ack(decodeCommand(fr), mavlink.ResultAccepted)
+			case <-time.After(2 * time.Second):
+				return
+			}
+		}
+	}()
+
+	resp, err := http.Post(srv.URL+"/api/start", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPStartRefusedWhileArmed(t *testing.T) {
+	b, f, _ := setup(t)
+	f.armed = true
+	connect(t, b, f)
+	srv := httptest.NewServer(b.Handler(""))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/start", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,6 +19,8 @@ const (
 	MsgMissionRequestInt = 51
 	MsgRequestDataStream = 66
 	MsgMissionItemInt    = 73
+	MsgCommandLong       = 76
+	MsgCommandAck        = 77
 	MsgNamedValueFloat   = 251
 	MsgStatusText        = 253
 )
@@ -50,6 +52,8 @@ var messageInfo = map[uint32]struct {
 	MsgMissionRequestInt: {196, 5},
 	MsgRequestDataStream: {148, 6},
 	MsgMissionItemInt:    {38, 38},
+	MsgCommandLong:       {152, 33},
+	MsgCommandAck:        {143, 10},
 	MsgNamedValueFloat:   {170, 18},
 	MsgStatusText:        {83, 54},
 }
