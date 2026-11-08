@@ -1,4 +1,7 @@
-When I say hawk you say tuah
+# Trust Issues
+
+A drone survivability layer and mission-control dashboard. Detect spoofing, monitor
+subsystem trust, and keep flying when the world stops being trustworthy.
 
 ## Structure
 

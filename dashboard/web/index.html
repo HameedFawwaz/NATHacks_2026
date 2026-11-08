@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101112">
+  <title>Trust Issues — Mission Control</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%2376edc2'/%3E%3Cpath d='M10 12h20M20 12v18M12 20h16' stroke='%230b141a' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="mission.css">
+  <link rel="stylesheet" href="glitch.css">
+</head>
+<body>
+  <aside class="nav-rail" aria-label="Mission navigation">
+    <div class="rail-monogram" aria-hidden="true">TI<span>+</span></div>
+    <nav class="tabs" role="tablist" aria-label="Dashboard view" aria-orientation="vertical">
+      <button id="tab-fly" class="tab" role="tab" aria-label="Fly" title="Flight dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span>Fly</span>
+      </button>
+      <button id="tab-plan" class="tab" role="tab" aria-label="Plan" title="Plan a route">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 10c0 6-8 11-8 11S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg><span>Plan</span>
+      </button>
+    </nav>
+    <div class="rail-bottom"><span class="rail-status" aria-hidden="true"></span><span>LOCAL<br>CONSOLE</span><a class="sound-credit" href="audio/README.md" target="_blank" rel="noopener noreferrer">SOUND<br>CREDITS</a><span class="rail-version">v.01</span></div>
+  </aside>
+  <header class="topbar">
+    <div class="brand">trust issues<span class="brand-caption">A LITTLE DISTRUST. A SAFER FLIGHT.</span></div>
+    <div class="vehicle">
+      <span class="pill" id="vehicle-armed"></span>
+      <span class="pill" id="vehicle-mode"></span>
+    </div>
+    <div class="source-badge" id="source-badge"></div>
+    <button id="alarm-toggle" class="btn alarm-toggle" type="button" aria-pressed="false" title="Enable audible critical alerts">Enable alarm</button>
+  </header>
+
+  <div id="critical-banner" class="critical-banner" role="alert" hidden>
+    <span class="alert-beacon" aria-hidden="true"></span>
+    <strong>CRITICAL ALERT</strong>
+    <span id="critical-detail"></span>
+    <span class="alert-instruction">Check system health &amp; autonomy response</span>
+  </div>
+
+  <main class="layout">
+    <section class="map-pane">
+      <div class="map-stage" id="map-stage">
+      <canvas id="map" aria-label="Map of the planned route and the drone's position"></canvas>
+      <canvas id="map-glitch" class="glitch-surface" aria-hidden="true" hidden></canvas>
+      <div class="map-heading"><span class="eyebrow"><i class="record-dot" aria-hidden="true"></i> MISSION VIEW</span><h1>Trust, but verify.</h1><div class="map-note" id="map-status" role="status">Loading map · offline grid available</div></div>
+      <div class="basemap-switch" role="group" aria-label="Basemap style"><button id="map-satellite" type="button" aria-pressed="true">Satellite</button><button id="map-street" type="button" aria-pressed="false">Street</button></div>
+      <button id="map-fit" class="btn map-fit">Fit route</button>
+      <button id="map-effects" class="btn map-effects" type="button" aria-pressed="true" title="Disable critical map glitch effects">Glitch FX on</button>
+      <div class="map-compass" aria-label="Map is north up"><span>N</span>↑</div>
+      <div class="map-reticle" aria-hidden="true"><span></span></div>
+      <div class="glitch-readout" aria-hidden="true"><span class="glitch-caution-text">CAUTION // TRUST DEGRADED</span><span class="glitch-critical-text">CRITICAL // SYSTEM ALERT</span><small>VISUAL ALERT EFFECT</small></div>
+      <div class="map-imagery-note" id="map-imagery-note">SATELLITE BASEMAP / NOT LIVE VIDEO</div>
+      <div class="map-attribution"><a id="map-credit" href="https://goto.arcgisonline.com/maps/World_Imagery" target="_blank" rel="noopener noreferrer">Esri, Vantor, Earthstar Geographics, GIS User Community</a></div>
+
+      <div id="legend" class="legend">
+        <div><i class="key key-plan"></i>Planned route</div>
+        <div><i class="key key-reported"></i>GPS position</div>
+        <div><i class="key key-estimated"></i>Drone's own estimate</div>
+        <div><i class="key key-drift"></i>Disagreement</div>
+      </div>
+
+      <div id="plan-hint" class="plan-hint">Click to add a waypoint. Drag to move it. Shift-click a waypoint to remove it.</div>
+      </div>
+      <div class="flight-deck">
+        <div class="deck-title"><span class="eyebrow">FLIGHT INSTRUMENTS</span><span class="deck-subtitle">Know where you stand.</span><span class="deck-live">TELEMETRY / <span id="deck-data-source">SIMULATION</span></span></div>
+      <div id="instruments" class="instruments">
+        <div class="instrument"><label>Altitude</label><output id="i-alt"></output></div>
+        <div class="instrument"><label>Speed</label><output id="i-speed"></output></div>
+        <div class="instrument"><label>Heading</label><output id="i-heading"></output></div>
+        <div class="instrument"><label>Satellites</label><output id="i-sats"></output></div>
+        <div class="instrument"><label>GPS drift</label><output id="i-drift"></output></div>
+      </div>
+        <div class="heading-gauge" id="heading-gauge" role="img" aria-label="Vehicle heading unavailable"><div class="gauge-ticks"></div><span class="gauge-n">N</span><span class="gauge-e">E</span><span class="gauge-s">S</span><span class="gauge-w">W</span><div class="gauge-arrow" id="gauge-arrow"></div><div class="gauge-center"><output id="gauge-value">--</output><span>HEADING</span></div></div>
+      </div>
+    </section>
+
+    <aside class="side" id="side-fly">
+      <div class="section-heading"><div><span class="eyebrow">SURVIVABILITY LAYER</span><h2 class="vehicle-title">Trust Issues / 01</h2></div><svg class="drone-icon" viewBox="0 0 100 58" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M27 20 44 30M73 20 56 30M27 43 44 32M73 43 56 32M42 27h16v15H42zM50 17v10M37 46h26M39 42l-4 8M61 42l4 8"/><ellipse cx="23" cy="18" rx="18" ry="3"/><ellipse cx="77" cy="18" rx="18" ry="3"/><ellipse cx="23" cy="43" rx="18" ry="3"/><ellipse cx="77" cy="43" rx="18" ry="3"/><circle cx="50" cy="34" r="4"/></svg></div>
+      <div class="summary" id="summary">
+        <div class="summary-title" id="summary-title"></div>
+        <div class="summary-text" id="summary-text"></div>
+      </div>
+
+      <div class="actions" id="sim-controls">
+        <button id="flight-start" class="btn btn-primary">Start flight</button>
+        <button id="flight-reset" class="btn">Reset</button>
+      </div>
+
+      <h2>01 <span>System health</span></h2>
+      <div id="health" class="health"></div>
+
+      <div id="sim-demo">
+        <h2>02 <span>Threat simulator</span><small>DEMO ONLY</small></h2>
+        <p class="section-description">Inject a fault. Watch trust respond.</p>
+        <div id="scenarios" class="scenarios">
+          <button class="btn" data-scenario="0">All clear</button>
+          <button class="btn" data-scenario="1">GPS spoof</button>
+          <button class="btn" data-scenario="2">Link jam</button>
+          <button class="btn" data-scenario="3">Motor fault</button>
+        </div>
+      </div>
+
+      <h2>03 <span>Event stream</span></h2>
+      <ol id="events" class="events"></ol>
+    </aside>
+
+    <aside class="side" id="side-plan" hidden>
+      <div class="section-heading"><span class="eyebrow">MISSION PLANNER</span></div>
+      <p class="section-description">A clear route. A safer return. Click the map to build your mission.</p>
+      <div class="plan-stats">
+        <div><label>Waypoints</label><output id="p-count"></output></div>
+        <div><label>Distance</label><output id="p-distance"></output></div>
+        <div><label>Est. time</label><output id="p-time"></output></div>
+      </div>
+
+      <div class="actions">
+        <button id="plan-fly" class="btn btn-primary">Fly this plan</button>
+        <button id="plan-clear" class="btn">Clear</button>
+      </div>
+
+      <p id="plan-status" class="plan-status" role="status" hidden></p>
+
+      <h2>Route</h2>
+      <ol id="waypoints" class="waypoints"></ol>
+      <p id="waypoints-empty" class="empty">No waypoints yet. Click the map to add one.</p>
+    </aside>
+  </main>
+
+  <div id="load-status" class="load-status">Initializing Trust Issues&hellip;</div>
+
+  <script src="map-tiles.js"></script>
+  <script src="mission.js"></script>
+  <script src="cockpit.js"></script>
+  <script src="glitch.js"></script>
+  <script src="wasm_exec.js"></script>
+  <script>
+    const go = new Go();
+    WebAssembly.instantiateStreaming(fetch("app.wasm", { cache: "no-cache" }), go.importObject)
+      .then((result) => {
+        document.getElementById("load-status").remove();
+        go.run(result.instance);
+      })
+      .catch((err) => {
+        document.getElementById("load-status").textContent =
+          "The dashboard failed to load: " + err + ". Did you run `make build`?";
+      });
+  </script>
+</body>
+</html>

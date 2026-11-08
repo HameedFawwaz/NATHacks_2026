@@ -1,0 +1,70 @@
+/* Low-cost alert overlays. No full-map filters, turbulence, blur or displacement. */
+.glitch-surface { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; pointer-events: none; }
+.gpu-glitch-active #map { opacity: 0; }
+.map-effects { position: absolute; z-index: 3; top: 117px; right: 22px; background: #0a0d0dd9; border-color: #ffffff1f; font: 9px var(--mono); }
+.map-effects[aria-pressed="false"] { color: #a0a2a3; }
+.map-compass { top: 168px; }
+.glitch-readout, .glitch-caution-text { display: none; }
+body.is-caution .glitch-caution-text { display: block; }
+body.is-caution .glitch-critical-text { display: none; }
+body.is-caution .map-stage { border-color: #f5b83d99; }
+body.is-critical .map-stage { animation: none; box-shadow: 0 0 16px #ff304025; }
+
+body:is(.is-caution, .is-critical) .map-stage:not(.fx-disabled)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 3px, #00d0e520 3px 4px, transparent 4px 7px),
+    linear-gradient(90deg, #ff135217, transparent 20% 80%, #00dcff17);
+  opacity: .18;
+  animation: signal-static 5.8s steps(1, end) infinite;
+}
+body.is-critical .map-stage:not(.fx-disabled)::before {
+  opacity: .45;
+  animation-duration: 3.8s;
+}
+body.is-critical .map-stage:not(.fx-disabled)::after {
+  background: radial-gradient(ellipse, transparent 45%, #26041433 100%);
+  box-shadow: inset 12px 0 45px #ff17452b, inset -12px 0 45px #00b7d51a;
+}
+body:is(.is-caution, .is-critical) .map-stage:not(.fx-disabled) .glitch-readout {
+  display: flex;
+  position: absolute;
+  left: 20px;
+  bottom: 90px;
+  z-index: 2;
+  flex-direction: column;
+  gap: 8px;
+  color: #f7cd8c;
+  font: 10px var(--mono);
+  letter-spacing: 2px;
+  pointer-events: none;
+  text-shadow: 1px 0 #00dfff77, -1px 0 #ff246c88, 0 2px 10px #000;
+}
+.glitch-readout small { color: #c6b7c6; font: 6px var(--mono); letter-spacing: 1.5px; }
+body.is-critical .map-stage:not(.fx-disabled) .glitch-readout {
+  color: #ffc1d0;
+  font-size: clamp(12px, 1.35vw, 19px);
+  letter-spacing: 3px;
+  animation: perceptual-echo 3.8s steps(1, end) infinite;
+}
+/* Infrequent, low-opacity digital jumps; only overlays move, never the map. */
+@keyframes signal-static {
+  0%, 29%, 77%, 100% { transform: none; opacity: .15; }
+  24% { transform: translateX(-2px); opacity: .4; }
+  70% { transform: translateX(2px); opacity: .3; }
+}
+@keyframes perceptual-echo {
+  0%, 29%, 77%, 100% { text-shadow: 1px 0 #00e5ff66, -1px 0 #ff267799, 0 2px 10px #000; }
+  24% { text-shadow: 5px 0 #00e5ff88, -3px 0 #ff2677bb, 0 2px 10px #000; }
+  70% { text-shadow: -3px 0 #00e5ff66, 4px 0 #ff267799, 0 2px 10px #000; }
+}
+@media (max-width: 1000px) { .map-effects { top: 109px; right: 17px; } .map-compass { top: 160px; } }
+@media (max-width: 520px) { .map-effects { right: 12px; font-size: 8px; } .glitch-readout { max-width: calc(100% - 40px); } body.is-caution .map-stage:not(.fx-disabled) .glitch-readout { font-size: 8px; } body.is-critical .map-stage:not(.fx-disabled) .glitch-readout { font-size: 11px; letter-spacing: 1.5px; } }
+@media (prefers-reduced-motion: reduce) {
+  body:is(.is-caution, .is-critical) .map-stage:not(.fx-disabled)::before,
+  body:is(.is-caution, .is-critical) .map-stage:not(.fx-disabled) .glitch-readout { display: none; }
+}
