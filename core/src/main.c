@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "core/autonomy/autonomy.h"
 #include "core/common/time.h"
 #include "core/common/trust_score.h"
 #include "core/mavlink/mavlink.h"
@@ -28,10 +29,10 @@ static void handle_sigint(int signum) {
     g_running = 0;
 }
 
-static void print_status(const core_nav_result_t *result) {
-    printf("[nav_trust=%.3f] jump=%.2f dr=%.2f drift=%.2f ekf=%.2f time=%.2f eph=%.2f flags=0x%02x\n",
+static void print_status(const core_nav_result_t *result, const core_autonomy_t *autonomy) {
+    printf("[nav_trust=%.3f] jump=%.2f dr=%.2f drift=%.2f ekf=%.2f time=%.2f eph=%.2f flags=0x%02x behavior=%s\n",
            result->nav_trust, result->score_jump, result->score_dr, result->score_drift, result->score_ekf,
-           result->score_time, result->score_eph, result->flags);
+           result->score_time, result->score_eph, result->flags, core_autonomy_behavior_name(autonomy->behavior));
     fflush(stdout);
 }
 
@@ -91,7 +92,15 @@ int main(int argc, char **argv) {
     core_trust_score_t score;
     core_trust_score_init(&score);
 
-    printf("drone survivability core - GNSS spoofing detection\n");
+    core_autonomy_config_t autonomy_cfg = core_autonomy_default_config();
+    FILE *autonomy_log = fopen("autonomy_transitions.csv", "w");
+    if (!autonomy_log) {
+        fprintf(stderr, "[WARN] could not open autonomy_transitions.csv, logging transitions to stderr only\n");
+    }
+    core_autonomy_t autonomy;
+    core_autonomy_init(&autonomy, &autonomy_cfg, autonomy_log);
+
+    printf("drone survivability core - GNSS spoofing detection + autonomy\n");
     printf("listening for MAVLink on udp 0.0.0.0:%u\n", port);
     printf("point ArduPilot SITL (optionally via core/sitl/gnss_spoof_proxy) at this port\n");
 
@@ -128,6 +137,8 @@ int main(int argc, char **argv) {
             last_rate_request_ms = rate_now;
         }
 
+        uint64_t now = core_now_ms();
+
         core_telemetry_t telemetry;
         core_mavlink_conn_get_telemetry(conn, &telemetry);
 
@@ -137,7 +148,11 @@ int main(int argc, char **argv) {
         alert_new_flags(conn, prev_flags, result.flags);
         prev_flags = result.flags;
 
-        uint64_t now = core_now_ms();
+        /* Reads the nav trust just set above (and link/hardware, once those
+         * detectors exist) and drives whatever response is warranted -
+         * mode switches, EKF source failover, etc - over this same
+         * connection. Updates score->overall_trust as a side effect. */
+        core_autonomy_tick(&autonomy, conn, &score, &telemetry, now);
 
         if (now - last_own_heartbeat_sent_ms >= 1000) {
             core_mavlink_send_heartbeat(conn);
@@ -150,7 +165,7 @@ int main(int argc, char **argv) {
         }
 
         if (now - last_print_ms >= 1000) {
-            print_status(&result);
+            print_status(&result, &autonomy);
             last_print_ms = now;
         }
 
@@ -159,5 +174,8 @@ int main(int argc, char **argv) {
 
     printf("\nshutting down\n");
     core_mavlink_conn_close(conn);
+    if (autonomy_log) {
+        fclose(autonomy_log);
+    }
     return 0;
 }
