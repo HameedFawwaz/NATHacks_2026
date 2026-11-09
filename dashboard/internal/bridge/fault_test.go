@@ -87,8 +87,8 @@ func TestFaultRefusedByARealAutopilot(t *testing.T) {
 	if !errors.Is(err, ErrNotSITL) {
 		t.Fatalf("err = %v", err)
 	}
-	if snap, _ := b.Snapshot(0); snap.Fault != "" {
-		t.Errorf("unconfirmed fault shown as injected: %q", snap.Fault)
+	if snap, _ := b.Snapshot(0); snap.Fault != string(FaultUnknown) {
+		t.Errorf("unconfirmed fault must be unknown, not clear or active: %q", snap.Fault)
 	}
 }
 

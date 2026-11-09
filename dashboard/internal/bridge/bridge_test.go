@@ -615,6 +615,25 @@ func (f *fakeVehicle) ack(command uint16, result uint8) {
 	f.send(mavlink.MsgCommandAck, p)
 }
 
+func (f *fakeVehicle) acceptAndConfirm(fr mavlink.Frame) {
+	cmd := decodeCommand(fr)
+	f.ack(cmd, mavlink.ResultAccepted)
+	var mode uint32
+	var base uint8
+	switch cmd {
+	case mavlink.CmdDoSetMode:
+		mode = uint32(math.Float32frombits(binary.LittleEndian.Uint32(fr.Payload[4:])))
+		if mode == copterModeAuto {
+			base = mavlink.ModeFlagArmed
+		}
+	case mavlink.CmdComponentArmDisarm:
+		mode, base = copterModeGuided, mavlink.ModeFlagArmed
+	default:
+		return
+	}
+	f.send(mavlink.MsgHeartbeat, heartbeatPayload(2, mavlink.AutopilotArduPilot, base, mode))
+}
+
 func (f *fakeVehicle) request(seq int) {
 	f.send(mavlink.MsgMissionRequestInt, []byte{byte(seq), byte(seq >> 8), ownSysID, ownCompID, 0})
 }
@@ -850,6 +869,9 @@ func TestStartFlightSequence(t *testing.T) {
 	b, f, ctx := setup(t)
 	go f.serve(ctx)
 	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
 
 	result := make(chan error, 1)
 	go func() { result <- b.StartFlight(ctx) }()
@@ -860,7 +882,7 @@ func TestStartFlightSequence(t *testing.T) {
 		if got := decodeCommand(fr); got != want {
 			t.Fatalf("command = %d, want %d", got, want)
 		}
-		f.ack(want, mavlink.ResultAccepted)
+		f.acceptAndConfirm(fr)
 	}
 
 	select {
@@ -889,6 +911,9 @@ func TestStartFlightReportsRejection(t *testing.T) {
 	b, f, ctx := setup(t)
 	go f.serve(ctx)
 	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
 
 	result := make(chan error, 1)
 	go func() { result <- b.StartFlight(ctx) }()
@@ -910,6 +935,9 @@ func TestStartFlightBusy(t *testing.T) {
 	b, f, ctx := setup(t)
 	go f.serve(ctx)
 	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
 
 	go b.StartFlight(ctx)
 	f.nextCommand(t) // wait for the sequence to actually start
@@ -997,6 +1025,9 @@ func TestHTTPStart(t *testing.T) {
 	b, f, ctx := setup(t)
 	go f.serve(ctx)
 	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(b.Handler(""))
 	defer srv.Close()
 
@@ -1004,7 +1035,7 @@ func TestHTTPStart(t *testing.T) {
 		for i := 0; i < len(startFlightSteps); i++ {
 			select {
 			case fr := <-f.commands:
-				f.ack(decodeCommand(fr), mavlink.ResultAccepted)
+				f.acceptAndConfirm(fr)
 			case <-time.After(2 * time.Second):
 				return
 			}

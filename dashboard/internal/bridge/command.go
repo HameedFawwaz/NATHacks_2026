@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/mavlink"
@@ -34,14 +35,22 @@ var startFlightSteps = []commandStep{
 // retried in place rather than resumed from where the vehicle asks, because
 // there's nothing analogous to MISSION_REQUEST driving it.
 type command struct {
-	steps    []commandStep
-	index    int
-	lastSent func()
-	progress chan struct{}
-	done     chan error
+	ctx          context.Context
+	steps        []commandStep
+	index        int
+	finished     bool
+	acknowledged bool
+	heartbeatSeq uint64 // a confirming heartbeat must arrive after this step was sent
+	lastSent     func()
+	progress     chan struct{}
+	done         chan error
 }
 
 func (c *command) finish(err error) {
+	if c.finished {
+		return
+	}
+	c.finished = true
 	select {
 	case c.done <- err:
 	default:

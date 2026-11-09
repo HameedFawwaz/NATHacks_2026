@@ -137,7 +137,7 @@ func (a *app) uploadPlan() {
 
 	a.live.uploaded = true
 	a.flownPlan = plan
-	a.showPlanStatus("Uploaded. Arm and switch to AUTO from your ground control to fly it.", false)
+	a.showPlanStatus("Uploaded. Use Start flight in the Fly tab when ready.", false)
 }
 
 // startFlight arms the drone and starts the uploaded mission. It runs as a goroutine.

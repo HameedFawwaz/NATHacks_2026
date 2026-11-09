@@ -21,6 +21,7 @@ type Fault string
 
 const (
 	FaultNone     Fault = "none"
+	FaultUnknown  Fault = "unknown"   // an unconfirmed/partial write; never offered as an injection
 	FaultGPSJump  Fault = "gps_jump"  // GPS teleports ~110 m north in one fix
 	FaultGPSDrift Fault = "gps_drift" // GPS walks north at driftRateMS
 	FaultGPSJam   Fault = "gps_jam"   // SITL's jamming model: fix and satellites degrade
@@ -152,7 +153,8 @@ func (b *Bridge) SetFault(ctx context.Context, f Fault) error {
 		b.mu.Unlock()
 		return ErrBusy
 	}
-	b.stopDriftLocked() // its next step mustn't land on top of the new fault
+	b.stopDriftLocked()            // its next step mustn't land on top of the new fault
+	b.vehicle.fault = FaultUnknown // an unsuccessful write may still have changed some parameters
 	w := &paramWait{pending: faultParams(f), progress: make(chan struct{}, 1)}
 	b.params = w
 	w.sendLocked(b)
@@ -165,7 +167,7 @@ func (b *Bridge) SetFault(ctx context.Context, f Fault) error {
 	}()
 
 	if err := b.awaitParams(ctx, w); err != nil {
-		return err
+		return fmt.Errorf("%w; some fault parameters may have changed, use All clear to reset them", err)
 	}
 
 	b.mu.Lock()

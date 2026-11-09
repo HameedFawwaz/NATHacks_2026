@@ -22,7 +22,7 @@ const DriftThresholdM = 10.0
 
 // Where Snapshot.Estimated comes from.
 const (
-	EstimateCore = "core" // core's GPS-free estimate; independent of GPS
+	EstimateCore = "core" // core's dead-reckoned estimate; may use FC attitude
 	EstimateEKF  = "ekf"  // the autopilot's EKF, which fuses GPS
 )
 
@@ -43,7 +43,8 @@ type Reading struct {
 
 // Snapshot is the vehicle's state at one moment.
 type Snapshot struct {
-	NowMs int64
+	MissionReady bool // a mission was uploaded and acknowledged on this live connection
+	NowMs        int64
 
 	Connected bool // the vehicle is being heard
 	Armed     bool

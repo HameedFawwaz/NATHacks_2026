@@ -34,7 +34,8 @@ var (
 	ErrNoVehicle    = errors.New("no drone connected")
 	ErrArmed        = errors.New("the drone is armed; land before changing its mission")
 	ErrAlreadyArmed = errors.New("the drone is already armed")
-	ErrBusy         = errors.New("another upload is in progress")
+	ErrBusy         = errors.New("another upload or flight start is in progress")
+	ErrNoMission    = errors.New("upload a mission successfully before starting the flight")
 )
 
 // Bridge talks MAVLink to one vehicle over UDP.
@@ -42,15 +43,16 @@ type Bridge struct {
 	conn  *net.UDPConn
 	start time.Time
 
-	mu        sync.Mutex
-	vehicle   vehicleState
-	peer      *net.UDPAddr // where the autopilot's heartbeats come from
-	seq       uint8
-	upload    *upload
-	command   *command
-	params    *paramWait         // a fault being injected; see fault.go
-	stopDrift context.CancelFunc // ends a drifting GPS fault, nil if none is running
-	signer    *mavlink.Signer    // nil: the link is unsigned
+	mu           sync.Mutex
+	vehicle      vehicleState
+	peer         *net.UDPAddr // where the autopilot's heartbeats come from
+	seq          uint8
+	upload       *upload
+	missionReady bool // a mission uploaded and acknowledged during this connection
+	command      *command
+	params       *paramWait         // a fault being injected; see fault.go
+	stopDrift    context.CancelFunc // ends a drifting GPS fault, nil if none is running
+	signer       *mavlink.Signer    // nil: the link is unsigned
 }
 
 // signingLinkID identifies the dashboard's link in its signatures.
@@ -116,6 +118,7 @@ func (b *Bridge) handle(data []byte, from *net.UDPAddr) {
 	}
 
 	now := b.nowMs()
+	b.updateLocked(now) // notice a stale connection before a returning heartbeat renews it
 	for _, f := range frames {
 		if b.vehicle.apply(f, now) {
 			if f.MsgID == mavlink.MsgHeartbeat {
@@ -126,7 +129,18 @@ func (b *Bridge) handle(data []byte, from *net.UDPAddr) {
 			b.handleParam(f)
 		}
 	}
+	b.updateLocked(now)
+}
+
+func (b *Bridge) updateLocked(now int64) {
 	b.vehicle.update(now)
+	if !b.vehicle.connected(now) {
+		b.missionReady = false
+		b.stopDriftLocked()
+		if b.command != nil {
+			b.command.finish(errors.New("lost contact with the drone while starting the flight"))
+		}
+	}
 }
 
 // sendLocked sends one message to the vehicle. Callers hold b.mu.
@@ -163,7 +177,7 @@ func (b *Bridge) sendPeriodic(ctx context.Context) {
 		case <-heartbeat.C:
 			b.mu.Lock()
 			b.sendLocked(mavlink.MsgHeartbeat, mavlink.PackGCSHeartbeat())
-			b.vehicle.update(b.nowMs())
+			b.updateLocked(b.nowMs())
 			if b.vehicle.identified && !requestedStreams {
 				requestedStreams = true
 				b.requestStreamsLocked()
@@ -200,6 +214,7 @@ func (b *Bridge) Snapshot(afterSeq int) (model.Snapshot, []model.Event) {
 		}
 	}
 	snap := b.vehicle.snapshot(b.nowMs())
+	snap.MissionReady = b.missionReady && snap.Connected
 	if b.signer != nil {
 		st := b.signer.Stats()
 		snap.Signing = model.LinkSecurity{
@@ -251,11 +266,12 @@ func (b *Bridge) transfer(ctx context.Context, items []mavlink.MissionItem) erro
 	case b.vehicle.snap.Armed:
 		b.mu.Unlock()
 		return ErrArmed
-	case b.upload != nil:
+	case b.upload != nil || b.command != nil:
 		b.mu.Unlock()
 		return ErrBusy
 	}
 	b.upload = u
+	b.missionReady = false // even MISSION_COUNT can clear an earlier mission
 	sys, comp := b.vehicle.sysID, b.vehicle.compID
 	u.lastSent = func() {
 		b.sendLocked(mavlink.MsgMissionCount, mavlink.PackMissionCount(sys, comp, uint16(len(u.items))))
@@ -275,6 +291,11 @@ func (b *Bridge) transfer(ctx context.Context, items []mavlink.MissionItem) erro
 	for {
 		select {
 		case err := <-u.done:
+			if err == nil {
+				b.mu.Lock()
+				b.missionReady = b.vehicle.connected(b.nowMs())
+				b.mu.Unlock()
+			}
 			return err
 		case <-u.progress:
 			retries = 0
@@ -330,13 +351,15 @@ func (b *Bridge) cancelUploadLocked() {
 }
 
 // StartFlight arms the vehicle and starts the uploaded mission: GUIDED, arm,
-// AUTO, MISSION_START. Each step is retried until its COMMAND_ACK arrives.
+// AUTO, MISSION_START. Mode/arming steps need both an accepted COMMAND_ACK and
+// a subsequent confirming heartbeat; an ACK alone is not proof of vehicle state.
 func (b *Bridge) StartFlight(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	c := &command{
+		ctx:      ctx,
 		steps:    startFlightSteps,
 		progress: make(chan struct{}, 1),
 		done:     make(chan error, 1),
@@ -351,9 +374,12 @@ func (b *Bridge) StartFlight(ctx context.Context) error {
 	case b.vehicle.snap.Armed:
 		b.mu.Unlock()
 		return ErrAlreadyArmed
-	case b.command != nil:
+	case b.command != nil || b.upload != nil:
 		b.mu.Unlock()
 		return ErrBusy
+	case !b.missionReady:
+		b.mu.Unlock()
+		return ErrNoMission
 	}
 	b.command = c
 	b.sendCommandStepLocked(c)
@@ -376,14 +402,24 @@ func (b *Bridge) StartFlight(ctx context.Context) error {
 			retries = 0
 			retry.Reset(uploadRetryInterval)
 		case <-retry.C:
+			b.mu.Lock()
+			if c.finished {
+				b.mu.Unlock()
+				continue
+			}
 			retries++
 			if retries > uploadMaxRetries {
-				return fmt.Errorf("the drone stopped responding while %s", commandName(c.steps[c.index].command))
-			}
-			b.mu.Lock()
-			if !b.vehicle.connected(b.nowMs()) {
+				name := commandName(c.steps[c.index].command)
+				err := fmt.Errorf("the drone stopped responding while %s", name)
+				c.finish(err)
 				b.mu.Unlock()
-				return errors.New("lost contact with the drone while starting the flight")
+				return err
+			}
+			if !b.vehicle.connected(b.nowMs()) {
+				err := errors.New("lost contact with the drone while starting the flight")
+				c.finish(err)
+				b.mu.Unlock()
+				return err
 			}
 			c.lastSent()
 			b.mu.Unlock()
@@ -396,6 +432,8 @@ func (b *Bridge) StartFlight(ctx context.Context) error {
 
 // sendCommandStepLocked sends the command sequence's current step. Callers hold b.mu.
 func (b *Bridge) sendCommandStepLocked(c *command) {
+	c.acknowledged = false
+	c.heartbeatSeq = b.vehicle.heartbeatSeq
 	step := c.steps[c.index]
 	sys, comp := b.vehicle.sysID, b.vehicle.compID
 	c.lastSent = func() {
@@ -407,7 +445,18 @@ func (b *Bridge) sendCommandStepLocked(c *command) {
 // handleCommand advances a command sequence in progress. Callers hold b.mu.
 func (b *Bridge) handleCommand(f mavlink.Frame) {
 	c := b.command
-	if c == nil || f.MsgID != mavlink.MsgCommandAck {
+	if c == nil || c.finished || (c.ctx != nil && c.ctx.Err() != nil) {
+		return
+	}
+	if f.MsgID == mavlink.MsgHeartbeat {
+		if c.index >= 2 && !b.vehicle.snap.Armed {
+			c.finish(errors.New("the drone disarmed while starting the flight"))
+			return
+		}
+		b.advanceCommandLocked(c)
+		return
+	}
+	if f.MsgID != mavlink.MsgCommandAck {
 		return
 	}
 	cmd, result, targetSys, targetComp := mavlink.DecodeCommandAck(f.Payload)
@@ -419,12 +468,8 @@ func (b *Bridge) handleCommand(f mavlink.Frame) {
 	case mavlink.ResultInProgress:
 		// Still working on it; treat as progress so it isn't resent mid-flight.
 	case mavlink.ResultAccepted:
-		c.index++
-		if c.index == len(c.steps) {
-			c.finish(nil)
-			return
-		}
-		b.sendCommandStepLocked(c)
+		c.acknowledged = true
+		b.advanceCommandLocked(c)
 	default:
 		c.finish(commandResultError(cmd, result))
 		return
@@ -433,6 +478,34 @@ func (b *Bridge) handleCommand(f mavlink.Frame) {
 	case c.progress <- struct{}{}:
 	default:
 	}
+}
+
+func (b *Bridge) advanceCommandLocked(c *command) {
+	if !c.acknowledged || !b.vehicle.connected(b.nowMs()) {
+		return
+	}
+	step := c.steps[c.index]
+	if step.command != mavlink.CmdMissionStart {
+		if b.vehicle.heartbeatSeq <= c.heartbeatSeq {
+			return
+		}
+		switch step.command {
+		case mavlink.CmdDoSetMode:
+			if b.vehicle.customMode != uint32(step.param2) {
+				return
+			}
+		case mavlink.CmdComponentArmDisarm:
+			if !b.vehicle.snap.Armed {
+				return
+			}
+		}
+	}
+	c.index++
+	if c.index == len(c.steps) {
+		c.finish(nil)
+		return
+	}
+	b.sendCommandStepLocked(c)
 }
 
 // handleMission advances an upload in progress. Callers hold b.mu.

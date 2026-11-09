@@ -100,8 +100,10 @@ func (a *app) renderFlyAction() {
 	button := byID("live-start")
 	hint := ""
 	switch {
-	case !a.live.uploaded:
+	case !a.snap.MissionReady:
 		hint = "Upload a plan first."
+	case a.live.uploading:
+		hint = "Wait for the upload to finish."
 	case a.live.starting:
 		hint = "Starting…"
 	case !a.snap.Connected:
@@ -191,7 +193,7 @@ func (a *app) renderInstruments() {
 	driftLabel, legend := "GPS drift", "Drone's own estimate"
 	switch s.EstimateFrom {
 	case model.EstimateCore:
-		driftLabel, legend = "Drift vs core", "Core's GPS-free estimate"
+		driftLabel, legend = "Drift vs core", "Core's dead-reckoned estimate"
 	case model.EstimateEKF:
 		driftLabel, legend = "Drift vs EKF", "Autopilot EKF (core estimate unavailable)"
 	}

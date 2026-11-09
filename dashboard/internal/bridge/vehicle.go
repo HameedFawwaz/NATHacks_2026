@@ -42,6 +42,8 @@ type vehicleState struct {
 	identified    bool
 	sysID, compID uint8
 	lastHeartbeat int64
+	heartbeatSeq  uint64
+	customMode    uint32
 	wasConnected  bool
 	snap          model.Snapshot
 	gpsAt         int64 // when GPS_RAW_INT last arrived
@@ -124,6 +126,8 @@ func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) 
 
 func (v *vehicleState) applyHeartbeat(hb mavlink.Heartbeat, nowMs int64) {
 	v.lastHeartbeat = nowMs
+	v.heartbeatSeq++
+	v.customMode = hb.CustomMode
 	v.snap.Armed = hb.BaseMode&mavlink.ModeFlagArmed != 0
 	v.snap.Mode = fmt.Sprintf("Mode %d", hb.CustomMode)
 	if name, ok := copterModes[hb.CustomMode]; ok && hb.Autopilot == mavlink.AutopilotArduPilot {
