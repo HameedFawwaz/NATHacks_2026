@@ -25,6 +25,10 @@ which one you're looking at.
 
 ## Live mode
 
+For the full local ArduPilot simulator + real detectors + live dashboard, run
+`./scripts/sitl` from the repository root. See the root README for flight commands.
+`make live` by itself starts only the dashboard bridge, not ArduPilot.
+
 Point a MAVLink output at the bridge, either from MAVProxy or directly from SITL:
 
 ```

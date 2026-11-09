@@ -1,0 +1,9 @@
+#!/bin/sh
+# Reuse the local SITL environment without installing into system Python.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHON=${SITL_PYTHON:-"$ROOT/../ardupilot-sitl/venv/bin/python"}
+if [ ! -x "$PYTHON" ]; then
+    PYTHON=python3
+fi
+exec "$PYTHON" "$ROOT/core/sitl/dashboard_sitl.py" "$@"

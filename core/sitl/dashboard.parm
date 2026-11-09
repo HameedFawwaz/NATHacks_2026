@@ -1,0 +1,24 @@
+# Local dashboard SITL only. Do not apply these simulation defaults to hardware.
+LOG_BACKEND_TYPE 0
+RSSI_TYPE 5
+
+# Separate direct channels keep the dashboard's stream requests from reducing
+# the detector's IMU rate. SERIAL4 is the optional flight-control script link;
+# leave SERIAL3 alone (the simulated GPS).
+SERIAL1_PROTOCOL 2
+SERIAL2_PROTOCOL 2
+SERIAL4_PROTOCOL 2
+SR1_EXT_STAT 2
+SR1_EXTRA1 10
+SR1_EXTRA2 2
+SR1_EXTRA3 2
+SR1_POSITION 5
+SR1_RAW_SENS 5
+SR1_RC_CHAN 2
+SR2_EXT_STAT 2
+SR2_POSITION 2
+# Stream groups use MAVLink channel indices, not serial port numbers: SERIAL3
+# is GPS, so SERIAL4 is the fourth MAVLink channel (SR3).
+SR3_EXT_STAT 2
+SR3_POSITION 4
+SR3_EXTRA1 2
