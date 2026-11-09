@@ -137,6 +137,10 @@ func (b *Bridge) handleParam(f mavlink.Frame) {
 // SetFault injects a fault into SITL, replacing any fault already injected, and
 // waits for the autopilot to confirm every parameter it needed.
 func (b *Bridge) SetFault(ctx context.Context, f Fault) error {
+	return b.setFault(ctx, f, false)
+}
+
+func (b *Bridge) setFault(ctx context.Context, f Fault, resetOwner bool) error {
 	if _, ok := faultNames[f]; !ok {
 		return fmt.Errorf("unknown fault %q", f)
 	}
@@ -149,7 +153,7 @@ func (b *Bridge) SetFault(ctx context.Context, f Fault) error {
 	case !b.vehicle.connected(b.nowMs()) || b.peer == nil:
 		b.mu.Unlock()
 		return ErrNoVehicle
-	case b.params != nil || b.recovery != nil:
+	case b.params != nil || b.recovery != nil || (b.resetting && !resetOwner):
 		b.mu.Unlock()
 		return ErrBusy
 	}

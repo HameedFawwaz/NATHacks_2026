@@ -99,10 +99,13 @@
         <p id="recovery-explanation" class="section-description">Detection stays on. Disabling stops new automatic commands; it does not undo the current flight mode or navigation source.</p>
         <p id="recovery-capability" class="section-description" hidden></p>
         <p id="recovery-behavior" class="section-description" hidden></p>
+        <p id="recovery-gps" class="section-description" role="status" hidden></p>
         <p class="section-description">All clear ends fault injection only. Health recovers after detector validation, not instantly.</p>
         <div class="actions" id="recovery-controls" hidden>
           <button id="recovery-toggle" class="btn">Enable automatic recovery</button>
         </div>
+        <button id="reset-state" class="btn" disabled>Reset state (ground only)</button>
+        <p class="section-description">Reset clears simulated threats and revalidates the navigation baseline. Land and disarm first. Your mission is preserved; it does not arm or take off.</p>
         <p id="recovery-status" class="plan-status" role="status" hidden></p>
       </section>
 

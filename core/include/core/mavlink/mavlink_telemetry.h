@@ -5,11 +5,14 @@
 #include <stdint.h>
 
 /* MAV_CMD_USER_1, targeted to this companion (not the autopilot). param1 is
- * 0/1, param2 a client nonce 1..65535. RECOV_ACK packs nonce*2 + enabled. */
+ * 0/1 for disable/enable or 2 for an explicitly requested ground rebaseline.
+ * param2 is a client nonce 1..65535. RECOV_ACK packs nonce*2 + enabled;
+ * RESET_ACK returns the nonce only after ground reset and GPS source ACK. */
 #define CORE_MAV_CMD_RECOVERY_CONTROL 31000
 
 typedef struct {
     bool enabled;
+    bool reset_estimate;
     uint16_t nonce;
     uint32_t count;
 } core_recovery_control_t;

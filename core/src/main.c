@@ -169,6 +169,10 @@ int main(int argc, char **argv) {
     uint32_t prev_flags = 0;
     uint32_t recovery_request_count = 0;
     uint32_t recovery_ack = 0;
+    uint16_t reset_ack = 0;
+    uint16_t pending_reset = 0;
+    uint64_t reset_source_sent_ms = 0;
+    uint64_t reset_started_ms = 0;
 
     /* A GCS or MAVProxy sitting between us and the flight controller often
      * already asks for a baseline set of streams, but core_main must not
@@ -227,11 +231,37 @@ int main(int argc, char **argv) {
         core_mavlink_conn_get_telemetry(conn, &telemetry);
         if (telemetry.recovery_control.count != recovery_request_count) {
             recovery_request_count = telemetry.recovery_control.count;
-            core_autonomy_set_enabled(&autonomy, telemetry.recovery_control.enabled, now);
-            recovery_ack = (uint32_t)telemetry.recovery_control.nonce * 2u + (autonomy.enabled ? 1u : 0u);
-            core_mavlink_send_statustext(conn, CORE_MAV_SEVERITY_NOTICE,
-                                        autonomy.enabled ? "Recovery enabled; detection stays on" :
-                                                           "Recovery disabled; detection stays on");
+            if (telemetry.recovery_control.reset_estimate) {
+                if (reset_ack != telemetry.recovery_control.nonce && pending_reset != telemetry.recovery_control.nonce &&
+                    core_nav_detector_operator_rebaseline(&detector, &telemetry, &nav_cfg, now, true)) {
+                    pending_reset = telemetry.recovery_control.nonce;
+                    reset_started_ms = now;
+                    reset_source_sent_ms = 0;
+                }
+            } else {
+                core_autonomy_set_enabled(&autonomy, telemetry.recovery_control.enabled, now);
+                recovery_ack = (uint32_t)telemetry.recovery_control.nonce * 2u + (autonomy.enabled ? 1u : 0u);
+                core_mavlink_send_statustext(conn, CORE_MAV_SEVERITY_NOTICE,
+                                            autonomy.enabled ? "Recovery enabled; detection stays on" :
+                                                               "Recovery disabled; detection stays on");
+            }
+        }
+        if (pending_reset != 0) {
+            bool ground = telemetry.heartbeat.valid && !(telemetry.heartbeat.base_mode & 128u) &&
+                          now >= telemetry.heartbeat.last_update_ms && now - telemetry.heartbeat.last_update_ms < 2000;
+            const core_command_ack_t *ack = &telemetry.command_ack;
+            if (!ground || now - reset_started_ms > 5000) {
+                pending_reset = 0; /* never continue a ground reset after arming */
+            } else if (reset_source_sent_ms && ack->valid && ack->command == CORE_MAV_CMD_SET_EKF_SOURCE_SET &&
+                       ack->result == CORE_MAV_RESULT_ACCEPTED && ack->last_update_ms >= reset_source_sent_ms) {
+                core_autonomy_reset_ground(&autonomy, &telemetry, now);
+                reset_ack = pending_reset;
+                pending_reset = 0;
+                core_mavlink_send_statustext(conn, CORE_MAV_SEVERITY_NOTICE, "Ground reset: GPS source confirmed");
+            } else if (!reset_source_sent_ms || now - reset_source_sent_ms >= 1000) {
+                core_mavlink_send_set_ekf_source_set(conn, autonomy_cfg.primary_source_set);
+                reset_source_sent_ms = now;
+            }
         }
 
         core_nav_result_t result = core_nav_detector_update(&detector, &telemetry, &nav_cfg);
@@ -264,7 +294,9 @@ int main(int argc, char **argv) {
          * that detector exists) and drives whatever response is warranted -
          * mode switches, EKF source failover, etc - over this same
          * connection. Updates score->overall_trust as a side effect. */
-        core_autonomy_tick(&autonomy, conn, &score, &telemetry, now);
+        /* A confirmed ground-reset transaction owns EKF source commands until
+         * its ACK arrives. Don't interleave an old automatic source retry. */
+        if (pending_reset == 0) core_autonomy_tick(&autonomy, conn, &score, &telemetry, now);
 
         if (now - last_own_heartbeat_sent_ms >= 1000) {
             core_mavlink_send_heartbeat(conn);
@@ -276,7 +308,12 @@ int main(int argc, char **argv) {
             core_mavlink_send_named_value_float(conn, "RECOV_EN", autonomy.enabled ? 1.0f : 0.0f);
             core_mavlink_send_named_value_float(conn, "RECOV_CTL", allow_recovery_control ? 1.0f : 0.0f);
             core_mavlink_send_named_value_float(conn, "AUTO_STATE", (float)autonomy.behavior);
+            core_mavlink_send_named_value_float(conn, "RECOV_GPS", (float)backup_recovery.status);
+            float recovery_seconds = backup_recovery.start_ms && now >= backup_recovery.start_ms ?
+                                     (float)(now - backup_recovery.start_ms) / 1000.0f : 0.0f;
+            core_mavlink_send_named_value_float(conn, "RECOV_SEC", recovery_seconds);
             if (recovery_ack != 0) core_mavlink_send_named_value_float(conn, "RECOV_ACK", (float)recovery_ack);
+            if (reset_ack != 0) core_mavlink_send_named_value_float(conn, "RESET_ACK", (float)reset_ack);
             if (link.state != CORE_LINK_UNKNOWN) {
                 core_mavlink_send_named_value_float(conn, "LNK_STATE", (float)link.state);
                 core_mavlink_send_named_value_float(conn, "LNK_LOSS", link.loss);

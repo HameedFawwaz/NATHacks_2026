@@ -13,9 +13,10 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         mavlink_command_long_t cmd;
         mavlink_msg_command_long_decode(msg, &cmd);
         if (cmd.command != CORE_MAV_CMD_RECOVERY_CONTROL || cmd.target_system != conn->cfg.system_id ||
-            cmd.target_component != conn->cfg.component_id || (cmd.param1 != 0.0f && cmd.param1 != 1.0f) ||
+            cmd.target_component != conn->cfg.component_id || (cmd.param1 != 0.0f && cmd.param1 != 1.0f && cmd.param1 != 2.0f) ||
             !isfinite(cmd.param2) || cmd.param2 < 1.0f || cmd.param2 > 65535.0f || floorf(cmd.param2) != cmd.param2) break;
         conn->telemetry.recovery_control.enabled = cmd.param1 == 1.0f;
+        conn->telemetry.recovery_control.reset_estimate = cmd.param1 == 2.0f;
         conn->telemetry.recovery_control.nonce = (uint16_t)cmd.param2;
         conn->telemetry.recovery_control.count++;
         break;
@@ -138,6 +139,7 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         break;
     }
     case MAVLINK_MSG_ID_COMMAND_ACK: {
+        if (msg->sysid != conn->vehicle_sysid || msg->compid != conn->vehicle_compid) break;
         mavlink_command_ack_t ack;
         mavlink_msg_command_ack_decode(msg, &ack);
         conn->telemetry.command_ack.command = ack.command;

@@ -67,6 +67,26 @@ void core_autonomy_set_enabled(core_autonomy_t *ctx, bool enabled, uint64_t now_
     ctx->enabled = enabled;
 }
 
+bool core_autonomy_reset_ground(core_autonomy_t *ctx, const core_telemetry_t *telemetry, uint64_t now_ms) {
+    if (!ctx || !telemetry || !telemetry->heartbeat.valid ||
+        (telemetry->heartbeat.base_mode & MAV_MODE_FLAG_ARMED) ||
+        telemetry->heartbeat.last_update_ms > now_ms ||
+        now_ms - telemetry->heartbeat.last_update_ms > ctx->cfg.input_stale_ms) return false;
+    core_autonomy_config_t cfg = ctx->cfg;
+    FILE *log = ctx->log;
+    bool enabled = ctx->enabled;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->cfg = cfg;
+    ctx->log = log;
+    ctx->enabled = enabled;
+    ctx->disabled_since_ms = enabled ? 0 : now_ms;
+    ctx->behavior = CORE_AUTONOMY_NOMINAL;
+    ctx->behavior_since_ms = now_ms;
+    ctx->active_source_set = cfg.primary_source_set;
+    ctx->wanted_source_set = cfg.primary_source_set;
+    return true;
+}
+
 /* Drops immediately on a low or stale score; recovers only after trusted_at has held for recovery_hold_ms. */
 static void update_untrusted(const core_autonomy_config_t *cfg, float value, uint64_t updated_ms, uint64_t now_ms,
                              bool *untrusted, uint64_t *recovering_since_ms) {

@@ -102,6 +102,11 @@ void core_autonomy_init(core_autonomy_t *ctx, const core_autonomy_config_t *cfg,
  * Hold/retry timers do not expire merely because responses were disabled. */
 void core_autonomy_set_enabled(core_autonomy_t *ctx, bool enabled, uint64_t now_ms);
 
+/* Clear decision latches only on a fresh disarmed vehicle, after the caller
+ * has obtained an ACK selecting the primary source. Preserves enable/log/cfg;
+ * does not change detector scores or send any flight command. */
+bool core_autonomy_reset_ground(core_autonomy_t *ctx, const core_telemetry_t *telemetry, uint64_t now_ms);
+
 /*
  * Runs one decision step: updates overall_trust in score, then sends whatever
  * commands the current behavior still needs. Non-blocking; call it once per

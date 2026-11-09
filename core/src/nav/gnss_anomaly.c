@@ -14,12 +14,13 @@
 #define COG_SEED_MIN_SPEED_CMS 300
 
 /* Agreement is meaningful only for a configured GPS-independent backup.
- * Eight seconds exceeds the time a 1.5 m/s linear offset ramp can spend
- * traversing the six-metre diameter of the allowed position region. */
+ * A bounded absolute correction tolerates accumulated optical-flow drift;
+ * the separate fixed residual window prevents following an ongoing ramp. */
 #define BACKUP_RECOVERY_WINDOW_MS 8000
 #define BACKUP_GPS_MAX_AGE_MS 800
 #define BACKUP_IMU_POSITION_MAX_AGE_MS 500
-#define BACKUP_POSITION_ERROR_M 3.0f
+#define BACKUP_POSITION_ERROR_M 10.0f
+#define BACKUP_RESIDUAL_CHANGE_M 2.0f
 #define BACKUP_VELOCITY_ERROR_MPS 1.0f
 
 static float linear_score(float value, float warn, float reject) {
@@ -114,6 +115,7 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
     const core_global_position_t *pos = &telemetry->global_position;
     const core_imu_t *imu = &telemetry->imu;
     const core_nav_result_t *s = &detector->cached_scores;
+    recovery->status = 1;
     bool good = telemetry->heartbeat.valid && rebaseline_fresh(now_ms, telemetry->heartbeat.last_update_ms, 2000) &&
         imu->valid && rebaseline_fresh(now_ms, imu->last_update_ms, BACKUP_IMU_POSITION_MAX_AGE_MS) &&
         isfinite(imu->xacc_mps2) && isfinite(imu->yacc_mps2) && isfinite(imu->zacc_mps2) &&
@@ -127,26 +129,52 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
         pos->lat >= -850000000 && pos->lat <= 850000000 && pos->lon >= -1800000000 && pos->lon <= 1800000000 &&
         detector->have_prev_gps && detector->prev_gps_raw.last_update_ms == gps->last_update_ms &&
         detector->have_cached_scores && s->score_jump >= 1.0f && s->score_time >= 1.0f &&
-        s->score_eph >= 1.0f && s->score_ekf >= 1.0f;
+        s->score_eph >= 1.0f;
+    float residual_north = 0.0f, residual_east = 0.0f;
     if (good) {
         float speed = gps->vel_cms / 100.0f;
         float cog = gps->cog_cdeg < 36000 ? cog_cdeg_to_rad(gps->cog_cdeg) : 0.0f;
         float vn = speed * cosf(cog), ve = speed * sinf(cog);
-        good = distance_m(gps->lat / 1e7, gps->lon / 1e7, pos->lat / 1e7, pos->lon / 1e7) <= BACKUP_POSITION_ERROR_M &&
-               hypotf(vn - pos->vx / 100.0f, ve - pos->vy / 100.0f) <= BACKUP_VELOCITY_ERROR_MPS;
+        recovery->position_error_m = distance_m(gps->lat / 1e7, gps->lon / 1e7, pos->lat / 1e7, pos->lon / 1e7);
+        residual_north = (gps->lat / 1e7 - pos->lat / 1e7) * METERS_PER_DEG_LAT;
+        residual_east = (gps->lon / 1e7 - pos->lon / 1e7) * METERS_PER_DEG_LAT * cos(pos->lat / 1e7 * M_PI / 180.0);
+        if (s->score_ekf < 1.0f || recovery->position_error_m > BACKUP_POSITION_ERROR_M) {
+            recovery->status = 2;
+            good = false;
+        } else if (hypotf(vn - pos->vx / 100.0f, ve - pos->vy / 100.0f) > BACKUP_VELOCITY_ERROR_MPS) {
+            recovery->status = 3;
+            good = false;
+        }
     }
     if (!good || (recovery->last_gps_ms && gps->last_update_ms < recovery->last_gps_ms) ||
         (recovery->last_gps_ms && gps->last_update_ms != recovery->last_gps_ms &&
          (gps->last_update_ms - recovery->last_gps_ms >= BACKUP_GPS_MAX_AGE_MS || gps->time_usec <= recovery->last_gps_time_usec))) {
         recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
+        recovery->consumed = false; /* a new bad episode requires a whole new good window */
         return false;
     }
     if (recovery->consumed) {
+        recovery->status = 5;
         if (s->score_dr >= 1.0f && s->score_drift >= 1.0f && detector->nav_trust >= 0.99f)
             recovery->consumed = false;
         return false;
     }
-    if (!recovery->start_ms) recovery->start_ms = now_ms;
+    /* A flow-only position can acquire a bounded offset during a long flight.
+     * Absolute agreement alone cannot distinguish that from a continuing ramp.
+     * Require the GPS-minus-backup residual to stay stable for the ENTIRE
+     * candidate window as well; never slide its reference along with a spoof. */
+    if (recovery->start_ms && hypotf(residual_north - recovery->candidate_north_m,
+                                    residual_east - recovery->candidate_east_m) > BACKUP_RESIDUAL_CHANGE_M) {
+        recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
+        recovery->status = 2;
+        return false;
+    }
+    if (!recovery->start_ms) {
+        recovery->start_ms = now_ms;
+        recovery->candidate_north_m = residual_north;
+        recovery->candidate_east_m = residual_east;
+    }
+    recovery->status = 4;
     bool new_fix = gps->last_update_ms != recovery->last_gps_ms;
     if (new_fix) {
         recovery->last_gps_ms = gps->last_update_ms;
@@ -157,6 +185,7 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
         core_nav_kf_set_reanchor(&detector->kf_short, gps);
         core_nav_kf_set_reanchor(&detector->kf_long, gps);
         recovery->consumed = true;
+        recovery->status = 5;
         recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
         return true;
     }

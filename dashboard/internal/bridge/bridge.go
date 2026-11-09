@@ -54,6 +54,7 @@ type Bridge struct {
 	stopDrift     context.CancelFunc // ends a drifting GPS fault, nil if none is running
 	recovery      *recoveryWait
 	recoveryNonce uint16
+	resetting     bool            // serializes the fault-clear + core-reset transaction
 	signer        *mavlink.Signer // nil: the link is unsigned
 }
 
@@ -269,7 +270,7 @@ func (b *Bridge) transfer(ctx context.Context, items []mavlink.MissionItem) erro
 	case b.vehicle.snap.Armed:
 		b.mu.Unlock()
 		return ErrArmed
-	case b.upload != nil || b.command != nil || b.recovery != nil:
+	case b.upload != nil || b.command != nil || b.recovery != nil || b.resetting:
 		b.mu.Unlock()
 		return ErrBusy
 	}
@@ -377,7 +378,7 @@ func (b *Bridge) StartFlight(ctx context.Context) error {
 	case b.vehicle.snap.Armed:
 		b.mu.Unlock()
 		return ErrAlreadyArmed
-	case b.command != nil || b.upload != nil || b.recovery != nil:
+	case b.command != nil || b.upload != nil || b.recovery != nil || b.resetting:
 		b.mu.Unlock()
 		return ErrBusy
 	case !b.missionReady:

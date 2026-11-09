@@ -25,10 +25,21 @@ func (a *app) bindFly() {
 			}
 		})
 		onClick(byID("recovery-toggle"), func(js.Value) {
-			if a.live.recovering || !a.recoveryFresh() || !a.snap.RecoveryControllable {
+			if a.live.recovering || a.live.resetting || !a.recoveryFresh() || !a.snap.RecoveryControllable {
 				return
 			}
 			go a.setRecovery(!a.snap.RecoveryEnabled)
+		})
+		onClick(byID("reset-state"), func(js.Value) {
+			if a.live.resetting || a.live.recovering || a.snap.Armed || !a.recoveryFresh() || !a.snap.RecoveryControllable {
+				return
+			}
+			if !a.live.resetConfirm {
+				a.live.resetConfirm = true
+				a.renderRecovery()
+				return
+			}
+			go a.resetState()
 		})
 		onClick(byID("live-faults"), func(e js.Value) {
 			value := e.Get("target").Call("closest", "button[data-fault]")
@@ -119,7 +130,7 @@ func (a *app) renderRecovery() {
 			setText(button, "Enable automatic recovery")
 		}
 		controls.Set("hidden", false)
-		button.Set("disabled", a.live.recovering || !a.snap.RecoveryControllable)
+		button.Set("disabled", a.live.recovering || a.live.resetting || !a.snap.RecoveryControllable)
 		if a.snap.RecoveryControllable {
 			button.Set("title", "")
 		} else {
@@ -156,6 +167,29 @@ func (a *app) renderRecovery() {
 	} else {
 		behavior.Set("hidden", true)
 	}
+	reset := byID("reset-state")
+	reset.Set("disabled", a.live == nil || !a.recoveryFresh() || a.snap.Armed || !a.snap.RecoveryControllable || a.live.recovering || a.live.resetting)
+	if a.live != nil && a.live.resetting {
+		setText(reset, "Resetting state…")
+	} else if a.live != nil && a.live.resetConfirm && !a.snap.Armed {
+		setText(reset, "Confirm reset (ground only)")
+	} else {
+		setText(reset, "Reset state (ground only)")
+		if a.live != nil {
+			a.live.resetConfirm = false
+		}
+	}
+	gps := byID("recovery-gps")
+	showGPS := a.recoveryFresh() && a.snap.RecoveryEnabled && a.snap.Nav.Value < 0.99 &&
+		a.snap.RecoveryGPSAtMs != 0 && a.snap.NowMs-a.snap.RecoveryGPSAtMs <= model.StaleAfterMs
+	gps.Set("hidden", !showGPS)
+	if showGPS {
+		text := a.snap.RecoveryGPSStatus
+		if strings.HasPrefix(text, "Revalidating") {
+			text += fmt.Sprintf(" %.1f / 8 s", a.snap.RecoveryGPSSeconds)
+		}
+		setText(gps, text)
+	}
 }
 
 func (a *app) showRecoveryStatus(text string, isError bool) {
@@ -177,6 +211,10 @@ func (a *app) renderFlyAction() {
 		hint = "Wait for the upload to finish."
 	case a.live.starting:
 		hint = "Starting…"
+	case a.live.resetting:
+		hint = "Wait for the state reset to finish."
+	case a.live.recovering:
+		hint = "Wait for recovery control confirmation."
 	case !a.snap.Connected:
 		hint = "No drone connected."
 	case a.snap.Armed:
@@ -200,6 +238,8 @@ func (a *app) renderFaults() {
 	switch {
 	case a.live.injecting:
 		hint = "Injecting…"
+	case a.live.resetting:
+		hint = "Resetting state…"
 	case !a.snap.Connected:
 		hint = "No drone connected."
 	}

@@ -76,7 +76,7 @@ function snapshot(state, recoveryEnabled, recoveryFresh, recoveryControllable) {
     HasGPS: connected,
     Satellites: connected ? 14 : 0,
     Overall: reading(connected ? Math.min(link, state === "critical" ? 0.2 : 1) : 0, now),
-    Nav: reading(connected && state !== "nav-critical" ? 1 : 0, now),
+    Nav: reading(connected && !state.startsWith("nav-critical") ? 1 : 0, now),
     Link: reading(link, now),
     IMU: reading(connected ? 0.98 : 0, now),
     Motors: reading(connected ? 0.96 : 0, now),
@@ -92,11 +92,17 @@ function fixtureServer() {
   let recoveryControllable = true;
   let recoveryPending = null;
   let holdReply = false, recoveryResponse = null, failRecovery = false;
+  let resets = 0;
   const streams = new Set();
   const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".wasm": "application/wasm", ".mp3": "audio/mpeg", ".svg": "image/svg+xml", ".md": "text/plain; charset=utf-8" };
   const send = res => res.write(`data: ${JSON.stringify({ Snapshot: snapshot(state, recoveryEnabled, recoveryFresh, recoveryControllable), Events: [] })}\n\n`);
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, "http://127.0.0.1").pathname;
+    if (req.method === "POST" && pathname === "/api/reset") {
+      resets++;
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ reset: true }));
+      return;
+    }
     if (req.method === "POST" && pathname === "/api/recovery") {
       let body = "";
       req.on("data", chunk => { body += chunk; });
@@ -144,6 +150,7 @@ function fixtureServer() {
       recoveryResponse = null; holdReply = false;
     },
     failNextRecovery() { failRecovery = true; },
+    resetCount() { return resets; },
     close() { clearInterval(ticker); for (const stream of streams) stream.end(); server.close(); },
   })));
 }
@@ -299,6 +306,7 @@ async function main() {
         "no-data": "No contact with the drone",
         drift: "All systems healthy",
         "nav-critical": "Critical: GNSS",
+        "nav-critical-ground": "Critical: GNSS",
       }[name];
       await waitFor(() => cdp.evaluate(`document.querySelector('#summary-title')?.textContent === ${JSON.stringify(expectedTitle)}`), `${name} summary`);
       const check = await cdp.evaluate(`(() => {
@@ -376,7 +384,16 @@ async function main() {
     fixture.setRecovery(false, true, true);
     result = await state("nav-critical");
     if (result.title !== "Critical: GNSS" || !await cdp.evaluate(`document.querySelector('#recovery-behavior').textContent.includes('Last recovery state')`)) throw new Error("Disabled recovery hid an attack or claimed active commands");
+    if (!await cdp.evaluate(`document.querySelector('#reset-state').disabled`)) throw new Error("Reset was available while armed");
     await save("recovery-disabled-critical");
+    result = await state("nav-critical-ground");
+    await waitFor(() => cdp.evaluate(`!document.querySelector('#reset-state').disabled`), "ground reset available");
+    await cdp.evaluate(`document.querySelector('#reset-state').click()`);
+    if (fixture.resetCount() !== 0 || !await cdp.evaluate(`document.querySelector('#reset-state').textContent.includes('Confirm reset')`)) throw new Error("Reset skipped confirmation");
+    await cdp.evaluate(`document.querySelector('#reset-state').click()`);
+    await waitFor(() => fixture.resetCount() === 1 && cdp.evaluate(`!document.querySelector('#reset-state').disabled && document.querySelector('#recovery-status').textContent.includes('baseline revalidated')`), "confirmed reset request completed");
+    if (await cdp.evaluate(`document.querySelector('#summary-title').textContent`) !== "Critical: GNSS") throw new Error("Reset response falsely forced health to green");
+    await save("ground-reset-critical-awaiting-validation");
     fixture.setRecovery(true, true, true);
     result = await state("healthy");
     console.log("PASS recovery: enabled/disabled, unknown/stale disabled controls, and no optimistic update before SSE confirmation.");

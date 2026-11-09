@@ -22,6 +22,8 @@ type liveState struct {
 	injecting      bool // a fault-injection request is in flight
 	recovering     bool // an automatic-recovery setting request is in flight
 	recoveryHTTP   bool // HTTP must finish before another setting request starts
+	resetting      bool
+	resetConfirm   bool
 	recoveryTarget bool
 	homeSynced     bool
 }
@@ -253,4 +255,30 @@ func (a *app) setRecovery(enabled bool) {
 	} else {
 		a.showRecoveryStatus("Request accepted; waiting for telemetry confirmation.", false)
 	}
+}
+
+func (a *app) resetState() {
+	a.live.resetting, a.live.resetConfirm = true, false
+	a.showRecoveryStatus("Clearing simulated threats and requesting ground rebaseline…", false)
+	a.renderRecovery()
+	a.renderFlyAction()
+	defer func() { a.live.resetting = false; a.renderRecovery(); a.renderFlyAction() }()
+	resp, err := await(js.Global().Call("fetch", "api/reset", map[string]any{
+		"method": "POST", "headers": map[string]any{"Content-Type": "application/json"},
+		"body": `{"confirm":true}`,
+	}))
+	if err != nil {
+		a.showRecoveryStatus("Couldn't reach the bridge: "+err.Error(), true)
+		return
+	}
+	body, err := await(resp.Call("json"))
+	if err != nil {
+		a.showRecoveryStatus("The bridge sent an unreadable reset reply.", true)
+		return
+	}
+	if !resp.Get("ok").Bool() {
+		a.showRecoveryStatus(body.Get("error").String(), true)
+		return
+	}
+	a.showRecoveryStatus("Ground baseline revalidated. Trust will recover only as new sensor checks pass. Mission preserved.", false)
 }

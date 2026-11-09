@@ -50,6 +50,23 @@ it does not optimistically change status. Wire telemetry names are `RECOV_EN`,
 `RECOV_CTL`, `RECOV_ACK` and `AUTO_STATE`. These local demo controls are not a
 replacement for authenticated hardware command authorization.
 
+**Reset state (ground only)** is a separate, two-click confirmed action. It is
+disabled while armed, stale or disconnected. It clears the supported simulated
+faults, asks core to revalidate a fresh stationary ground baseline, and confirms
+the return to the primary GPS source through the FC's acknowledgement. It keeps
+the uploaded mission and automatic-recovery setting, does not refill the battery
+or restart physics, and never arms or takes off. A successful request does not
+paint health green: subsequent sensor checks still determine trust. If checks
+fail, it reports an error rather than claiming a reset. `POST /api/reset` requires
+same-origin loopback JSON `{"confirm":true}` and cannot reset a real autopilot
+that does not acknowledge the required `SIM_*` parameters.
+
+When GPS trust is low, the recovery panel now reports whether it is waiting for
+fresh sensors, backup selection, position/velocity agreement, or the eight-second
+validation window. Bounded optical-flow offset is tolerated only with a stable
+GPS-minus-backup residual; this remains an operational heuristic, not proof
+against every GPS attack. See the core documentation for the exact limits.
+
 Repeatable flight regression (pymavlink environment, built core and bridge):
 
 ```sh
@@ -62,6 +79,11 @@ cd ..
 It runs a fresh isolated instance, checks disabled detection/no response,
 enabled failover, and honest-GPS recovery after jump and drift attacks. It never
 connects to a physical drone or the user's running instance.
+
+`core/sitl/run_recovery_long_scenario.py` adds a long moving square-route attack,
+mid-flight enabling, clear/recovery, landing, ground reset and normal re-arm checks
+without bypassing prearm safety. It uses isolated instance 23 and ports
+15965/15966/18193. Run it with the same `--ardupilot` and optional `--log-dir` flags.
 
 For the full local ArduPilot simulator + real detectors + live dashboard, run
 `./scripts/sitl` from the repository root. See the root README for flight commands.

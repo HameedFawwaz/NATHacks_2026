@@ -193,6 +193,17 @@ static void test_recovery_toggle_gates_commands_not_detection(harness_t *h) {
     tick(h, 20);
     assert(h->autonomy.behavior == CORE_AUTONOMY_LINK_HOLD && "disabled time is not a return timeout");
     assert(h->mode_commands == 0 && "do not replay an old pending hold after enabling");
+    core_telemetry_t ground = h->telemetry;
+    ground.heartbeat.last_update_ms = h->now;
+    assert(!core_autonomy_reset_ground(&h->autonomy, &ground, h->now)); /* still armed */
+    ground.heartbeat.base_mode = 0;
+    core_autonomy_set_enabled(&h->autonomy, false, h->now);
+    assert(core_autonomy_reset_ground(&h->autonomy, &ground, h->now));
+    assert(!h->autonomy.enabled && h->autonomy.behavior == CORE_AUTONOMY_NOMINAL);
+    assert(!h->autonomy.link_untrusted && !h->autonomy.nav_untrusted);
+    assert(h->autonomy.active_source_set == 1 && h->score.link_trust == 0);
+    /* Reset clears decisions, not measured trust. Low scores will be acted on
+     * again if the operator enables responses during a real new attack. */
 }
 
 static void test_gnss_failover_and_recovery(harness_t *h) {

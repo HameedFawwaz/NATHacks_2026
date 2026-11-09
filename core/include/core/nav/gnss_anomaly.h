@@ -76,8 +76,9 @@ typedef struct {
 void core_nav_detector_init(core_nav_detector_t *detector, const core_nav_config_t *cfg);
 
 /* Explicit operator-confirmed ground rebaseline, NOT an automatic recovery.
- * The caller must obtain confirmation that the GPS location has been verified
- * independently and that spoofing has stopped. Checks fresh disarmed heartbeat,
+ * The local SITL caller obtains operator confirmation and confirmed clearing
+ * of SIM_* faults first. Other deployments require an independently verified
+ * location and confirmation that spoofing has stopped. Checks fresh disarmed heartbeat,
  * stationary good GPS and IMU, and non-DR detector checks. Returns false and
  * changes nothing if any gate fails. It does not set trust or clear scores;
  * normal scoring and slew recovery require subsequent GPS samples. now_ms is
@@ -100,6 +101,11 @@ typedef struct {
     uint64_t last_gps_ms;
     uint64_t last_gps_time_usec;
     bool consumed;
+    float candidate_north_m, candidate_east_m;
+    float position_error_m;
+    /* 0: no permission, 1: insufficient data, 2: position disagreement,
+     * 3: velocity disagreement, 4: validating, 5: reacquired. */
+    uint8_t status;
 } core_nav_backup_recovery_t;
 
 bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector,

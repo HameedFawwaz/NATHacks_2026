@@ -17,6 +17,7 @@ var ErrRecoveryUnavailable = errors.New("core recovery controls are unavailable 
 
 type recoveryWait struct {
 	enabled bool
+	reset   bool
 	nonce   uint16
 	done    chan struct{}
 }
@@ -43,12 +44,61 @@ func (v *vehicleState) applyRecoveryValue(payload []byte, now int64) {
 		if value >= 0 && value < float64(len(states)) && math.Trunc(value) == value {
 			v.snap.Behavior = states[int(value)]
 		}
+	case "RECOV_GPS":
+		states := []string{"Waiting for confirmed GPS-free backup navigation.", "Waiting for fresh, good-quality sensor data.",
+			"GPS and backup position are inconsistent; recovery is waiting.", "GPS and backup velocity disagree; recovery is waiting.",
+			"Revalidating GPS against backup navigation (8 seconds required).", "GPS baseline revalidated; waiting for normal trust checks."}
+		if value >= 0 && value < float64(len(states)) && math.Trunc(value) == value {
+			v.snap.RecoveryGPSStatus, v.snap.RecoveryGPSAtMs = states[int(value)], now
+		}
+	case "RECOV_SEC":
+		if value >= 0 && value <= 60 {
+			v.snap.RecoveryGPSSeconds = value
+		}
+	case "RESET_ACK":
+		if value >= 1 && value <= 65535 && math.Trunc(value) == value {
+			v.resetAck = uint16(value)
+		}
 	}
 }
 
 // SetRecovery waits for a nonce-bearing acknowledgement from the core itself.
 // Neither an HTTP success nor a previously matching status may fake confirmation.
 func (b *Bridge) SetRecovery(ctx context.Context, enabled bool) error {
+	return b.setRecovery(ctx, enabled, false)
+}
+
+// ResetState clears only SITL's injected faults, then requests a gated ground
+// rebaseline. It preserves the mission, recovery setting and aircraft mode.
+func (b *Bridge) ResetState(ctx context.Context) error {
+	b.mu.Lock()
+	now := b.nowMs()
+	var blocked error
+	switch {
+	case !b.vehicle.connected(now) || b.peer == nil:
+		blocked = ErrNoVehicle
+	case b.vehicle.snap.Armed:
+		blocked = ErrArmed
+	case !b.vehicle.snapshot(now).RecoveryControllable:
+		blocked = ErrRecoveryUnavailable
+	case b.recovery != nil || b.command != nil || b.upload != nil || b.params != nil || b.resetting:
+		blocked = ErrBusy
+	}
+	if blocked == nil {
+		b.resetting = true
+	}
+	b.mu.Unlock()
+	if blocked != nil {
+		return blocked
+	}
+	defer func() { b.mu.Lock(); b.resetting = false; b.mu.Unlock() }()
+	if err := b.setFault(ctx, FaultNone, true); err != nil {
+		return err
+	}
+	return b.setRecovery(ctx, false, true)
+}
+
+func (b *Bridge) setRecovery(ctx context.Context, enabled, reset bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -58,29 +108,38 @@ func (b *Bridge) SetRecovery(ctx context.Context, enabled bool) error {
 	case !b.vehicle.connected(now) || b.peer == nil:
 		b.mu.Unlock()
 		return ErrNoVehicle
-	case b.recovery != nil || b.command != nil || b.upload != nil || b.params != nil:
+	case b.recovery != nil || b.command != nil || b.upload != nil || b.params != nil || (b.resetting && !reset):
 		b.mu.Unlock()
 		return ErrBusy
 	case !b.vehicle.snapshot(now).RecoveryControllable:
 		b.mu.Unlock()
 		return ErrRecoveryUnavailable
+	case reset && b.vehicle.snap.Armed:
+		b.mu.Unlock()
+		return ErrArmed
+	case reset && b.vehicle.fault != FaultNone:
+		b.mu.Unlock()
+		return ErrBusy
 	}
 	b.recoveryNonce++
 	if b.recoveryNonce == 0 {
 		b.recoveryNonce = 1
 	}
-	if b.recoveryNonce == uint16(b.vehicle.recoveryAck>>1) {
+	for b.recoveryNonce == uint16(b.vehicle.recoveryAck>>1) || b.recoveryNonce == b.vehicle.resetAck {
 		b.recoveryNonce++
 		if b.recoveryNonce == 0 {
 			b.recoveryNonce = 1
 		}
 	}
-	w := &recoveryWait{enabled: enabled, nonce: b.recoveryNonce, done: make(chan struct{}, 1)}
+	w := &recoveryWait{enabled: enabled, reset: reset, nonce: b.recoveryNonce, done: make(chan struct{}, 1)}
 	b.recovery = w
 	send := func() {
 		var value float32
 		if enabled {
 			value = 1
+		}
+		if reset {
+			value = 2
 		}
 		b.sendLocked(mavlink.MsgCommandLong, mavlink.PackCommandLong(b.vehicle.sysID, recoveryCompID,
 			recoveryCommand, value, float32(w.nonce)))
@@ -100,9 +159,16 @@ func (b *Bridge) SetRecovery(ctx context.Context, enabled bool) error {
 				b.mu.Unlock()
 				return ErrNoVehicle
 			}
+			if reset && b.vehicle.snap.Armed {
+				b.mu.Unlock()
+				return ErrArmed
+			}
 			send()
 			b.mu.Unlock()
 		case <-ctx.Done():
+			if reset {
+				return errors.New("ground reset not confirmed; keep the drone disarmed and wait for fresh stationary GPS/IMU and acceptable position checks")
+			}
 			return errors.New("core did not confirm the recovery setting; its actual state may have changed, check live status")
 		}
 	}
@@ -119,7 +185,8 @@ func (b *Bridge) handleRecoveryLocked(f mavlink.Frame) {
 	if w.enabled {
 		want++
 	}
-	if name == "RECOV_ACK" && value == float64(want) {
+	if (!w.reset && name == "RECOV_ACK" && value == float64(want)) ||
+		(w.reset && name == "RESET_ACK" && value == float64(w.nonce)) {
 		select {
 		case w.done <- struct{}{}:
 		default:

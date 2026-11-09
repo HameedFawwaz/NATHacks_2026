@@ -159,6 +159,11 @@ static void test_recovery_control_is_opt_in_and_targeted(bool allow) {
     core_mavlink_conn_get_telemetry(conn, &t);
     assert(t.recovery_control.count == (allow ? 2u : 0u));
     if (allow) assert(t.recovery_control.enabled && t.recovery_control.nonce == 42);
+    recovery_command(fd, &addr, 254, 190, 191, 2, 43);
+    for (int i = 0; i < 20; i++) { core_mavlink_conn_poll(conn); usleep(1000); }
+    core_mavlink_conn_get_telemetry(conn, &t);
+    assert(t.recovery_control.count == (allow ? 3u : 0u));
+    if (allow) assert(t.recovery_control.reset_estimate && t.recovery_control.nonce == 43);
     core_mavlink_conn_close(conn);
     close(fd);
 }

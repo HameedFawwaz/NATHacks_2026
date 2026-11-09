@@ -100,6 +100,7 @@ typedef struct {
     core_nav_estimator_t estimator;
     truth_t v;
     int tick;
+    float backup_bias_m;
 } rig_t;
 
 static void rig_init(rig_t *r, double north_m, double east_m, float vn, float ve) {
@@ -435,6 +436,7 @@ static void test_operator_rebaseline(void) {
 static bool backup_step(rig_t *r, core_nav_backup_recovery_t *recovery, core_gps_raw_t *last_gps,
                         double offset, bool permitted, bool bad_velocity) {
     core_telemetry_t t = make_telemetry(&r->v, r->tick % 10 == 0, offset);
+    t.global_position.lat += (int32_t)lrint(r->backup_bias_m / 111320.0 * 1e7);
     if (t.gps_raw.valid) *last_gps = t.gps_raw;
     else t.gps_raw = *last_gps;
     t.global_position.vx = (int16_t)lrintf(r->v.vn * 100);
@@ -492,6 +494,32 @@ static void test_backup_recovery(void) {
     }
 }
 
+static void test_backup_recovery_tolerates_bounded_drift_not_a_ramp(void) {
+    rig_t r;
+    core_nav_backup_recovery_t rec = {0};
+    core_gps_raw_t gps = {0};
+    rig_init(&r, 40, 25, 2, 1);
+    r.backup_bias_m = 6; /* user's long flight had about 5.65 m of disagreement */
+    for (int i = 0; i < 500; ++i) backup_step(&r, &rec, &gps, 0, false, false);
+    r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000;
+    bool recovered = false;
+    for (int i = 0; i < 1500; ++i) recovered |= backup_step(&r, &rec, &gps, 0, true, false);
+    CHECK(recovered && r.detector.nav_trust > .99f);
+    for (int direction = -1; direction <= 1; direction += 2) {
+        memset(&rec, 0, sizeof(rec));
+        r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000;
+        /* A continuing ramp crossing the enlarged absolute band must not
+         * re-anchor: its fixed residual changes before eight seconds pass. */
+        for (int i = 0; i < 2000; ++i) {
+            double offset = direction * (-8.0 + i * 1.5 * .02);
+            CHECK(!backup_step(&r, &rec, &gps, offset, true, false));
+        }
+    }
+    memset(&rec, 0, sizeof(rec));
+    r.backup_bias_m = 20;
+    for (int i = 0; i < 1000; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+}
+
 int main(void) {
     test_projection_matches_dashboard_inverse();
     test_nothing_before_ready();
@@ -504,6 +532,7 @@ int main(void) {
     test_slow_spoof_not_followed();
     test_operator_rebaseline();
     test_backup_recovery();
+    test_backup_recovery_tolerates_bounded_drift_not_a_ramp();
     printf("test_nav_estimate: all passed\n");
     return 0;
 }

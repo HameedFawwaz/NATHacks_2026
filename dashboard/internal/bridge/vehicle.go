@@ -68,6 +68,7 @@ type vehicleState struct {
 	nextEventSeq      int
 	recoveryControlAt int64
 	recoveryAck       uint32
+	resetAck          uint16
 }
 
 // isVehicle tells the autopilot apart from ground stations and companion

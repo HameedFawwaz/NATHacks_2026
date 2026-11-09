@@ -57,6 +57,7 @@ func (b *Bridge) Handler(options HandlerOptions) http.Handler {
 	mux.HandleFunc("POST /api/start", b.serveStart)
 	mux.HandleFunc("POST /api/fault", b.serveFault)
 	mux.HandleFunc("POST /api/recovery", b.serveRecovery)
+	mux.HandleFunc("POST /api/reset", b.serveReset)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowedHost(r.Host, options.AllowedHosts) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
@@ -225,6 +226,41 @@ func (b *Bridge) serveRecovery(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]bool{"enabled": *req.Enabled})
 	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrBusy), errors.Is(err, ErrRecoveryUnavailable):
+		fail(http.StatusConflict, err.Error())
+	default:
+		fail(http.StatusBadGateway, err.Error())
+	}
+}
+
+func (b *Bridge) serveReset(w http.ResponseWriter, r *http.Request) {
+	fail := func(code int, err string) { writeJSON(w, code, map[string]string{"error": err}) }
+	if !localControl(r) || !sameOrigin(r) {
+		fail(http.StatusForbidden, "reset requires a same-origin loopback client")
+		return
+	}
+	if media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); media != "application/json" {
+		fail(http.StatusUnsupportedMediaType, "expected application/json")
+		return
+	}
+	var req struct {
+		Confirm bool `json:"confirm"`
+	}
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&req); err != nil || !req.Confirm {
+		fail(http.StatusBadRequest, "explicit reset confirmation required")
+		return
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		fail(http.StatusBadRequest, "expected one JSON object")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	switch err := b.ResetState(ctx); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"reset": true})
+	case errors.Is(err, ErrArmed), errors.Is(err, ErrNoVehicle), errors.Is(err, ErrBusy), errors.Is(err, ErrRecoveryUnavailable):
 		fail(http.StatusConflict, err.Error())
 	default:
 		fail(http.StatusBadGateway, err.Error())

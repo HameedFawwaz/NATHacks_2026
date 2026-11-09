@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"net"
 	"net/http/httptest"
@@ -133,5 +134,95 @@ func TestRecoveryHTTPGuards(t *testing.T) {
 				t.Fatalf("got %d: %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestResetRefusesArmedOrNonSITLBeforeRebaseline(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+	b.mu.Lock()
+	b.vehicle.snap.RecoveryEnabled = true
+	b.vehicle.snap.RecoveryAtMs = b.nowMs()
+	b.vehicle.snap.RecoveryControllable = true
+	b.vehicle.recoveryControlAt = b.nowMs()
+	b.vehicle.snap.Armed = true
+	b.mu.Unlock()
+	if err := b.ResetState(ctx); !errors.Is(err, ErrArmed) {
+		t.Fatalf("armed reset: %v", err)
+	}
+	b.mu.Lock()
+	fault := b.vehicle.fault
+	b.vehicle.snap.Armed = false
+	b.mu.Unlock()
+	if fault != "" {
+		t.Fatal("armed reset started clearing fault parameters")
+	}
+	old := paramRetryInterval
+	paramRetryInterval = 20 * time.Millisecond
+	t.Cleanup(func() { paramRetryInterval = old })
+	// A vehicle with no confirmed SIM_* settings cannot trigger rebaseline.
+	if err := b.ResetState(ctx); !errors.Is(err, ErrNotSITL) {
+		t.Fatalf("non-SITL reset: %v", err)
+	}
+	b.mu.Lock()
+	pending := b.recovery
+	b.mu.Unlock()
+	if pending != nil {
+		t.Fatal("reset command issued without confirmed SITL fault clearing")
+	}
+}
+
+func TestResetHTTPRequiresConfirmationAndSameOriginLoopback(t *testing.T) {
+	b, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.conn.Close()
+	h := b.Handler(HandlerOptions{})
+	for _, tc := range []struct {
+		remote, origin, body string
+		code                 int
+	}{
+		{"192.0.2.1:99", "", `{"confirm":true}`, 403},
+		{"127.0.0.1:99", "https://evil.example", `{"confirm":true}`, 403},
+		{"127.0.0.1:99", "", `{}`, 400},
+		{"127.0.0.1:99", "", `{"confirm":false}`, 400},
+		{"127.0.0.1:99", "", `{"confirm":true}{}`, 400},
+		{"127.0.0.1:99", "", `{"confirm":true}`, 409},
+	} {
+		r := httptest.NewRequest("POST", "http://127.0.0.1:8080/api/reset", strings.NewReader(tc.body))
+		r.RemoteAddr = tc.remote
+		r.Header.Set("Content-Type", "application/json")
+		if tc.origin != "" {
+			r.Header.Set("Origin", tc.origin)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != tc.code {
+			t.Fatalf("%s %s: got %d %s", tc.remote, tc.body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestResetTransactionSerializesOtherControls(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+	b.mu.Lock()
+	b.resetting = true
+	b.missionReady = true
+	b.mu.Unlock()
+	if err := b.SetFault(ctx, FaultNone); !errors.Is(err, ErrBusy) {
+		t.Fatalf("fault while resetting: %v", err)
+	}
+	if err := b.SetRecovery(ctx, false); !errors.Is(err, ErrBusy) {
+		t.Fatalf("toggle while resetting: %v", err)
+	}
+	if err := b.StartFlight(ctx); !errors.Is(err, ErrBusy) {
+		t.Fatalf("start while resetting: %v", err)
+	}
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); !errors.Is(err, ErrBusy) {
+		t.Fatalf("upload while resetting: %v", err)
 	}
 }

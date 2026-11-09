@@ -55,34 +55,42 @@ position **and velocity**, its selection was acknowledged, and failover has not
 failed. A source-set number alone is not proof. `core_main --gps-free-backup`
 explicitly opts in; the local SITL launcher supplies it with the GPS-free
 optical-flow configuration in `autonomy_failover.parm`. Automatic recovery must
-also be enabled. The helper requires eight uninterrupted seconds of GPS and
-backup horizontal position within 3 m and velocity within 1 m/s, fresh FC
+also be enabled. The helper requires eight uninterrupted seconds with an absolute
+GPS/backup position difference no greater than 10 m, velocity agreement within
+1 m/s, and a **fixed GPS-minus-backup position residual that changes by no more
+than 2 m over the entire window**. The latter guard prevents sliding the reference
+along with a continuing spoof. It also requires fresh FC
 heartbeat, position/velocity, GPS and finite IMU, advancing GPS time and
 passing jump, timestamp, HDOP and EKF checks. Missing/stale evidence or loss
 of permission cancels the window. It reanchors both filters only when they
 are divergent; it does not set trust or scores. Subsequent normal detector
 checks and trust slew remain in force.
 
-These are conservative operational thresholds, not authentication: a 1.5 m/s
-linear offset ramp can remain within a 6 m diameter agreement region for at
-most 4 seconds (3 m/s for 2 seconds), shorter than the window, provided the
-backup is accurate and truly independent. A stationary spoof within the
-position/velocity bounds, a sufficiently slow ramp, or common-mode corruption
+The earlier 3 m absolute-agreement gate deadlocked after a longer flight left
+about 5.65 m of optical-flow position error. The bounded correction plus residual
+stability check permits reacquisition in that case without following an ongoing
+1.5 or 3 m/s ramp. Tests cover both ramp directions and reject a 20 m backup error.
+These are operational thresholds, not authentication: a stationary spoof within
+the position/velocity bounds, a sufficiently slow ramp, or common-mode corruption
 can pass. Conversely, optical-flow drift, changing altitude, telemetry latency
 or fast motion can prevent honest recovery. Validate thresholds and source
 independence for each deployment; do not advertise this as proof of GPS safety.
 
-`core_nav_detector_operator_rebaseline` is an **unwired primitive**, not an
-automatic recovery or an All clear action. A future operator interface must
-require explicit confirmation only after independently verifying the actual
-ground position and that the interference has ended. It checks a recent
+`core_nav_detector_operator_rebaseline` supports the explicit **Reset state**
+action in the local SITL dashboard. The bridge first requires a disarmed vehicle,
+explicit confirmation and acknowledged clearing of all supported SITL fault
+parameters. The core independently checks a recent
 disarmed FC heartbeat, fresh stationary 3D GPS with known acceptable HDOP,
 fresh finite IMU, and passing non-DR checks. These gates do not authenticate
 GPS and cannot rule out a stationary spoof. It reanchors the filters but does
-not clear scores or set trust: a later fix must pass normal checks and trust
-recovers at its configured slew rate. Never invoke it just because a timer
-elapsed, an operator enabled auto-recovery, or a simulator fault was removed.
-No in-flight rebaseline is supported by this primitive.
+not clear scores or set trust: later fixes must pass normal checks and trust
+recovers at its configured slew rate. The reset also explicitly requests the
+primary GPS source while disarmed, waits for the FC acknowledgement, preserves
+the mission and recovery enable setting, and never arms or takes off. Automatic
+source commands are serialized against that transaction. No in-flight reset is
+accepted. This is a local SITL control, not a hardware position-authentication
+mechanism. Outside this setup, operator rebaseline requires an independently
+verified ground position and confirmation that interference has ended.
 
 Maintains dead-reckoned position estimates (Kalman filters propagating accelerometer,
 gyro and barometer measurements between GPS anchors) and cross-checks incoming GPS
