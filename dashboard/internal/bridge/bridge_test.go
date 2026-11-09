@@ -116,6 +116,100 @@ func TestPositionComesOnlyFromAutopilot(t *testing.T) {
 	}
 }
 
+// homePosition builds a HOME_POSITION payload.
+func homePosition(lat, lon float64) []byte {
+	p := make([]byte, 60)
+	binary.LittleEndian.PutUint32(p, uint32(int32(lat*1e7)))
+	binary.LittleEndian.PutUint32(p[4:], uint32(int32(lon*1e7)))
+	return p
+}
+
+// ekfAndGPS gives v a GPS fix at home and an EKF position 100 m east of it.
+func ekfAndGPS(t *testing.T, v *vehicleState, nowMs int64) {
+	t.Helper()
+	gps := make([]byte, 52)
+	gps[28] = 3
+	binary.LittleEndian.PutUint32(gps[8:], uint32(int32(model.DefaultHome.Lat*1e7)))
+	binary.LittleEndian.PutUint32(gps[12:], uint32(int32(model.DefaultHome.Lon*1e7)))
+	gps[29] = 12 // satellites visible
+	v.apply(frame(1, 1, mavlink.MsgGPSRawInt, gps), nowMs)
+	ekf := model.FromLocal(model.DefaultHome, 100, 0)
+	pos := make([]byte, 28)
+	binary.LittleEndian.PutUint32(pos[4:], uint32(int32(ekf.Lat*1e7)))
+	binary.LittleEndian.PutUint32(pos[8:], uint32(int32(ekf.Lon*1e7)))
+	v.apply(frame(1, 1, mavlink.MsgGlobalPositionInt, pos), nowMs)
+}
+
+func TestCoreEstimateReplacesEKF(t *testing.T) {
+	v := identified(t)
+	ekfAndGPS(t, v, 1100)
+	if s := v.snapshot(1100); s.EstimateFrom != model.EstimateEKF {
+		t.Fatalf("before core publishes: from %q, want ekf", s.EstimateFrom)
+	}
+
+	v.apply(frame(1, 1, mavlink.MsgHomePosition, homePosition(model.DefaultHome.Lat, model.DefaultHome.Lon)), 1100)
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_N", 3)), 1100)
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_E", -4)), 1100)
+
+	s := v.snapshot(1100)
+	if s.EstimateFrom != model.EstimateCore || !s.HasEstimate {
+		t.Fatalf("from %q, has %v; want core", s.EstimateFrom, s.HasEstimate)
+	}
+	if d := model.DistanceM(s.Estimated, model.FromLocal(model.DefaultHome, -4, 3)); d > 0.5 {
+		t.Fatalf("estimate is %.2f m from where core put it", d)
+	}
+	// GPS is at home and core's estimate is 5 m away; the EKF is 100 m away and must
+	// no longer be what drift is measured against.
+	if m := model.DistanceM(s.Reported, s.Estimated); m < 4 || m > 6 {
+		t.Fatalf("GPS to estimate = %.1f m, want about 5", m)
+	}
+}
+
+func TestCoreEstimateNeedsHome(t *testing.T) {
+	v := identified(t)
+	ekfAndGPS(t, v, 1100)
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_N", 3)), 1100)
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_E", 3)), 1100)
+	if s := v.snapshot(1100); s.EstimateFrom != model.EstimateEKF {
+		t.Fatalf("used core's estimate without a home: from %q", s.EstimateFrom)
+	}
+}
+
+func TestCoreEstimateExpires(t *testing.T) {
+	v := identified(t)
+	ekfAndGPS(t, v, 1100)
+	v.apply(frame(1, 1, mavlink.MsgHomePosition, homePosition(model.DefaultHome.Lat, model.DefaultHome.Lon)), 1100)
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_N", 1)), 1100)
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_E", 1)), 1100)
+
+	// Keep the vehicle's other telemetry and heartbeat current; only core goes quiet.
+	later := int64(1100 + model.StaleAfterMs + 500)
+	v.apply(frame(1, 1, mavlink.MsgHeartbeat, heartbeatPayload(2, 3, 0, 0)), later)
+	ekfAndGPS(t, v, later)
+	if s := v.snapshot(later); s.EstimateFrom != model.EstimateEKF {
+		t.Fatalf("stale core estimate still used: from %q", s.EstimateFrom)
+	}
+
+	// One half arriving again isn't enough.
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_N", 1)), later)
+	if s := v.snapshot(later); s.EstimateFrom != model.EstimateEKF {
+		t.Fatalf("used an estimate with only EST_N current: from %q", s.EstimateFrom)
+	}
+}
+
+func TestBadCoreEstimateIgnored(t *testing.T) {
+	v := identified(t)
+	ekfAndGPS(t, v, 1100)
+	v.apply(frame(1, 1, mavlink.MsgHomePosition, homePosition(model.DefaultHome.Lat, model.DefaultHome.Lon)), 1100)
+	for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1)), 1e9} {
+		v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_N", bad)), 1100)
+		v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("EST_E", bad)), 1100)
+	}
+	if s := v.snapshot(1100); s.EstimateFrom != model.EstimateEKF {
+		t.Fatalf("accepted an out-of-range estimate: from %q", s.EstimateFrom)
+	}
+}
+
 func TestNoGPSFixHidesPosition(t *testing.T) {
 	v := identified(t)
 	p := make([]byte, 52)
@@ -370,6 +464,7 @@ type fakeVehicle struct {
 	// SIM_* parameters.
 	paramMu sync.Mutex
 	params  map[string]float32
+	signer  *mavlink.Signer // nil: sends unsigned and accepts anything
 }
 
 // param reads one of the vehicle's parameters.
@@ -377,6 +472,20 @@ func (f *fakeVehicle) param(name string) float32 {
 	f.paramMu.Lock()
 	defer f.paramMu.Unlock()
 	return f.params[name]
+}
+
+func (f *fakeVehicle) encode(msgID uint32, payload []byte) []byte {
+	if f.signer != nil {
+		return f.signer.Encode(0, 1, 1, msgID, payload)
+	}
+	return mavlink.Encode(0, 1, 1, msgID, payload)
+}
+
+func (f *fakeVehicle) parse(data []byte) []mavlink.Frame {
+	if f.signer != nil {
+		return f.signer.Parse(data)
+	}
+	return mavlink.Parse(data)
 }
 
 func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
@@ -394,7 +503,7 @@ func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
 }
 
 func (f *fakeVehicle) send(msgID uint32, payload []byte) {
-	if _, err := f.conn.WriteToUDP(mavlink.Encode(0, 1, 1, msgID, payload), f.bridge); err != nil {
+	if _, err := f.conn.WriteToUDP(f.encode(msgID, payload), f.bridge); err != nil {
 		f.t.Error(err)
 	}
 }
@@ -418,7 +527,7 @@ func (f *fakeVehicle) serve(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		for _, fr := range mavlink.Parse(buf[:n]) {
+		for _, fr := range f.parse(buf[:n]) {
 			if f.silent {
 				continue
 			}

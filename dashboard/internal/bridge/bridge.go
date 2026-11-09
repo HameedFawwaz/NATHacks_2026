@@ -50,6 +50,20 @@ type Bridge struct {
 	command   *command
 	params    *paramWait         // a fault being injected; see fault.go
 	stopDrift context.CancelFunc // ends a drifting GPS fault, nil if none is running
+	signer    *mavlink.Signer    // nil: the link is unsigned
+}
+
+// signingLinkID identifies the dashboard's link in its signatures.
+const signingLinkID = 0
+
+// EnableSigning makes the bridge sign everything it sends and drop everything it
+// receives that isn't signed with key. Call it before Run. With it, the dashboard
+// can only talk to a vehicle that has the same key; without it, the dashboard
+// can't talk to one that requires signing.
+func (b *Bridge) EnableSigning(key [mavlink.KeyLen]byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.signer = mavlink.NewSigner(key, signingLinkID)
 }
 
 // Listen opens the UDP socket a vehicle or MAVProxy sends telemetry to.
@@ -92,9 +106,14 @@ func (b *Bridge) Run(ctx context.Context) error {
 func (b *Bridge) nowMs() int64 { return time.Since(b.start).Milliseconds() + 1 }
 
 func (b *Bridge) handle(data []byte, from *net.UDPAddr) {
-	frames := mavlink.Parse(data)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var frames []mavlink.Frame
+	if b.signer != nil {
+		frames = b.signer.Parse(data)
+	} else {
+		frames = mavlink.Parse(data)
+	}
 
 	now := b.nowMs()
 	for _, f := range frames {
@@ -115,7 +134,12 @@ func (b *Bridge) sendLocked(msgID uint32, payload []byte) {
 	if b.peer == nil {
 		return
 	}
-	frame := mavlink.Encode(b.seq, ownSysID, ownCompID, msgID, payload)
+	var frame []byte
+	if b.signer != nil {
+		frame = b.signer.Encode(b.seq, ownSysID, ownCompID, msgID, payload)
+	} else {
+		frame = mavlink.Encode(b.seq, ownSysID, ownCompID, msgID, payload)
+	}
 	b.seq++
 	if _, err := b.conn.WriteToUDP(frame, b.peer); err != nil {
 		log.Printf("mavlink send: %v", err)
@@ -158,6 +182,10 @@ func (b *Bridge) sendPeriodic(ctx context.Context) {
 func (b *Bridge) requestStreamsLocked() {
 	b.sendLocked(mavlink.MsgRequestDataStream, mavlink.PackRequestDataStream(
 		b.vehicle.sysID, b.vehicle.compID, mavlink.DataStreamAll, streamRateHz))
+	// Core's estimate is relative to home, and ArduPilot only sends the home
+	// position when asked.
+	b.sendLocked(mavlink.MsgCommandLong, mavlink.PackRequestMessage(
+		b.vehicle.sysID, b.vehicle.compID, mavlink.MsgHomePosition))
 }
 
 // Snapshot returns the latest vehicle state, with events after afterSeq.
@@ -171,7 +199,17 @@ func (b *Bridge) Snapshot(afterSeq int) (model.Snapshot, []model.Event) {
 			events = append(events, e)
 		}
 	}
-	return b.vehicle.snapshot(b.nowMs()), events
+	snap := b.vehicle.snapshot(b.nowMs())
+	if b.signer != nil {
+		st := b.signer.Stats()
+		snap.Signing = model.LinkSecurity{
+			Enabled:          true,
+			RejectedUnsigned: st.RejectedUnsigned,
+			RejectedBadSig:   st.RejectedBadSig,
+			RejectedReplay:   st.RejectedReplay,
+		}
+	}
+	return snap, events
 }
 
 // UploadPlan sends a plan to the vehicle and waits for it to be accepted. An

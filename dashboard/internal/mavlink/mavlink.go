@@ -23,6 +23,7 @@ const (
 	MsgMissionItemInt    = 73
 	MsgCommandLong       = 76
 	MsgCommandAck        = 77
+	MsgHomePosition      = 242
 	MsgNamedValueFloat   = 251
 	MsgStatusText        = 253
 	MsgESCTelemetry1To4  = 11030 // ardupilotmega dialect
@@ -59,6 +60,7 @@ var messageInfo = map[uint32]struct {
 	MsgMissionItemInt:    {38, 38},
 	MsgCommandLong:       {152, 33},
 	MsgCommandAck:        {143, 10},
+	MsgHomePosition:      {104, 60},
 	MsgNamedValueFloat:   {170, 18},
 	MsgStatusText:        {83, 54},
 	MsgESCTelemetry1To4:  {144, 44},
@@ -74,10 +76,15 @@ type Frame struct {
 
 // Parse returns the valid frames of the messages this package knows about.
 // Everything else in data, including corrupt frames, is skipped.
-func Parse(data []byte) []Frame {
+//
+// Signatures on signed frames are skipped, not checked, so anyone can forge them:
+// use Signer.Parse on a link that is meant to be authenticated.
+func Parse(data []byte) []Frame { return parse(data, nil) }
+
+func parse(data []byte, sg *Signer) []Frame {
 	var frames []Frame
 	for len(data) > 0 {
-		frame, size, ok := parseOne(data)
+		frame, size, ok := parseOne(data, sg)
 		if ok {
 			frames = append(frames, frame)
 		}
@@ -89,8 +96,9 @@ func Parse(data []byte) []Frame {
 // parseOne reads the frame at the start of data and returns how many bytes to
 // advance. Anything unverifiable only advances one byte, because the magic byte
 // may have been noise with a real frame starting inside it.
-func parseOne(data []byte) (frame Frame, size int, ok bool) {
+func parseOne(data []byte, sg *Signer) (frame Frame, size int, ok bool) {
 	var headerLen, payloadLen, extra int
+	signed := false
 	var msgID uint32
 	switch data[0] {
 	case magicV1:
@@ -109,7 +117,8 @@ func parseOne(data []byte) (frame Frame, size int, ok bool) {
 			return Frame{}, 1, false // needs a capability this parser doesn't have
 		}
 		if data[2]&flagSigned != 0 {
-			extra = sigLen // skipped, not verified: signatures aren't checked
+			signed = true
+			extra = sigLen
 		}
 		msgID = uint32(data[7]) | uint32(data[8])<<8 | uint32(data[9])<<16
 		frame.SysID, frame.CompID = data[5], data[6]
@@ -132,6 +141,12 @@ func parseOne(data []byte) (frame Frame, size int, ok bool) {
 		return Frame{}, 1, false
 	}
 
+	// A frame with a valid CRC is a real attempt to send a message, so a signer
+	// judges it, and a rejected one is skipped whole.
+	if sg != nil && !sg.check(data[:total], signed, frame.SysID, frame.CompID) {
+		return Frame{}, total, false
+	}
+
 	frame.MsgID = msgID
 	frame.Payload = make([]byte, max(info.length, payloadLen))
 	copy(frame.Payload, data[headerLen:crcEnd])
@@ -140,6 +155,10 @@ func parseOne(data []byte) (frame Frame, size int, ok bool) {
 
 // Encode returns a MAVLink 2 frame. The message must be one this package knows.
 func Encode(seq, sysID, compID uint8, msgID uint32, payload []byte) []byte {
+	return encode(seq, sysID, compID, msgID, payload, 0)
+}
+
+func encode(seq, sysID, compID uint8, msgID uint32, payload []byte, incompatFlags byte) []byte {
 	n := len(payload)
 	for n > 1 && payload[n-1] == 0 { // MAVLink 2 trims trailing zeros, keeping at least one byte
 		n--
@@ -147,6 +166,7 @@ func Encode(seq, sysID, compID uint8, msgID uint32, payload []byte) []byte {
 	out := make([]byte, headerLenV2, headerLenV2+n+crcLen)
 	out[0] = magicV2
 	out[1] = byte(n)
+	out[2] = incompatFlags
 	out[4] = seq
 	out[5] = sysID
 	out[6] = compID
