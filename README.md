@@ -1,72 +1,114 @@
 # Trust Issues
 
-A drone survivability layer and mission-control dashboard. Detect spoofing, monitor
-subsystem trust, and keep flying when the world stops being trustworthy.
+A drone survivability layer and mission-control dashboard. GPS spoofing, jammed or
+lost control links, and attacks on the operator connection don't have to end a flight:
+`core` detects them in real time and autonomy decides how to respond, while the
+dashboard shows the operator exactly what's trusted, what isn't, and why.
+
+`core` is a small C library built to run anywhere a companion computer could go,
+including [an ESP32 wired straight to a flight controller's telemetry port](core/README.md#running-core-on-an-esp32)
+— not just a laptop. Everything here runs against real ArduPilot SITL, not a scripted
+demo: the detectors see the simulator's actual GPS, IMU and link telemetry, and
+autonomy sends its EKF source-set, hold, return and land commands back over real
+MAVLink, the same way it would to a real flight controller.
 
 ## Structure
 
-- `core/` — C implementation of the drone survivability layer (GNSS spoofing detection, lost-link mitigation, autonomy, link encryption). See `core/README.md`.
-- `dashboard/` — operator dashboard, separate project/framework. See `dashboard/README.md`.
+- `core/` — C implementation of the drone survivability layer: GNSS spoofing
+  detection, lost-link detection, autonomy (the decision layer that acts on both),
+  and operator-link encryption. Runs as `core_main` on a computer or as firmware on
+  an ESP32. See [`core/README.md`](core/README.md).
+- `dashboard/` — operator dashboard, written in Go and compiled to WebAssembly; a
+  separate project/framework from `core`. See [`dashboard/README.md`](dashboard/README.md).
+- `run.sh` / `scripts/sitl` — the two ways to run the whole stack locally, below.
 
-## Run the local simulator
+## Running it
 
-With a built ArduCopter SITL checkout and a Python environment containing
-`pymavlink`, MAVProxy and `psutil`:
+Both of the following start real ArduCopter SITL, `core`'s real GNSS and lost-link
+detectors with autonomy, and the dashboard in **live mode** (not its browser demo).
+The vehicle always starts disarmed; nothing here points at real hardware.
 
-```sh
-ARDUPILOT_DIR=/path/to/ardupilot ARDUPILOT_VENV=/path/to/venv ./run.sh
-```
+Prerequisites either way: CMake, a C compiler, Make, Go 1.24+, a built ArduCopter
+SITL checkout (`./waf configure --board sitl && ./waf copter`), and a Python
+environment with `pymavlink` (`scripts/sitl` also wants MAVProxy and `psutil`).
 
-This builds core and the dashboard, starts real SITL with the GNSS and lost-link
-detectors and autonomy, and opens a MAVProxy console (MAVProxy is the operator
-whose heartbeats the lost-link detector watches). Open **http://127.0.0.1:8080**, upload a
-mission, then use **Start flight**. The live threat controls inject faults into
-SITL, not browser-generated trust scores. The simulator is not real hardware.
-Exit MAVProxy or press Ctrl+C to stop this run's processes; logs stay in the
-printed run directory. See `./run.sh --help` for alternate ports/instances.
-
-For repeatable spoof and unspoofed-control scenarios, see
-[`core/README.md`](core/README.md#end-to-end-gnss-scenarios); for operator-link
-loss and jamming driving autonomy's hold and return, see
-[`core/README.md`](core/README.md#end-to-end-link-scenarios).
-
-## Real ArduPilot simulation (SITL)
+### `scripts/sitl` — scripted flight, recommended for a first run
 
 ```sh
 ./scripts/sitl
 ```
 
-Open **http://127.0.0.1:8080**. This builds and starts ArduCopter SITL, the real C
-GNSS/link detectors, and the dashboard in **live mode**, not its browser demo.
-The vehicle starts disarmed. In a second terminal:
+Builds core and the dashboard, starts everything, and waits for GPS lock and first
+telemetry before printing `Ready: http://127.0.0.1:8080`. Open that, upload a plan
+on the **Plan** tab, then in a second terminal:
 
 ```sh
 ./scripts/sitl square   # take off, fly a 20 m square at 10 m, then land
-# Or upload your route from the dashboard's Plan tab, then:
-./scripts/sitl start    # arm and start the uploaded mission
+./scripts/sitl start    # or: arm and start the plan you uploaded
 ./scripts/sitl land     # request landing
-./scripts/sitl status   # print live telemetry
+./scripts/sitl status   # print live telemetry as JSON
 ```
 
-Ctrl+C in the launcher terminal stops the whole local stack. Each run uses fresh
-SITL state; logs are kept in `core/build/dashboard-sitl/session-*/`.
+Ctrl+C in the first terminal stops the whole stack; each run starts from fresh SITL
+state, and logs land in `core/build/dashboard-sitl/session-*/`.
 
-The launcher reuses `../ardupilot-sitl/ardupilot` (already built locally) and
-`../ardupilot-sitl/venv/bin/python` (with `pymavlink`). Elsewhere, set
-`ARDUPILOT_DIR` to a built ArduPilot checkout and `SITL_PYTHON` to a Python with
-`pymavlink`. Also requires CMake, a C compiler, Make and Go 1.24+.
-Use `./scripts/sitl --no-build` after the first build for faster startup.
+It defaults to a sibling `../ardupilot-sitl/ardupilot` checkout and
+`../ardupilot-sitl/venv/bin/python`. Elsewhere, set `ARDUPILOT_DIR` to your SITL
+checkout and `SITL_PYTHON` to a Python with `pymavlink` (or pass `--ardupilot`).
+Use `--no-build` after the first run to skip rebuilding. Repeatable spoof/control
+and link-loss/jamming scenario scripts, and what they measured on real SITL runs,
+are documented in `core/README.md`'s
+[End-to-end GNSS scenarios](core/README.md#end-to-end-gnss-scenarios) and
+[End-to-end link scenarios](core/README.md#end-to-end-link-scenarios).
 
-To run core on a flashed ESP32 plugged in over USB instead of as `core_main` on
-this computer, pass its serial device: `./scripts/sitl --esp32
-/dev/cu.usbserial-0001`. See
-[`core/README.md`](core/README.md#running-core-on-an-esp32) to build and flash it.
+**Core on a flashed ESP32 instead of this computer:** pass its serial device,
+e.g. `./scripts/sitl --esp32 /dev/ttyUSB0` (Linux) or `--esp32 /dev/cu.usbserial-0001`
+(macOS). The board becomes the real companion computer, reading SITL's simulated
+telemetry over its own USB-UART and commanding the recovery itself. See
+[`core/README.md`](core/README.md#running-core-on-an-esp32) to build and flash it
+first — the "Results" there compare the board's detection times and drift against
+`core_main`'s on the same scenarios.
 
-Ports: dashboard HTTP `8080`, core UDP `14551`, live bridge UDP `14552`, flight
-scripts UDP `14553`, primary operator TCP `5760`. These are local simulation
-connections; do not point the flight commands at hardware.
+### `run.sh` — manual flying with a MAVProxy console
 
-`core_main` runs the GNSS and lost-link detectors and autonomy together; the
-launcher itself is the operator (sysid 255) whose heartbeats the lost-link
-detector watches. Missing motor/hardware readings remain missing rather than
-being filled with demo scores. The map is a telemetry view, not a 3D simulator.
+```sh
+ARDUPILOT_DIR=/path/to/ardupilot ARDUPILOT_VENV=/path/to/venv ./run.sh
+```
+
+Same stack, but drops you at an interactive MAVProxy console instead of scripting
+the flight — useful for setting SITL parameters by hand (`param set
+SIM_GPS_GLITCH_X 0.001` for an instant ~110 m GPS jump) or flying manually. MAVProxy
+is also the operator whose heartbeats the lost-link detector watches. Exit MAVProxy
+or press Ctrl+C to stop; logs stay in the printed run directory. `./run.sh --help`
+lists the port/instance flags for running more than one copy at once. This doesn't
+support the ESP32 — use `scripts/sitl --esp32` for that.
+
+The dashboard's own threat simulator (Fly tab, live mode) injects the same kinds of
+faults into SITL directly — GPS jump/drift, link jamming, a motor fault — without
+needing a MAVProxy console at all; see `dashboard/README.md`'s
+[Threat simulator](dashboard/README.md#threat-simulator-sitl-only).
+
+## What's implemented
+
+- **GNSS spoofing detection** (`core/nav`): six independent checks (position jump,
+  two dead-reckoning horizons, GPS-vs-EKF divergence, replay/timestamp, HDOP) fused
+  so one clear red flag can't be averaged away, published as a slew-limited
+  `nav_trust`, with gated, carefully-bounded reacquisition once GPS looks honest
+  again. `core` publishes its own independent position estimate alongside it.
+- **Lost-link detection** (`core/link`): judges the operator's control link from
+  heartbeat loss and radio RSSI, distinguishing jamming from a clean loss, since
+  the companion computer isn't on that link itself.
+- **Autonomy** (`core/autonomy`): turns both trust scores into a response — EKF
+  source failover, a hold, a return home, or landing — and commands it over MAVLink.
+- **Operator-link encryption** (`core/crypto`): MAVLink 2 message signing between
+  dashboard and vehicle.
+- **Dashboard**: live map, per-subsystem health, automatic-recovery on/off and a
+  ground-only reset, a plan editor, and (SITL only) a threat simulator for every
+  fault above.
+- **Real hardware**: the same detection-and-autonomy loop also runs as ESP32
+  firmware, standing in for a real companion computer wired to a flight
+  controller's telemetry port.
+
+Everything above runs against real ArduPilot SITL in CI-less, repeatable scripts —
+see the two `core/README.md` sections linked above for exact commands and measured
+results, including what each detector still can't catch.

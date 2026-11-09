@@ -114,7 +114,8 @@ PY
 # --- core: the real GNSS detector + autonomy. Started first so its port is bound
 # before SITL's SERIAL1 starts sending to it. ---
 echo "starting core_main on port $CORE_PORT..."
-( cd "$RUN_DIR" && exec "$REPO_ROOT/core/build/core_main" "$CORE_PORT" ) > "$RUN_DIR/core_main.log" 2>&1 &
+( cd "$RUN_DIR" && exec "$REPO_ROOT/core/build/core_main" "$CORE_PORT" --allow-recovery-control --gps-free-backup ) \
+    > "$RUN_DIR/core_main.log" 2>&1 &
 CORE_PID=$!
 sleep 1
 
