@@ -27,3 +27,12 @@ autonomy_transitions.csv
 # Link signing secrets - never commit
 *.key
 signing.key
+
+# ESP-IDF (core/firmware/esp32): build output and the generated config;
+# sdkconfig.defaults is the checked-in source of truth.
+core/firmware/esp32/build/
+core/firmware/esp32/sdkconfig
+core/firmware/esp32/sdkconfig.old
+core/firmware/esp32/build.log
+core/firmware/esp32/managed_components/
+core/firmware/esp32/dependencies.lock

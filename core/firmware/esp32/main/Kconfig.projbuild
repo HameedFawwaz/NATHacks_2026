@@ -1,0 +1,30 @@
+menu "Drone survivability core"
+
+    config CORE_UART_BAUD
+        int "MAVLink baud rate on the USB serial port (UART0)"
+        default 921600
+        help
+            Must match the rate SITL or the flight controller's telemetry port
+            uses, e.g. --serial1=uart:/dev/cu.usbserial-0001:921600.
+
+    config CORE_ALLOW_RECOVERY_CONTROL
+        bool "Accept the dashboard's recovery on/off and ground-reset requests"
+        default y
+        help
+            Same as core_main --allow-recovery-control, which scripts/sitl uses.
+
+    config CORE_GPS_FREE_BACKUP
+        bool "Allow GNSS reacquisition once a GPS-free backup source is confirmed"
+        default y
+        help
+            Same as core_main --gps-free-backup, which scripts/sitl uses.
+
+    config CORE_STATUS_LED_GPIO
+        int "Status LED GPIO (-1 = none)"
+        default 2
+        help
+            Off: no flight controller heard. Slow blink: connected, nominal.
+            Fast blink: autonomy is acting (GNSS failover, link hold/return,
+            safe land). GPIO2 is the blue LED on most ESP32 DevKit boards.
+
+endmenu

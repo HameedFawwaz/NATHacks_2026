@@ -1,0 +1,14 @@
+# UART0 (the USB serial port) carries nothing but MAVLink, so the console and
+# every log line that would otherwise be printed there are switched off. The
+# ROM bootloader still prints a few lines at 115200 baud on reset; MAVLink
+# parsers skip them.
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+
+# core_app_tick keeps a full telemetry snapshot and nav results on its stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
