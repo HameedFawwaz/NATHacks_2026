@@ -22,6 +22,7 @@ typedef struct {
     uint64_t next_gcs_ms;
     uint32_t gcs_interval_ms;  /* what the GCS actually sends */
     float drop;                /* probability each operator heartbeat is lost */
+    uint32_t drop_every, sent; /* or exactly every Nth */
     uint32_t jitter_ms;        /* each one delivered up to this late or early */
     const uint32_t *delays;    /* or a repeating pattern of delivery delays */
     int delays_len, delays_i;
@@ -95,6 +96,7 @@ static void run(harness_t *h, uint32_t ms) {
         if (h->now >= h->next_gcs_ms) {
             h->next_gcs_ms += h->gcs_interval_ms;
             bool dropped = (float)rand() / (float)RAND_MAX < h->drop;
+            if (h->drop_every && ++h->sent % h->drop_every == 0) dropped = true;
             if (h->gcs_on && !dropped && h->queued < QUEUE) {
                 uint64_t at = h->now;
                 if (h->jitter_ms) at += (uint64_t)(rand() % (int)(2 * h->jitter_ms + 1));
@@ -456,6 +458,53 @@ static void test_bad_noise_start_recalibrates(void) {
     assert(h.last.state == CORE_LINK_LOST && "a clean loss, not jamming");
 }
 
+static void test_jammer_samples_dont_enter_calibration(void) {
+    /* Fourth review: with loss not yet measurable, early silence counted as
+     * healthy, so samples from a starting jammer got into the median. */
+    harness_t h;
+    setup(&h);
+    h.rf = 2;
+    run(&h, 2400);   /* five normal samples, too early for loss to be measured */
+    h.gcs_on = false;
+    h.noise = 140;   /* jamming starts */
+    int before = h.mon.noise_cal_len;
+    run(&h, 20000);
+    assert(h.mon.noise_cal_len <= before + 1 && "samples taken in silence don't calibrate");
+    assert(!h.mon.noise_floor_known || h.mon.noise_floor < 60);
+}
+
+static void test_noise_with_loss_isnt_baselined(void) {
+    /* Fourth review: raised noise costing 10% of heartbeats was re-baselined,
+     * hiding a later jam. Only noise that costs (almost) nothing is. */
+    harness_t h;
+    setup(&h);
+    h.rf = 2;
+    settle(&h);
+    h.noise = 140;
+    h.drop_every = 10; /* exactly 10% */
+    run(&h, 75000);
+    assert(h.mon.noise_floor < 60);
+    h.gcs_on = false;
+    run(&h, 9000);
+    assert(h.last.state == CORE_LINK_JAMMED);
+}
+
+static void test_unconfirmed_interference_is_said_so(void) {
+    harness_t h;
+    setup(&h);
+    h.rf = 1;
+    settle(&h);
+    h.gcs_on = false;
+    h.rssi = 10;
+    run(&h, 6500);    /* LOST, with nothing on the air... */
+    h.rssi = 180;     /* ...then RF appears, not yet confirmed */
+    run(&h, 600);
+    assert(h.last.state == CORE_LINK_LOST);
+    assert(strstr(h.last.reason, "unconfirmed") && "pending interference is not 'no interference'");
+    run(&h, 2500);
+    assert(h.last.state == CORE_LINK_JAMMED);
+}
+
 static void test_zero_rssi_is_no_radio_data(void) {
     /* ArduPilot reports 0 when RSSI_TYPE=5 is set but no radio has reported for
      * 5 s: that's an absent radio, not a weak signal. */
@@ -533,6 +582,9 @@ int main(void) {
     test_gradual_noise_rise_is_interference();
     test_noise_calibrates_despite_weak_signal();
     test_bad_noise_start_recalibrates();
+    test_jammer_samples_dont_enter_calibration();
+    test_noise_with_loss_isnt_baselined();
+    test_unconfirmed_interference_is_said_so();
     test_zero_rssi_is_no_radio_data();
     test_heartbeat_in_first_poll_counts();
     test_autopilot_silence_is_unknown_not_lost();

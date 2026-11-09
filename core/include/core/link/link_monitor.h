@@ -115,6 +115,11 @@ typedef struct {
     uint16_t noise_cal[10]; /* NOISE_CAL_SAMPLES in link_monitor.c */
     int noise_cal_len;
     uint64_t noisy_but_healthy_since_ms;
+    /* Noise samples waiting for a heartbeat after them, which shows the link
+     * was working when they were taken. */
+    uint16_t noise_pending[8];
+    uint64_t noise_pending_at[8];
+    int noise_pending_len;
     uint64_t interference_since_ms; /* 0 = none now */
     uint64_t last_radio_ms; /* the RADIO_STATUS sample already folded into the floor */
 

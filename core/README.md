@@ -156,8 +156,10 @@ Limits:
 - **The noise floor is calibrated, then follows the link slowly.** It starts as the median
   of 10 samples while heartbeats are arriving, then follows with a time constant of about a
   minute, so a jammer that ramps up over tens of seconds is caught but one that creeps up
-  over many minutes may not be. Raised noise that costs no heartbeats for 60 s is taken as
-  the new normal and calibrated again.
+  over many minutes may not be. Raised noise that costs at most 5% of heartbeats over 30 s,
+  for 60 s, is taken as the new normal and calibrated again. A sample is only learned once
+  a heartbeat has arrived after it, so a link going silent, perhaps jammed, can't feed the
+  baseline.
 - **`RC_CHANNELS.rssi` of 0 is read as "no radio"**, which is what ArduPilot sends with
   `RSSI_TYPE=5` and no radio reporting. Other `RSSI_TYPE`s report the RC receiver's RSSI
   instead, which the monitor can't tell apart; use 5.

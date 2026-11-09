@@ -13,6 +13,7 @@
 /* "Interference" that costs not one heartbeat for this long is the new normal,
  * or a floor calibrated wrongly: calibrate again. */
 #define NOISE_RECAL_MS 60000
+#define NOISE_RECAL_MAX_LOSS 0.05f /* "costs nothing": at most this lost over the long window */
 /* The window always spans this many heartbeats, so being off by one from jitter
  * stays under loss_ok. */
 #define MIN_LOSS_INTERVALS 10
@@ -54,6 +55,7 @@ static void reset_history(core_link_monitor_t *mon) {
     mon->noise_floor_known = false;
     mon->noise_cal_len = 0;
     mon->noisy_but_healthy_since_ms = 0;
+    mon->noise_pending_len = 0;
     mon->interference_since_ms = 0;
     mon->state = CORE_LINK_UNKNOWN;
     mon->easing_since_ms = 0;
@@ -183,10 +185,40 @@ static void calibrate_noise(core_link_monitor_t *mon, uint16_t noise) {
     mon->noise_cal_len = 0;
 }
 
+static void learn_noise(core_link_monitor_t *mon, uint16_t noise) {
+    if (!mon->noise_floor_known) {
+        calibrate_noise(mon, noise);
+    } else if ((float)noise - mon->noise_floor < (float)mon->cfg.jam_noise_margin) {
+        mon->noise_floor += NOISE_FLOOR_ALPHA * ((float)noise - mon->noise_floor);
+    }
+}
+
+/* Learns the waiting samples that a heartbeat has since followed, and drops
+ * ones nothing followed: those may have been taken as a jammer started. */
+static void settle_noise_samples(core_link_monitor_t *mon, uint64_t now_ms, bool link_ok) {
+    uint64_t patience = 2 * (uint64_t)mon->cfg.heartbeat_interval_ms;
+    int kept = 0;
+    for (int i = 0; i < mon->noise_pending_len; i++) {
+        uint64_t at = mon->noise_pending_at[i];
+        if (mon->last_heard_ms > at) {
+            if (link_ok) learn_noise(mon, mon->noise_pending[i]);
+        } else if (now_ms - at < patience) {
+            mon->noise_pending[kept] = mon->noise_pending[i];
+            mon->noise_pending_at[kept] = at;
+            kept++;
+        }
+    }
+    mon->noise_pending_len = kept;
+}
+
 /* heard_well: heartbeats are arriving with no more than loss_ok missing. That,
- * not the overall state, gates learning, so a weak signal can't stop the noise
- * floor being calibrated. */
-static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, uint64_t now_ms, bool heard_well) {
+ * not the overall state, gates learning, so a weak signal can't stop
+ * calibration; and a sample is only learned once a heartbeat follows it, so a
+ * link going silent (perhaps jammed) can't feed it. lossless: measured loss
+ * over the long window is near zero, the bar for taking raised noise as the
+ * new normal. */
+static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, uint64_t now_ms, bool heard_well,
+                         bool lossless) {
     rf_view_t rf = {0};
     const core_radio_status_t *radio = &t->radio_status;
     const core_rc_status_t *rc = &t->rc_status;
@@ -203,7 +235,7 @@ static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, ui
 
         bool new_sample = radio->last_update_ms != mon->last_radio_ms;
         mon->last_radio_ms = radio->last_update_ms;
-        if (!(rf.noise_high && heard_well)) {
+        if (!(rf.noise_high && heard_well && lossless)) {
             mon->noisy_but_healthy_since_ms = 0;
         } else if (mon->noisy_but_healthy_since_ms == 0) {
             mon->noisy_but_healthy_since_ms = now_ms;
@@ -212,12 +244,17 @@ static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, ui
             mon->noise_cal_len = 0;
             mon->noisy_but_healthy_since_ms = 0;
         }
-        if (new_sample && heard_well) {
-            if (!mon->noise_floor_known) {
-                calibrate_noise(mon, radio->noise);
-            } else if (!rf.noise_high) {
-                mon->noise_floor += NOISE_FLOOR_ALPHA * ((float)radio->noise - mon->noise_floor);
+        settle_noise_samples(mon, now_ms, heard_well);
+        if (new_sample) {
+            int n = mon->noise_pending_len;
+            if (n == (int)(sizeof(mon->noise_pending) / sizeof(mon->noise_pending[0]))) {
+                memmove(mon->noise_pending, mon->noise_pending + 1, sizeof(mon->noise_pending[0]) * (size_t)(n - 1));
+                memmove(mon->noise_pending_at, mon->noise_pending_at + 1, sizeof(mon->noise_pending_at[0]) * (size_t)(n - 1));
+                n--;
             }
+            mon->noise_pending[n] = radio->noise;
+            mon->noise_pending_at[n] = radio->last_update_ms;
+            mon->noise_pending_len = n + 1;
         }
         return rf;
     }
@@ -301,7 +338,8 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
     bool silent_short = r.silence_ms > grace_ms;
 
     bool heard_well = !silent_short && r.loss <= cfg->loss_ok;
-    rf_view_t rf = read_rf(mon, telemetry, now_ms, heard_well);
+    bool lossless = long_loss >= 0.0f && long_loss <= NOISE_RECAL_MAX_LOSS;
+    rf_view_t rf = read_rf(mon, telemetry, now_ms, heard_well, lossless);
     r.rf_source = rf.source;
     /* Without a calibrated noise floor, fall back to RSSI: strong RF energy is
      * suspicious just when nothing gets through. */
@@ -368,7 +406,8 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
         break;
     case CORE_LINK_LOST:
         snprintf(r.reason, sizeof(r.reason), "silent %us, %s", silent_s,
-                 rf.source == CORE_LINK_RF_NONE ? "no radio data" : "no interference");
+                 r.interference ? "interference unconfirmed"
+                 : rf.source == CORE_LINK_RF_NONE ? "no radio data" : "no interference");
         break;
     case CORE_LINK_DEGRADED:
         if (r.interference) {
