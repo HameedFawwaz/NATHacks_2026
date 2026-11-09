@@ -9,22 +9,42 @@ import (
 	"net/http"
 
 	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/bridge"
+	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/mavlink"
 )
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "address to serve the dashboard on")
 	dir := flag.String("dir", "web", "directory to serve")
 	mavlinkAddr := flag.String("mavlink", "", "UDP address to receive MAVLink on, e.g. 127.0.0.1:14552 (empty = simulation only)")
+	signingKey := flag.String("signing-key", "", "file holding the MAVLink 2 signing key, as written by core's signing_keygen (empty = unsigned link)")
 	publicHost := flag.String("public-host", "", "name or IP the dashboard is reached by from other machines, if any")
 	flag.Parse()
 
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.Dir(*dir)))
 
+	if *signingKey != "" && *mavlinkAddr == "" {
+		log.Fatal("-signing-key does nothing without -mavlink")
+	}
 	if *mavlinkAddr != "" {
+		// Load the key before opening the socket. A key that was asked for but can't
+		// be used must stop the dashboard, not leave it quietly talking unsigned.
+		var key [mavlink.KeyLen]byte
+		if *signingKey != "" {
+			var err error
+			if key, err = mavlink.LoadKeyFile(*signingKey); err != nil {
+				log.Fatal(err)
+			}
+		}
 		b, err := bridge.Listen(*mavlinkAddr)
 		if err != nil {
 			log.Fatal(err)
+		}
+		if *signingKey != "" {
+			b.EnableSigning(key)
+			log.Printf("MAVLink signing on: unsigned and wrongly signed frames are dropped")
+		} else {
+			log.Printf("MAVLink signing off: frames are neither signed nor verified")
 		}
 		go func() { log.Fatal(b.Run(context.Background())) }()
 		mux.Handle("/api/", b.Handler(*addr, *publicHost))

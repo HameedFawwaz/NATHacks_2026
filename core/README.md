@@ -39,8 +39,10 @@ layer), and `crypto/` (link signing) are also implemented — see below.
 
 ## GNSS spoofing detection (`nav/`)
 
-Maintains an independent position estimate (a Kalman filter fusing accelerometer, gyro,
-and barometer — never GPS) and cross-checks incoming GPS against it. Six checks (jump,
+Maintains dead-reckoned position estimates (Kalman filters propagating accelerometer,
+gyro and barometer measurements between GPS anchors) and cross-checks incoming GPS
+against them. The default IMU rotation uses the flight controller's attitude, so the
+estimate is not wholly GPS-independent; see the limitations below. Six checks (jump,
 short- and long-horizon KF divergence, raw-GPS-vs-EKF divergence, timestamp/replay, HDOP
 abnormality) each produce a sub-score in `[0,1]`, fused via `min()` so one unambiguous red
 flag can't be averaged away, then published as `nav_trust` with asymmetric slew limiting
@@ -48,21 +50,89 @@ flag can't be averaged away, then published as `nav_trust` with asymmetric slew 
 `include/core/nav/gnss_anomaly.h` for the six checks, and `core/tests/test_gnss_anomaly.c`
 / `test_nav_kf.c` for fully synthetic (no SITL needed) scenario and filter-math tests.
 
-`core_main` is the real integration loop: connect → detect → publish, against a live
-flight controller.
+`core_main` is the real integration loop: connect → detect → autonomy → publish,
+against a live flight controller. **It now sends autonomy commands**, including GNSS
+source-set changes and, if failover fails, landing commands. It is not a passive
+monitor; use `tools/mavlink_monitor` for read-only observation. Configure and validate
+the fallback source set in SITL before connecting this loop to hardware.
+
+## End-to-end GNSS scenarios
+
+From the repository root, using a Python environment with `pymavlink` and a built
+ArduCopter SITL checkout:
+
+```sh
+cmake -S core -B core/build
+cmake --build core/build --parallel 4
+(cd dashboard && make build && go build -o ../core/build/dashboard-serve ./cmd/serve)
+/path/to/venv/bin/python core/sitl/run_gnss_e2e_scenarios.py \
+  --ardupilot /path/to/ardupilot --duration 90 --log-dir core/build/gnss-e2e all
+/path/to/venv/bin/python core/sitl/test_gnss_e2e_scenarios.py
+```
+
+Every scenario starts a fresh SITL, real detector/autonomy, and live dashboard
+bridge. `fast`, `slow`, and `random` inject GPS glitches inside the autopilot;
+`control` hovers honestly and `cruise` flies an honest square at 10 m/s. The script
+records observed minimum trust, detection time (below 0.5), autonomy transitions,
+maximum true displacement from the starting point, and actual dashboard telemetry
+samples in `results.json`. A missed spoof is recorded as a useful result; a control
+false alarm, missing detector/dashboard telemetry, or failed setup exits nonzero.
+
+Default test ports are core UDP 14555, dashboard UDP 14556 and dashboard HTTP 8081.
+Use `--instance`, `--core-port`, `--dashboard-port`, and `--dashboard-http-port` to
+avoid an existing run. The script refuses occupied ports and only stops its own
+children. An existing dashboard may be used with `--dashboard-url` if it listens on
+`--dashboard-port`. The test reads its telemetry API; it does not validate browser
+rendering. Until #16 publishes `EST_N`/`EST_E`, drift remains the labelled EKF fallback.
+
+### Review results (2026-11-09)
+
+Two complete runs passed on local ArduCopter SITL (checkout `b720755`, Apple Silicon
+macOS), each using fresh state per scenario, seed 1 and 90-second observation windows.
+The second run used the reviewed nav calibration/input guards. Its observed results:
+
+| Scenario | Detect below 0.5 | Lowest nav trust | Behavior entered | Maximum true displacement |
+|---|---:|---:|---|---:|
+| Fast ramp (~4.5 m/s) | ~4.8 s | 0.000 | GNSS_FAILOVER | 4.1 m |
+| Slow ramp (~1.5 m/s) | ~16.0 s | 0.000 | GNSS_FAILOVER | 23.3 m |
+| Random route | ~1.6 s | 0.000 | GNSS_FAILOVER | 4.5 m |
+| Honest hover | never | 1.000 | none | <0.1 m |
+| Honest cruise square | never | 1.000 | none | 168.9 m (intended travel) |
+
+Detection times are polled telemetry observations, not exact detector transition
+times; an autonomy STATUSTEXT can arrive before the next periodic trust sample.
+Both control runs had no false alarms. The live dashboard API received trust dropping
+to zero and `GNSS_FAILOVER` for all three attacks, and trust 1.0 throughout both
+controls. Its estimate source was `ekf` throughout, not core's still-unpublished
+estimate. On the controls no autonomy transition was published, so the behavior field
+remained unreported rather than inventing a NOMINAL message.
+
+A separate fresh SITL run verified that the dashboard refuses start before a
+confirmed upload, starts the uploaded mission through the normal prearm checks and
+actually takes off, and confirms GPS jump/drift/jam, motor fault, and All clear.
+Core's six test suites passed normally and under ASan/UBSan. Dashboard native/race,
+WASM vet/build, and all 13 JavaScript tests passed; flight-control regressions were
+also repeated 30 times under the race detector. The interactive MAVProxy launcher
+was syntax/help-checked, not exercised end-to-end in this review. No real hardware
+or browser-rendering validation is claimed.
 
 **Known limitations**:
 
-- The long-horizon KF divergence check was calibrated against real flight
-  (`core/sitl/fly_square.py`, not just synthetic/stationary data) and can still
-  occasionally false-positive for a few seconds during normal maneuvering. Root cause:
-  this filter has no accel/gyro bias calibration, and in testing only received ~4Hz IMU
-  samples (SITL/MAVProxy didn't honor our `MAV_CMD_SET_MESSAGE_INTERVAL` request to speed
-  `SCALED_IMU2` up to 50Hz — see `core_mavlink_request_message_interval` in
-  `core/include/core/mavlink/mavlink_send.h`), so integration error compounds faster than a
-  properly-sampled filter would see. Follow-up: figure out why the rate request isn't
-  taking effect (possibly a MAVProxy pass-through quirk, worth checking against a direct
-  SITL connection without MAVProxy in between), or add basic bias estimation.
+- **The KFs rotate IMU data by the flight controller's ATTITUDE**, not core's own
+  attitude filter (`kf_attitude_from_fc`, on by default; core's filter is the fallback
+  whenever ATTITUDE is stale). Core's filter has no magnetometer and no in-flight gyro
+  bias tracking, and drifted a few degrees in tilt and heading over a minute of
+  aggressive flight; at 30 deg of tilt each degree is ~0.17 m/s^2 of phantom
+  acceleration, which on its own false-alarmed the long-horizon check on an unspoofed
+  square route (`sitl/run_gnss_e2e_scenarios.py cruise`). The trade: attitude is the
+  part of the flight controller's state a GNSS spoof barely moves (tilt and heading are
+  held by gyro, accel and compass), but it isn't fully GPS-independent, since EKF3 does
+  use GPS velocity to correct tilt slowly. Position and velocity are still compared only
+  against core's own dead reckoning.
+- Earlier false positives during maneuvering, once blamed on a ~4 Hz IMU, were core's
+  attitude filter reading tilt with the wrong sign, then lagging through every
+  acceleration (see `attitude_filter.c`). Wired straight to SITL's SERIAL1 (no MAVProxy
+  in between), `SCALED_IMU2` arrives at the requested 50 Hz.
 - **Minimum detectable sustained-drift rate**: re-anchoring to GPS is now gated on the
   filter's own divergence score staying at ceiling (see `gnss_anomaly.c`), so a slow spoof
   no longer gets silently absorbed every re-anchor interval the way it used to — but the
@@ -80,10 +150,10 @@ flight controller.
 `include/core/autonomy/autonomy.h`. Each transition goes to stderr, to a STATUSTEXT, and
 to a CSV log.
 
-The nav and link detectors aren't merged yet, so `tools/autonomy_runner` stands in for
-them: it reads scores from stdin (`nav 0.1`, `link 0`, `hw 1`, `crypto 1`) and otherwise
-runs the real decision loop. Once the detectors exist they should write through
-`core_trust_score_set_component()` and call `core_autonomy_tick()` from the main loop.
+`core_main` now calls the real decision loop using the nav detector's measured trust.
+The link and hardware producers are still separate work. For isolated scenarios,
+`tools/autonomy_runner` reads scores from stdin (`nav 0.1`, `link 0`, `hw 1`,
+`crypto 1`) and runs the same decision loop.
 
 `sitl/run_autonomy_scenario.py` runs this end to end against ArduPilot SITL. It flies a
 copter, injects an attack, and checks the vehicle's response:
@@ -289,9 +359,9 @@ sim_vehicle.py -v ArduCopter --out=udp:127.0.0.1:14551 --out=udp:127.0.0.1:14553
 python3 core/sitl/fly_square.py                     # defaults to udpin:0.0.0.0:14553
 ```
 
-It talks directly to the vehicle (arm/mode/takeoff/position commands), separately from
-`core_main`/`gnss_spoof_proxy`, which only observe telemetry — run it independently,
-before or during a `core_main` session on a different port, with no conflict.
+It talks directly to the vehicle (arm/mode/takeoff/position commands) on a separate
+link from `core_main`/`gnss_spoof_proxy`. Unlike the proxy, `core_main` now also sends
+autonomy commands: an anomaly during this flight can change sources or request landing.
 
 ## Link signing (operator <-> drone authentication)
 

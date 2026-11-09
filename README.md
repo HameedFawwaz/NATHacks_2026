@@ -8,6 +8,28 @@ subsystem trust, and keep flying when the world stops being trustworthy.
 - `core/` — C implementation of the drone survivability layer (GNSS spoofing detection, lost-link mitigation, autonomy, link encryption). See `core/README.md`.
 - `dashboard/` — operator dashboard, separate project/framework. See `dashboard/README.md`.
 
+## Run the local simulator
+
+With a built ArduCopter SITL checkout and a Python environment containing
+`pymavlink`, MAVProxy and `psutil`:
+
+```sh
+ARDUPILOT_DIR=/path/to/ardupilot ARDUPILOT_VENV=/path/to/venv ./run.sh
+```
+
+This builds core and the dashboard, starts real SITL with the GNSS and lost-link
+detectors and autonomy, and opens a MAVProxy console (MAVProxy is the operator
+whose heartbeats the lost-link detector watches). Open **http://127.0.0.1:8080**, upload a
+mission, then use **Start flight**. The live threat controls inject faults into
+SITL, not browser-generated trust scores. The simulator is not real hardware.
+Exit MAVProxy or press Ctrl+C to stop this run's processes; logs stay in the
+printed run directory. See `./run.sh --help` for alternate ports/instances.
+
+For repeatable spoof and unspoofed-control scenarios, see
+[`core/README.md`](core/README.md#end-to-end-gnss-scenarios); for operator-link
+loss and jamming driving autonomy's hold and return, see
+[`core/README.md`](core/README.md#end-to-end-link-scenarios).
+
 ## Real ArduPilot simulation (SITL)
 
 ```sh
@@ -39,7 +61,7 @@ Ports: dashboard HTTP `8080`, core UDP `14551`, live bridge UDP `14552`, flight
 scripts UDP `14553`, primary operator TCP `5760`. These are local simulation
 connections; do not point the flight commands at hardware.
 
-This only wires up existing functionality: `core_main` does not yet run the
-autonomy decision loop, and missing motor/hardware/autonomy readings remain
-missing rather than being filled with demo scores. The map is a telemetry view,
-not a 3D simulator.
+`core_main` runs the GNSS and lost-link detectors and autonomy together; the
+launcher itself is the operator (sysid 255) whose heartbeats the lost-link
+detector watches. Missing motor/hardware readings remain missing rather than
+being filled with demo scores. The map is a telemetry view, not a 3D simulator.

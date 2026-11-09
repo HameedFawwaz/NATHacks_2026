@@ -1,7 +1,8 @@
 /*
  * The real integration loop: connects to the flight controller over MAVLink,
  * runs GNSS spoofing detection and lost-link detection on the live telemetry
- * stream, and publishes the navigation and link trust scores back over MAVLink.
+ * stream, feeds both trust scores to autonomy, which commands the vehicle's
+ * response, and publishes the scores back over MAVLink.
  *
  * Usage:
  *   core_main [port]      (default port: 14551)
@@ -16,6 +17,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "core/autonomy/autonomy.h"
 #include "core/common/time.h"
 #include "core/common/trust_score.h"
 #include "core/link/link_monitor.h"
@@ -29,12 +31,14 @@ static void handle_sigint(int signum) {
     g_running = 0;
 }
 
-static void print_status(const core_nav_result_t *result, const core_link_result_t *link) {
-    printf("[nav_trust=%.3f] jump=%.2f dr=%.2f drift=%.2f ekf=%.2f time=%.2f eph=%.2f flags=0x%02x"
-           " | [link %s trust=%.3f] loss=%.2f silent=%ums %s\n",
+static void print_status(const core_nav_result_t *result, const core_link_result_t *link,
+                         const core_autonomy_t *autonomy) {
+    printf("[nav_trust=%.3f] jump=%.3f dr=%.3f drift=%.3f ekf=%.3f time=%.3f eph=%.3f health=%.3f flags=0x%02x"
+           " | [link %s trust=%.3f] loss=%.2f silent=%ums %s | behavior=%s\n",
            result->nav_trust, result->score_jump, result->score_dr, result->score_drift, result->score_ekf,
-           result->score_time, result->score_eph, result->flags, core_link_state_name(link->state),
-           link->link_trust, link->loss, link->silence_ms, link->reason);
+           result->score_time, result->score_eph, result->score_health, result->flags,
+           core_link_state_name(link->state), link->link_trust, link->loss, link->silence_ms, link->reason,
+           core_autonomy_behavior_name(autonomy->behavior));
     fflush(stdout);
 }
 
@@ -116,7 +120,15 @@ int main(int argc, char **argv) {
     core_trust_score_t score;
     core_trust_score_init(&score);
 
-    printf("drone survivability core - GNSS spoofing and lost-link detection\n");
+    core_autonomy_config_t autonomy_cfg = core_autonomy_default_config();
+    FILE *autonomy_log = fopen("autonomy_transitions.csv", "w");
+    if (!autonomy_log) {
+        fprintf(stderr, "[WARN] could not open autonomy_transitions.csv, logging transitions to stderr only\n");
+    }
+    core_autonomy_t autonomy;
+    core_autonomy_init(&autonomy, &autonomy_cfg, autonomy_log);
+
+    printf("drone survivability core - GNSS spoofing and lost-link detection + autonomy\n");
     printf("listening for MAVLink on udp 0.0.0.0:%u\n", port);
     printf("point ArduPilot SITL (optionally via core/sitl/gnss_spoof_proxy) at this port\n");
 
@@ -126,34 +138,55 @@ int main(int argc, char **argv) {
     uint64_t last_rate_request_ms = 0;
     uint32_t prev_flags = 0;
 
-    /* SITL/MAVProxy's default forwarding rate for SCALED_IMU2 is only a few
-     * Hz - far too coarse for the dead-reckoning filter to integrate
-     * accurately during real maneuvering flight. Re-requested periodically
-     * (not just once) so it survives a reconnect to a flight controller
-     * that reset its stream rates.
+    /* A GCS or MAVProxy sitting between us and the flight controller often
+     * already asks for a baseline set of streams, but core_main must not
+     * depend on one being there: wired directly to a flight controller's own
+     * serial port (the real deployment this is for), nothing else will ever
+     * ask, and the autopilot's own per-link stream rates default to zero, so
+     * silence here means the detector never sees anything at all - not even
+     * GPS or position. Re-requested periodically (not just once) so it
+     * survives a reconnect to a flight controller that reset its stream
+     * rates.
      *
-     * Deliberately NOT boosting GPS_RAW_INT: the underlying simulated GPS
-     * only refreshes at its own native rate (commonly 5Hz in SITL), so
-     * requesting it faster just makes the autopilot re-send the same cached
-     * fix with an unchanged time_usec to fill the gap - which our replay/
-     * timestamp check correctly (if confusingly, self-inflictedly) flags as
-     * suspicious, since a non-advancing timestamp is indistinguishable from
-     * a genuine stale replay. Only request a rate at or below what the
-     * underlying sensor can actually produce. */
+     * Deliberately NOT boosting GPS_RAW_INT past its default: the underlying
+     * simulated GPS only refreshes at its own native rate (commonly 5Hz in
+     * SITL), so requesting it faster just makes the autopilot re-send the
+     * same cached fix with an unchanged time_usec to fill the gap - which our
+     * replay/timestamp check correctly (if confusingly, self-inflictedly)
+     * flags as suspicious, since a non-advancing timestamp is
+     * indistinguishable from a genuine stale replay. Only request a rate at
+     * or below what the underlying sensor can actually produce. */
     const uint32_t MSGID_SCALED_PRESSURE = 29;
     const uint32_t MSGID_SCALED_IMU2 = 116;
-    const uint32_t MSGID_RC_CHANNELS = 65; /* carries the radio's RSSI, see link_monitor.h */
+    const uint32_t MSGID_GPS_RAW_INT = 24;
+    const uint32_t MSGID_GLOBAL_POSITION_INT = 33;
+    const uint32_t MSGID_ATTITUDE = 30;
+    const uint32_t MSGID_RC_CHANNELS = 65; /* carries the telemetry radio's RSSI, see link_monitor.h */
+    bool rates_requested = false;
 
     while (g_running) {
         core_mavlink_conn_poll(conn);
 
+        /* Every 30s once they've gone out, but every second until then: they
+         * can't be sent before the vehicle's first heartbeat identifies it,
+         * and waiting a full 30s for the next try left the detector with no
+         * telemetry at all for the first half-minute after startup. */
         uint64_t rate_now = core_now_ms();
-        if (rate_now - last_rate_request_ms >= 5000) {
-            core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);      /* 50Hz */
-            core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000); /* 10Hz */
-            core_mavlink_request_message_interval(conn, MSGID_RC_CHANNELS, 500000);     /* 2Hz */
+        if (rate_now - last_rate_request_ms >= (rates_requested ? 30000u : 1000u)) {
+            bool ok = core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);       /* 50Hz */
+            ok = core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000) && ok;  /* 10Hz */
+            ok = core_mavlink_request_message_interval(conn, MSGID_GPS_RAW_INT, 200000) && ok;      /* 5Hz: native rate, see above */
+            /* 10Hz: EKF output, not sensor-rate-limited */
+            ok = core_mavlink_request_message_interval(conn, MSGID_GLOBAL_POSITION_INT, 100000) && ok;
+            /* 10Hz: the nav detector seeds its yaw from this while disarmed */
+            ok = core_mavlink_request_message_interval(conn, MSGID_ATTITUDE, 100000) && ok;
+            /* 2Hz: the link monitor's jamming-vs-loss evidence */
+            ok = core_mavlink_request_message_interval(conn, MSGID_RC_CHANNELS, 500000) && ok;
+            rates_requested = ok;
             last_rate_request_ms = rate_now;
         }
+
+        uint64_t now = core_now_ms();
 
         core_telemetry_t telemetry;
         core_mavlink_conn_get_telemetry(conn, &telemetry);
@@ -164,10 +197,10 @@ int main(int argc, char **argv) {
         alert_new_flags(conn, prev_flags, result.flags);
         prev_flags = result.flags;
 
-        uint64_t now = core_now_ms();
-
-        /* While UNKNOWN nothing is reported, so autonomy ignores a link that has
-         * never been seen and treats one that goes unjudgeable as stale. */
+        /* Before autonomy, so it acts on this tick's link verdict. While
+         * UNKNOWN nothing is reported: autonomy ignores a link that has never
+         * been judged, and treats one that stops being judgeable as stale
+         * (untrusted) after its input_stale_ms. */
         link = core_link_monitor_update(&link_monitor, &telemetry, now);
         if (link.state != CORE_LINK_UNKNOWN) {
             core_trust_score_set_component(&score, CORE_TRUST_SOURCE_LINK, link.link_trust);
@@ -175,6 +208,12 @@ int main(int argc, char **argv) {
         if (link.state_changed) {
             report_link_change(conn, &link);
         }
+
+        /* Reads the nav and link trust just set above (and hardware, once
+         * that detector exists) and drives whatever response is warranted -
+         * mode switches, EKF source failover, etc - over this same
+         * connection. Updates score->overall_trust as a side effect. */
+        core_autonomy_tick(&autonomy, conn, &score, &telemetry, now);
 
         if (now - last_own_heartbeat_sent_ms >= 1000) {
             core_mavlink_send_heartbeat(conn);
@@ -191,7 +230,7 @@ int main(int argc, char **argv) {
         }
 
         if (now - last_print_ms >= 1000) {
-            print_status(&result, &link);
+            print_status(&result, &link, &autonomy);
             last_print_ms = now;
         }
 
@@ -200,5 +239,8 @@ int main(int argc, char **argv) {
 
     printf("\nshutting down\n");
     core_mavlink_conn_close(conn);
+    if (autonomy_log) {
+        fclose(autonomy_log);
+    }
     return 0;
 }

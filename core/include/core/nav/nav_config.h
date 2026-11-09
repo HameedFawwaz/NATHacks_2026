@@ -1,6 +1,7 @@
 #ifndef CORE_NAV_CONFIG_H
 #define CORE_NAV_CONFIG_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -53,7 +54,12 @@ typedef struct {
     float trust_recover_rate_per_s;   /* default 0.5 */
 
     /* Attitude complementary filter */
-    float attitude_tau_s; /* default 1.0 */
+    float attitude_tau_s; /* default 20.0 */
+
+    /* Rotate the KFs' IMU input with the flight controller's own ATTITUDE
+     * (while it's fresh) instead of core's attitude filter. See
+     * gnss_anomaly.c for the trade-off. */
+    bool kf_attitude_from_fc; /* default true */
 
     /* Position/velocity Kalman filter */
     float kf_sigma_accel_mps2; /* process noise strength, default 0.5 */

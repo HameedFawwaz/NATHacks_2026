@@ -4,3 +4,10 @@ web/wasm_exec.js
 
 # The repo root ignores Makefile for CMake's sake; this one is hand-written.
 !Makefile
+
+# ArduPilot SITL/MAVProxy runtime artifacts, left behind when run from here
+eeprom.bin
+mav.parm
+mav.tlog
+mav.tlog.raw
+terrain/

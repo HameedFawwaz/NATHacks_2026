@@ -49,7 +49,12 @@ void core_nav_config_default(core_nav_config_t *cfg) {
 
     cfg->trust_recover_rate_per_s = 0.5f;
 
-    cfg->attitude_tau_s = 1.0f;
+    /* The accelerometer correction is gated off while accelerating (see
+     * attitude_filter.c), so this needn't be long to ride through a speed-up;
+     * short keeps the steady tilt offset any residual gyro bias causes
+     * (tau * bias) small. */
+    cfg->attitude_tau_s = 20.0f;
+    cfg->kf_attitude_from_fc = true;
 
     cfg->kf_sigma_accel_mps2 = 0.5f;
     cfg->kf_baro_r_m2 = 0.25f;

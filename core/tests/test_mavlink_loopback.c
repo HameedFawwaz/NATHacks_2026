@@ -19,8 +19,6 @@
 
 #include "core/mavlink/mavlink.h"
 
-#define CONN_PORT 14551
-
 static int open_fake_vehicle_socket(struct sockaddr_in *conn_addr_out) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     assert(fd >= 0);
@@ -34,8 +32,15 @@ static int open_fake_vehicle_socket(struct sockaddr_in *conn_addr_out) {
 
     memset(conn_addr_out, 0, sizeof(*conn_addr_out));
     conn_addr_out->sin_family = AF_INET;
-    conn_addr_out->sin_port = htons(CONN_PORT);
     inet_pton(AF_INET, "127.0.0.1", &conn_addr_out->sin_addr);
+
+    /* Never collide with a developer's running SITL/core on the default port. */
+    int probe = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(probe >= 0);
+    assert(bind(probe, (struct sockaddr *)conn_addr_out, sizeof(*conn_addr_out)) == 0);
+    socklen_t addr_len = sizeof(*conn_addr_out);
+    assert(getsockname(probe, (struct sockaddr *)conn_addr_out, &addr_len) == 0);
+    close(probe);
 
     return fd;
 }
@@ -113,7 +118,7 @@ int main(void) {
     memset(&cfg, 0, sizeof(cfg));
     cfg.type = CORE_MAVLINK_TRANSPORT_UDP;
     strncpy(cfg.transport.udp.bind_addr, "127.0.0.1", sizeof(cfg.transport.udp.bind_addr) - 1);
-    cfg.transport.udp.bind_port = CONN_PORT;
+    cfg.transport.udp.bind_port = ntohs(conn_addr.sin_port);
     cfg.transport.udp.remote_port = 0; /* learn peer from first inbound packet */
     cfg.system_id = 1;
     cfg.component_id = MAV_COMP_ID_ONBOARD_COMPUTER;
