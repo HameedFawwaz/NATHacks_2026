@@ -37,6 +37,17 @@ static void print_status(const core_nav_result_t *result, const core_autonomy_t 
     fflush(stdout);
 }
 
+static void print_estimate(const core_nav_estimate_t *estimate) {
+    if (estimate->status == CORE_NAV_EST_READY) {
+        printf("[nav_est] ready north=%.2f east=%.2f dr_age_ms=%u\n", estimate->north_m, estimate->east_m,
+               estimate->dead_reckon_ms);
+    } else {
+        printf("[nav_est] %s (not published) dr_age_ms=%u\n", core_nav_estimate_status_name(estimate->status),
+               estimate->dead_reckon_ms);
+    }
+    fflush(stdout);
+}
+
 static void alert_new_flags(core_mavlink_conn_t *conn, uint32_t prev_flags, uint32_t flags) {
     uint32_t newly_set = flags & ~prev_flags;
     if (newly_set & CORE_NAV_FLAG_JUMP) {
@@ -90,6 +101,11 @@ int main(int argc, char **argv) {
     core_nav_detector_t detector;
     core_nav_detector_init(&detector, &nav_cfg);
 
+    core_nav_estimate_config_t estimate_cfg;
+    core_nav_estimate_config_default(&estimate_cfg);
+    core_nav_estimator_t estimator;
+    core_nav_estimator_init(&estimator);
+
     core_trust_score_t score;
     core_trust_score_init(&score);
 
@@ -134,6 +150,7 @@ int main(int argc, char **argv) {
     const uint32_t MSGID_GPS_RAW_INT = 24;
     const uint32_t MSGID_GLOBAL_POSITION_INT = 33;
     const uint32_t MSGID_ATTITUDE = 30;
+    const uint32_t MSGID_HOME_POSITION = 242;
     bool rates_requested = false;
 
     while (g_running) {
@@ -152,6 +169,8 @@ int main(int argc, char **argv) {
             ok = core_mavlink_request_message_interval(conn, MSGID_GLOBAL_POSITION_INT, 100000) && ok;
             /* 10Hz: the nav detector seeds its yaw from this while disarmed */
             ok = core_mavlink_request_message_interval(conn, MSGID_ATTITUDE, 100000) && ok;
+            /* 1Hz: EST_N/EST_E are relative to home, which moves when the vehicle arms */
+            ok = core_mavlink_request_message_interval(conn, MSGID_HOME_POSITION, 1000000) && ok;
             rates_requested = ok;
             last_rate_request_ms = rate_now;
         }
@@ -163,6 +182,8 @@ int main(int argc, char **argv) {
 
         core_nav_result_t result = core_nav_detector_update(&detector, &telemetry, &nav_cfg);
         core_trust_score_set_component(&score, CORE_TRUST_SOURCE_NAV, result.nav_trust);
+        core_nav_estimate_t estimate =
+            core_nav_estimator_update(&estimator, &detector, &telemetry, &nav_cfg, &estimate_cfg, now);
 
         alert_new_flags(conn, prev_flags, result.flags);
         prev_flags = result.flags;
@@ -180,11 +201,13 @@ int main(int argc, char **argv) {
 
         if (now - last_publish_ms >= 200) {
             core_mavlink_publish_trust_score(conn, &score);
+            core_nav_estimate_publish(conn, &estimate); /* sends nothing unless usable */
             last_publish_ms = now;
         }
 
         if (now - last_print_ms >= 1000) {
             print_status(&result, &autonomy);
+            print_estimate(&estimate);
             last_print_ms = now;
         }
 

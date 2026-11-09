@@ -21,3 +21,7 @@ add_test(NAME test_autonomy COMMAND test_autonomy)
 add_executable(test_link_signing test_link_signing.c)
 target_link_libraries(test_link_signing PRIVATE core_lib)
 add_test(NAME test_link_signing COMMAND test_link_signing)
+
+add_executable(test_nav_estimate test_nav_estimate.c)
+target_link_libraries(test_nav_estimate PRIVATE core_lib)
+add_test(NAME test_nav_estimate COMMAND test_nav_estimate)
