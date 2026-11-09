@@ -23,6 +23,9 @@ const (
 	// Below this median RPM the motors aren't really spinning (armed on the ground,
 	// throttle cut), so their RPMs say nothing about each other.
 	minSpinRPM = 100
+	// Core's estimate is metres north (EST_N) and east (EST_E) of the autopilot's
+	// home. Anything beyond this is garbage, not a position.
+	maxEstimateM = 100_000
 )
 
 // copterModes names ArduCopter's custom_mode values.
@@ -47,8 +50,19 @@ type vehicleState struct {
 	headingKnown  bool
 	escReporting  [4]bool // ESC slots that have ever reported, so a motor stopping still counts
 	fault         Fault   // injected from this dashboard, "" until one is; see fault.go
-	events        []model.Event
-	nextEventSeq  int
+
+	// The EKF's position, kept apart from core's estimate so snapshot can pick
+	// whichever is current.
+	ekf          model.LatLon
+	ekfKnown     bool
+	home         model.LatLon
+	homeKnown    bool
+	estN         float64 // core's estimate, metres north of home
+	estE         float64 // and east
+	estNAt       int64   // when each last arrived; 0 means never
+	estEAt       int64
+	events       []model.Event
+	nextEventSeq int
 }
 
 // isVehicle tells the autopilot apart from ground stations and companion
@@ -100,6 +114,10 @@ func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) 
 		v.applyGlobalPosition(mavlink.DecodeGlobalPositionInt(f.Payload))
 	case mavlink.MsgESCTelemetry1To4:
 		v.applyESCTelemetry(mavlink.DecodeESCTelemetry(f.Payload), nowMs)
+	case mavlink.MsgHomePosition:
+		lat, lon := mavlink.DecodeHomePosition(f.Payload)
+		v.homeKnown = lat != 0 || lon != 0
+		v.home = model.LatLon{Lat: lat, Lon: lon}
 	}
 	return true
 }
@@ -115,6 +133,11 @@ func (v *vehicleState) applyHeartbeat(hb mavlink.Heartbeat, nowMs int64) {
 
 func (v *vehicleState) applyNamedValue(p []byte, nowMs int64) {
 	name, value := mavlink.DecodeNamedValueFloat(p)
+	switch name {
+	case "EST_N", "EST_E":
+		v.applyEstimate(name, value, nowMs)
+		return
+	}
 	if !(value >= 0 && value <= 1) { // also rejects NaN; infinities would break JSON
 		return
 	}
@@ -128,6 +151,19 @@ func (v *vehicleState) applyNamedValue(p []byte, nowMs int64) {
 		v.snap.Link = reading
 	case "TRUST_HW":
 		v.snap.Hardware = reading
+	}
+}
+
+// applyEstimate stores one half of core's position estimate. Core stops sending
+// it when the estimate isn't usable, so it expires like the other telemetry.
+func (v *vehicleState) applyEstimate(name string, value float64, nowMs int64) {
+	if !(math.Abs(value) <= maxEstimateM) { // also rejects NaN and infinities
+		return
+	}
+	if name == "EST_N" {
+		v.estN, v.estNAt = value, nowMs
+	} else {
+		v.estE, v.estEAt = value, nowMs
 	}
 }
 
@@ -208,10 +244,9 @@ func (v *vehicleState) applyGPS(g mavlink.GPSRawInt) {
 	v.snap.Reported = model.LatLon{Lat: g.Lat, Lon: g.Lon}
 }
 
-// applyGlobalPosition uses the autopilot's EKF as the position estimate to
-// compare GPS against, because core doesn't publish its own independent estimate
-// yet. The EKF fuses GPS, so a slow enough spoof that it accepts won't show up as
-// drift here.
+// applyGlobalPosition records the autopilot's EKF position. It is only the
+// fallback estimate to compare GPS against, for when core isn't publishing its own:
+// the EKF fuses GPS, so a slow enough spoof that it accepts won't show up as drift.
 func (v *vehicleState) applyGlobalPosition(g mavlink.GlobalPositionInt) {
 	v.snap.AltM = g.RelativeAltM
 	v.snap.SpeedMS = math.Hypot(g.VNorth, g.VEast)
@@ -219,12 +254,18 @@ func (v *vehicleState) applyGlobalPosition(g mavlink.GlobalPositionInt) {
 	if v.headingKnown {
 		v.snap.HeadingDeg = float64(g.HeadingCdeg) / 100
 	}
-	if g.Lat == 0 && g.Lon == 0 {
-		v.snap.HasEstimate = false
-		return
+	v.ekfKnown = g.Lat != 0 || g.Lon != 0
+	v.ekf = model.LatLon{Lat: g.Lat, Lon: g.Lon}
+}
+
+// coreEstimate returns core's position estimate if both halves are current and
+// the home they are measured from is known.
+func (v *vehicleState) coreEstimate(nowMs int64) (model.LatLon, bool) {
+	fresh := func(at int64) bool { return at != 0 && nowMs-at <= model.StaleAfterMs }
+	if !v.homeKnown || !fresh(v.estNAt) || !fresh(v.estEAt) {
+		return model.LatLon{}, false
 	}
-	v.snap.HasEstimate = true
-	v.snap.Estimated = model.LatLon{Lat: g.Lat, Lon: g.Lon}
+	return model.FromLocal(v.home, v.estE, v.estN), true
 }
 
 func (v *vehicleState) addEvent(text string, nowMs int64) {
@@ -266,6 +307,16 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 	s.HasPosition = s.HasPosition && s.Connected && gpsFresh
 	s.HasFlightData = s.Connected && globalFresh
 	s.HasHeading = s.HasFlightData && v.headingKnown
-	s.HasEstimate = s.HasEstimate && s.HasFlightData
+
+	// Prefer core's estimate, which doesn't depend on GPS. Fall back to the EKF only
+	// when core isn't publishing one, and say which is in use.
+	switch est, ok := v.coreEstimate(nowMs); {
+	case s.Connected && ok:
+		s.Estimated, s.HasEstimate, s.EstimateFrom = est, true, model.EstimateCore
+	case s.HasFlightData && v.ekfKnown:
+		s.Estimated, s.HasEstimate, s.EstimateFrom = v.ekf, true, model.EstimateEKF
+	default:
+		s.Estimated, s.HasEstimate, s.EstimateFrom = model.LatLon{}, false, ""
+	}
 	return s
 }

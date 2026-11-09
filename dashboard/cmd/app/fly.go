@@ -186,6 +186,18 @@ func (a *app) renderInstruments() {
 	show("i-speed", s.HasFlightData, fmt.Sprintf("%.1f m/s", s.SpeedMS))
 	show("i-heading", s.HasHeading, fmt.Sprintf("%03.0f°", s.HeadingDeg))
 	show("i-sats", s.HasGPS, strconv.Itoa(s.Satellites))
+	// Say which estimate the drift is measured against, so core's GPS-free one
+	// can't be mistaken for the EKF's, which follows a slow spoof.
+	driftLabel, legend := "GPS drift", "Drone's own estimate"
+	switch s.EstimateFrom {
+	case model.EstimateCore:
+		driftLabel, legend = "Drift vs core", "Core's GPS-free estimate"
+	case model.EstimateEKF:
+		driftLabel, legend = "Drift vs EKF", "Autopilot EKF (core estimate unavailable)"
+	}
+	setText(byID("l-drift"), driftLabel)
+	setText(byID("legend-estimate"), legend)
+	byID("l-drift").Set("title", legend)
 	driftEl := byID("i-drift")
 	drift, showDrift := s.Drift()
 	switch {
