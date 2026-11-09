@@ -114,7 +114,7 @@ func TestReturningHeartbeatDoesNotResumeOldMissionOrDrift(t *testing.T) {
 	b.handle(mavlink.Encode(0, 1, 1, mavlink.MsgHeartbeat, heartbeatPayload(2, 3, 0, 0)), f.bridge)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.missionReady || !stopped || b.stopDrift != nil || b.vehicle.fault != "" {
+	if b.missionReady || !stopped || b.stopDrift != nil || b.vehicle.fault != FaultUnknown {
 		t.Fatalf("reused state after loss: ready=%v stopped=%v fault=%q", b.missionReady, stopped, b.vehicle.fault)
 	}
 }

@@ -119,6 +119,9 @@ func (a *app) renderFlyAction() {
 // for a page opened after the fault was set from another one.
 func (a *app) renderFaults() {
 	active := a.snap.Fault
+	if active == "unknown" && !a.live.injecting {
+		a.showFaultStatus("Fault state unconfirmed; use All clear to reset SITL parameters.", true)
+	}
 	if active == "" {
 		active = "none" // nothing injected from here, so SITL is at its defaults
 	}

@@ -290,7 +290,11 @@ func (v *vehicleState) update(nowMs int64) {
 		} else {
 			v.addEvent("Lost contact with the drone.", nowMs)
 			v.snap.Behavior = ""
-			v.fault = "" // a SITL that restarted has its parameters back at their defaults
+			// Silence may be a network outage, not a restart: an injected GPS
+			// offset can still be active. Never claim it was cleared without proof.
+			if v.fault != "" {
+				v.fault = FaultUnknown
+			}
 		}
 		v.wasConnected = connected
 	}

@@ -69,7 +69,9 @@ jam button: core has no link detector yet (`core/link/` is still empty), so noth
 would react to one.
 
 If an injection is unconfirmed, the snapshot reports `unknown`: some parameters may
-have changed even though the operation failed. Use All clear and wait for confirmation.
+have changed even though the operation failed. The state also becomes unknown after
+lost contact, since a network outage does not prove SITL restarted or cleared a fault.
+Any drift loop stops on loss. Use All clear and wait for confirmation after reconnecting.
 
 The API has no authentication, and neither does MAVLink itself until #4 is done. It
 only answers to the dashboard's own address and localhost, which stops other websites
