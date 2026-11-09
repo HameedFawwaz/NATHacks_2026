@@ -314,6 +314,40 @@ static void test_stale_producer_is_untrusted(harness_t *h) {
     assert(h->autonomy.behavior == CORE_AUTONOMY_GNSS_FAILOVER);
 }
 
+/* When the autopilot's own heartbeat stops reaching us, its armed state and mode
+ * are unknown and the link monitor can't judge anything, so a stale input then
+ * is our blindness, not an attack. Acting on it would brake or RTL the vehicle
+ * once the companion link returned, with the operator in control all along. */
+static void test_stale_vehicle_heartbeat_freezes_decisions(harness_t *h) {
+    reset(h, MODE_GUIDED, true);
+    uint64_t hb_ms = h->telemetry.heartbeat.last_update_ms;
+    h->now = hb_ms;
+    h->score.link_update_ms = h->now;
+    tick(h, 20);
+    assert(h->autonomy.behavior == CORE_AUTONOMY_NOMINAL);
+
+    /* The autopilot falls silent, and with it every producer it feeds. */
+    tick(h, 3500);
+    tick(h, 30000);
+    assert(h->autonomy.behavior == CORE_AUTONOMY_NOMINAL && "no verdict from stale vehicle state");
+    assert(h->mode_commands == 0);
+
+    /* It comes back, and the link is reported fresh again in the same tick. */
+    vehicle_heartbeat(h, MODE_GUIDED, true);
+    h->now = h->telemetry.heartbeat.last_update_ms;
+    h->score.link_update_ms = h->now;
+    tick(h, 20);
+    assert(h->autonomy.behavior == CORE_AUTONOMY_NOMINAL);
+    assert(h->mode_commands == 0);
+
+    /* Real link loss after that is still acted on. */
+    report(h, CORE_TRUST_SOURCE_LINK, 0.0f);
+    h->score.link_update_ms = h->now;
+    tick(h, 20);
+    assert(h->autonomy.behavior == CORE_AUTONOMY_LINK_HOLD);
+    assert(h->mode_commands == 1 && h->last_mode == MODE_BRAKE);
+}
+
 static void test_disarmed_commands_no_mode(harness_t *h) {
     reset(h, MODE_GUIDED, false);
     report(h, CORE_TRUST_SOURCE_NAV, 0.0f);
@@ -396,6 +430,7 @@ int main(void) {
     test_hardware_alone_lands(&h);
     test_crypto_does_not_select_behavior(&h);
     test_stale_producer_is_untrusted(&h);
+    test_stale_vehicle_heartbeat_freezes_decisions(&h);
     test_disarmed_commands_no_mode(&h);
     test_gcs_heartbeat_is_not_the_vehicle(&h);
     test_transition_log(&h);

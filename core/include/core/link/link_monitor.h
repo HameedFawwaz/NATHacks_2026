@@ -19,7 +19,10 @@
  *   State      Means                                        link_trust
  *   ---------  -------------------------------------------  ----------
  *   UNKNOWN    no operator heard yet, or the autopilot      not reported
- *              itself is silent so nothing can be judged
+ *              itself is silent so nothing can be judged.
+ *              Once the autopilot is back, an operator
+ *              heard before is judged again at once, its
+ *              silence timed from the autopilot's return
  *   NOMINAL    heartbeats arriving as expected              about 1
  *   DEGRADED   heartbeats missing, weak signal, or          below 0.7
  *              interference while still connected
@@ -110,8 +113,10 @@ typedef struct {
     core_link_config_t cfg;
 
     bool blind; /* the autopilot was silent at the last update */
+    uint64_t resumed_ms; /* when the autopilot was last heard again after being silent */
+    bool operator_known; /* the operator has been heard at some point, before any outage */
     uint32_t seen_count;
-    uint64_t first_heard_ms, last_heard_ms; /* 0 = not heard */
+    uint64_t first_heard_ms, last_heard_ms; /* 0 = not heard since the last autopilot outage */
     uint64_t arrivals[CORE_LINK_ARRIVALS];
     int arrivals_head, arrivals_len;
 

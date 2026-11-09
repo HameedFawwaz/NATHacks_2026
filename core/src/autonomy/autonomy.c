@@ -232,6 +232,14 @@ void core_autonomy_tick(core_autonomy_t *ctx, core_mavlink_conn_t *conn, core_tr
     if (!telemetry->heartbeat.valid) {
         return;
     }
+    /* A stale vehicle heartbeat means armed state and mode are unknown, and
+     * every producer fed by the autopilot (link above all) stops reporting with
+     * it. Deciding then would blame our own blindness on an attack, and the
+     * command would land once the autopilot came back. Hold everything instead. */
+    uint64_t hb_ms = telemetry->heartbeat.last_update_ms;
+    if (now_ms > hb_ms && now_ms - hb_ms > ctx->cfg.input_stale_ms) {
+        return;
+    }
     bool armed = (telemetry->heartbeat.base_mode & MAV_MODE_FLAG_ARMED) != 0;
 
     update_untrusted(&ctx->cfg, score->nav_trust, score->nav_update_ms, now_ms,

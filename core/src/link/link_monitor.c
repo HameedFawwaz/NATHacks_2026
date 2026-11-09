@@ -129,6 +129,7 @@ static void record_arrivals(core_link_monitor_t *mon, const core_gcs_heartbeat_t
         mon->first_heard_ms = hb->last_update_ms;
     }
     mon->last_heard_ms = hb->last_update_ms;
+    mon->operator_known = true;
 }
 
 /* Fraction of expected heartbeats missing over the window, or -1 while there
@@ -142,6 +143,9 @@ static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint6
     uint64_t fits = (uint64_t)(CORE_LINK_ARRIVALS - 1) * interval;
     if (window > fits) {
         window = fits;
+    }
+    if (mon->first_heard_ms == 0) {
+        return -1.0f;
     }
     uint64_t start = mon->first_heard_ms > mon->window_start_ms ? mon->first_heard_ms : mon->window_start_ms;
     uint64_t span = now_ms - start;
@@ -311,7 +315,14 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
     }
     /* While blind, seen_count followed the count, so whatever is new now
      * arrived with the autopilot's return and counts. */
-    mon->blind = false;
+    if (mon->blind) {
+        mon->resumed_ms = now_ms;
+        mon->blind = false;
+    }
+    /* Silence is timed from the last heartbeat, or for an operator last heard
+     * before an autopilot outage, from the autopilot's return: the outage
+     * itself says nothing about the operator's link. */
+    uint64_t heard_ref = mon->last_heard_ms ? mon->last_heard_ms : mon->resumed_ms;
 
     /* When the autopilot goes quiet, the operator's forwarded heartbeats stop
      * with it. Until it's late enough to call UNKNOWN, hold the last verdict
@@ -320,7 +331,7 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
         mon->last_update_ms = now_ms;
         r.state = mon->state;
         r.link_trust = mon->trust;
-        r.silence_ms = (uint32_t)(now_ms - mon->last_heard_ms);
+        r.silence_ms = (uint32_t)(now_ms - heard_ref);
         snprintf(r.reason, sizeof(r.reason), "autopilot late, holding");
         return r;
     }
@@ -334,15 +345,18 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
         mon->window_start_ms = mon->last_heard_ms;
         mon->heavy_loss_since_ms = 0;
     }
-    if (mon->last_heard_ms == 0) {
+    /* Unreported, autonomy ignores an operator it has never had; but one it had
+     * must be judged, or the link would go stale and read as lost. */
+    if (mon->last_heard_ms == 0 && !mon->operator_known) {
         mon->last_update_ms = now_ms;
         r.state = CORE_LINK_UNKNOWN;
         snprintf(r.reason, sizeof(r.reason), "operator not heard yet");
         return r;
     }
+    heard_ref = mon->last_heard_ms ? mon->last_heard_ms : mon->resumed_ms;
 
     uint32_t interval = cfg->heartbeat_interval_ms;
-    r.silence_ms = (uint32_t)(now_ms - mon->last_heard_ms);
+    r.silence_ms = (uint32_t)(now_ms - heard_ref);
     float loss = measure_loss(mon, now_ms, cfg->window_ms);
     r.loss = loss < 0.0f ? 0.0f : loss;
     /* Ten heartbeats can't tell steady 30% loss from a clean link, so calling it

@@ -587,6 +587,44 @@ static void test_autopilot_outage_keeps_distrust(void) {
     assert(h.last.state != CORE_LINK_NOMINAL);
 }
 
+/* Once the operator has been heard, coming back from an autopilot outage must
+ * report at once: going UNKNOWN until the next operator heartbeat leaves the
+ * link unreported, and autonomy reads an unreported link as stale. And an
+ * operator who never returns is still LOST, timed from the autopilot's return. */
+static void test_autopilot_return_reports_known_operator(void) {
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.autopilot_on = false;
+    run(&h, 10000);
+    assert(h.last.state == CORE_LINK_UNKNOWN);
+
+    h.autopilot_on = true;
+    h.gcs_on = false;
+    run(&h, 1000); /* the autopilot's first heartbeat after the outage */
+    assert(h.last.state != CORE_LINK_UNKNOWN && "a known operator is judged as soon as the autopilot is back");
+    assert(h.last.link_trust >= 0.7f && "and still trusted: an observation gap is not evidence of loss");
+
+    reset_stats(&h);
+    run(&h, 2000);
+    assert(h.worst == CORE_LINK_NOMINAL && "the grace period still applies");
+    run(&h, 4000);
+    assert(h.last.state == CORE_LINK_LOST && "an operator who never returns is lost");
+    assert(h.last.link_trust == 0.0f);
+}
+
+static void test_never_heard_operator_stays_unknown_after_outage(void) {
+    harness_t h;
+    setup(&h);
+    h.gcs_on = false;
+    run(&h, 5000);
+    h.autopilot_on = false;
+    run(&h, 5000);
+    h.autopilot_on = true;
+    run(&h, 20000);
+    assert(h.last.state == CORE_LINK_UNKNOWN && "no operator, no verdict");
+}
+
 int main(void) {
     test_unknown_until_operator_heard();
     test_steady_link_stays_nominal();
@@ -617,6 +655,8 @@ int main(void) {
     test_heartbeat_in_first_poll_counts();
     test_autopilot_silence_is_unknown_not_lost();
     test_autopilot_outage_keeps_distrust();
+    test_autopilot_return_reports_known_operator();
+    test_never_heard_operator_stays_unknown_after_outage();
     printf("test_link_monitor: all passed\n");
     return 0;
 }
