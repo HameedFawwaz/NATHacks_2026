@@ -8,5 +8,6 @@
 
 #include "core/nav/gnss_anomaly.h"
 #include "core/nav/nav_config.h"
+#include "core/nav/nav_estimate.h"
 
 #endif /* CORE_NAV_H */

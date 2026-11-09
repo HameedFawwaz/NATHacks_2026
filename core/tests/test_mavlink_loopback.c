@@ -92,6 +92,16 @@ static void send_rc_rssi(int fake_fd, const struct sockaddr_in *conn_addr, uint8
     send_packed(fake_fd, conn_addr, &msg);
 }
 
+static void send_home(int fake_fd, const struct sockaddr_in *conn_addr, uint8_t sysid, uint8_t compid, int32_t lat) {
+    mavlink_home_position_t home = {0};
+    home.latitude = lat;
+    home.longitude = -1223974560;
+    home.altitude = 123000;
+    mavlink_message_t msg;
+    mavlink_msg_home_position_encode(sysid, compid, &msg, &home);
+    send_packed(fake_fd, conn_addr, &msg);
+}
+
 static bool poll_until(core_mavlink_conn_t *conn, core_telemetry_t *telemetry, int max_iterations,
                         bool (*condition)(const core_telemetry_t *)) {
     for (int i = 0; i < max_iterations; i++) {
@@ -109,6 +119,8 @@ static bool heartbeat_valid(const core_telemetry_t *t) { return t->heartbeat.val
 static bool gps_valid(const core_telemetry_t *t) { return t->gps_raw.valid; }
 static bool two_operator_heartbeats(const core_telemetry_t *t) { return t->gcs_heartbeat.count >= 2; }
 static bool rc_rssi_200(const core_telemetry_t *t) { return t->rc_status.valid && t->rc_status.rssi == 200; }
+static bool home_valid(const core_telemetry_t *t) { return t->home_position.valid; }
+static bool home_shifted(const core_telemetry_t *t) { return t->home_position.lat == 473978420; }
 
 /* After a heartbeat timeout the connection reopens, and the first frame back
  * may well not be a heartbeat. That frame must not find the timeout already
@@ -186,9 +198,13 @@ int main(void) {
     assert(conn != NULL);
     assert(core_mavlink_conn_get_state(conn) == CORE_MAVLINK_CONN_CONNECTING);
 
+    /* No home is trusted until the autopilot has identified itself. */
+    send_home(fake_fd, &conn_addr, 1, MAV_COMP_ID_AUTOPILOT1, 473977420);
+    core_telemetry_t telemetry;
+    assert(!poll_until(conn, &telemetry, 20, home_valid));
+
     /* --- heartbeat decode --- */
     send_fake_heartbeat(fake_fd, &conn_addr);
-    core_telemetry_t telemetry;
     bool ok = poll_until(conn, &telemetry, 2000, heartbeat_valid);
     assert(ok && "timed out waiting for heartbeat to be decoded");
     assert(telemetry.heartbeat.type == MAV_TYPE_QUADROTOR);
@@ -232,6 +248,24 @@ int main(void) {
     }
     core_mavlink_conn_get_telemetry(conn, &telemetry);
     assert(telemetry.rc_status.rssi == 200 && "RC_CHANNELS from anything but the autopilot must be ignored");
+
+    /* HOME_POSITION defines the estimate's coordinate reference. Only the
+     * identified autopilot may set it, and an arming-time shift must refresh it. */
+    send_home(fake_fd, &conn_addr, 1, MAV_COMP_ID_AUTOPILOT1, 473977420);
+    assert(poll_until(conn, &telemetry, 2000, home_valid));
+    assert(telemetry.home_position.lat == 473977420);
+    assert(telemetry.home_position.lon == -1223974560);
+    assert(telemetry.home_position.alt_mm == 123000);
+    send_home(fake_fd, &conn_addr, 7, MAV_COMP_ID_AUTOPILOT1, 1);
+    send_home(fake_fd, &conn_addr, 1, MAV_COMP_ID_ONBOARD_COMPUTER, 2);
+    for (int i = 0; i < 20; i++) {
+        core_mavlink_conn_poll(conn);
+        usleep(1000);
+    }
+    core_mavlink_conn_get_telemetry(conn, &telemetry);
+    assert(telemetry.home_position.lat == 473977420);
+    send_home(fake_fd, &conn_addr, 1, MAV_COMP_ID_AUTOPILOT1, 473978420);
+    assert(poll_until(conn, &telemetry, 2000, home_shifted));
 
     /* --- send path: conn should now know the fake vehicle's address --- */
     assert(core_mavlink_send_heartbeat(conn));

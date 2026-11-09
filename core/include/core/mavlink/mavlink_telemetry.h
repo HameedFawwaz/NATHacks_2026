@@ -109,6 +109,20 @@ typedef struct {
     bool valid;
 } core_rc_status_t;
 
+/*
+ * The autopilot's HOME_POSITION: the origin the dashboard places core's
+ * EST_N/EST_E estimate against. Only accepted from the autopilot identified
+ * by its heartbeat. ArduCopter moves home when it arms, so consumers must
+ * re-read it rather than latch the first value.
+ */
+typedef struct {
+    int32_t lat;      /* degE7 */
+    int32_t lon;      /* degE7 */
+    int32_t alt_mm;   /* MSL */
+    uint64_t last_update_ms;
+    bool valid;
+} core_home_position_t;
+
 /* The most recent COMMAND_ACK; a newer ack for any command overwrites it. */
 typedef struct {
     uint16_t command;  /* MAV_CMD */
@@ -144,6 +158,8 @@ typedef struct {
     core_rc_status_t rc_status;
 
     core_link_security_t link_security;
+
+    core_home_position_t home_position;
 } core_telemetry_t;
 
 #endif /* CORE_MAVLINK_TELEMETRY_H */

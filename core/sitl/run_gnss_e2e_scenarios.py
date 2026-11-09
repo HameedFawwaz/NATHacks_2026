@@ -21,7 +21,9 @@ import json
 import math
 import os
 import random
+import signal
 import socket
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -61,6 +63,17 @@ ARRIVE_RADIUS_M = 3.0
 
 # Side of the square the unspoofed "cruise" control flies.
 CRUISE_SQUARE_M = 120.0
+
+# Core's EST_N/EST_E (#16): the dashboard's bound, and how close the halves of
+# one published pair must arrive.
+MAX_ESTIMATE_M = 100_000
+EST_PAIR_S = 0.15
+# Simulator truth older than this isn't used to score an estimate.
+TRUTH_MAX_AGE_S = 0.2
+# "imu_gap": how long SITL is frozen, past core's 500 ms IMU freshness limit
+# but short of the 3 s staleness checks this script and the dashboard apply.
+IMU_GAP_AT_S = 10.0
+IMU_GAP_S = 2.0
 
 
 class ScenarioFailed(Exception):
@@ -205,6 +218,7 @@ class Sitl:
                  "-mavlink", f"127.0.0.1:{dashboard_port}"], workdir, "dashboard")
         self.core_port = core_port
         self.core_proc = self._launch([str(core_main), str(core_port)], workdir, "core_main")
+        self.core_log = workdir / "core_main.log"
         time.sleep(1)  # let core_main bind before SITL's serial1 tries to reach it
 
         self.proc = self._launch(
@@ -233,6 +247,12 @@ class Sitl:
         self.mav.mav.request_data_stream_send(
             self.mav.target_system, self.mav.target_component, mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
         )
+        # Simulator truth with its own velocity (SIM_STATE) at 20 Hz, to score
+        # core's estimate against, and home, which that estimate is relative
+        # to, at 1 Hz.
+        for msg_id, rate_hz in ((mavutil.mavlink.MAVLINK_MSG_ID_SIM_STATE, 20),
+                                (mavutil.mavlink.MAVLINK_MSG_ID_HOME_POSITION, 1)):
+            self.command(mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, msg_id, 1e6 / rate_hz)
         self.status = {
             "mode": None,
             "armed": False,
@@ -244,6 +264,14 @@ class Sitl:
             "nav_at": 0.0,
             "behavior": "NOMINAL",
             "behavior_log": [],  # (monotonic time, behavior) for each change
+            "home": None,         # autopilot HOME_POSITION (lat, lon)
+            "gps_pos": None,      # GPS_RAW_INT, spoofed or not
+            "sim_truth": None,    # SIM_STATE: (monotonic time, lat, lon, vn, ve), physics state, never EKF
+            "est_n": None,
+            "est_n_at": 0.0,
+            "est_at": 0.0,        # when the last complete EST_N/EST_E pair arrived
+            "est_samples": [],    # one per pair: see _note_estimate
+            "est_rejects": [],    # pairs that should never have been published
         }
         # ArduCopter's default per-serial-port stream rates are all zero (see
         # AP_MAV_DEFAULT_STREAM_RATE_* in GCS_MAVLink_Parameters.cpp): unlike the
@@ -291,12 +319,22 @@ class Sitl:
         elif kind == "GLOBAL_POSITION_INT":
             self.status["rel_alt"] = msg.relative_alt / 1000
             self.status["heading_deg"] = msg.hdg / 100 if msg.hdg != 65535 else self.status["heading_deg"]
+        elif kind == "SIM_STATE" and (msg.lat_int or msg.lon_int):
+            self.status["sim_truth"] = (time.monotonic(), msg.lat_int / 1e7, msg.lon_int / 1e7, msg.vn, msg.ve)
         elif kind == "SIMSTATE":
             self.status["true_pos"] = (msg.lat / 1e7, msg.lng / 1e7)
             self.status["truth_at"] = time.monotonic()
         elif kind == "NAMED_VALUE_FLOAT" and msg.name == "TRUST_NAV":
             self.status["nav_trust"] = msg.value
             self.status["nav_at"] = time.monotonic()
+        elif kind == "NAMED_VALUE_FLOAT" and msg.name == "EST_N":
+            self.status["est_n"], self.status["est_n_at"] = msg.value, time.monotonic()
+        elif kind == "NAMED_VALUE_FLOAT" and msg.name == "EST_E":
+            self._note_estimate(msg.value)
+        elif kind == "HOME_POSITION" and (msg.latitude or msg.longitude):
+            self.status["home"] = (msg.latitude / 1e7, msg.longitude / 1e7)
+        elif kind == "GPS_RAW_INT" and msg.fix_type >= 2:
+            self.status["gps_pos"] = (msg.lat / 1e7, msg.lon / 1e7)
         elif kind == "STATUSTEXT":
             print(f"  [sitl] {msg.text}")
             if msg.text.startswith(AUTONOMY_PREFIX):
@@ -304,6 +342,38 @@ class Sitl:
                 if behavior != self.status["behavior"]:
                     self.status["behavior"] = behavior
                     self.status["behavior_log"].append((time.monotonic(), behavior))
+
+    def _note_estimate(self, est_e):
+        """Scores one EST_N/EST_E pair against simulator truth and the GPS fix,
+        all as metres north/east of the autopilot's home."""
+        now = time.monotonic()
+        s = self.status
+        est_n = s["est_n"]
+        if est_n is None or now - s["est_n_at"] > EST_PAIR_S:
+            return  # half a pair
+        s["est_n"] = None
+        sample = {"t": now, "est_n": est_n, "est_e": est_e}
+        if not (abs(est_n) <= MAX_ESTIMATE_M and abs(est_e) <= MAX_ESTIMATE_M) or s["home"] is None:
+            s["est_rejects"].append(sample)  # NaN fails the comparison too
+            return
+        s["est_at"] = now
+        truth = s["sim_truth"]
+        if truth is not None and now - truth[0] <= TRUTH_MAX_AGE_S:
+            # Truth comes only from the simulator's physics state (SIM_STATE),
+            # never from the EKF, which a spoof can drag: position plus the
+            # simulator's own velocity times the sample's age at arrival.
+            # The estimate's own link latency is not removed.
+            age = max(now - truth[0], 0.0)
+            true_e, true_n = to_local(s["home"], (truth[1], truth[2]))
+            true_n += truth[3] * age
+            true_e += truth[4] * age
+            sample["truth_age_s"] = age
+            sample["error_m"] = math.hypot(est_n - true_n, est_e - true_e)
+            if s["gps_pos"] is not None:
+                gps_e, gps_n = to_local(s["home"], s["gps_pos"])
+                sample["gps_truth_m"] = math.hypot(gps_n - true_n, gps_e - true_e)
+                sample["gps_est_m"] = math.hypot(gps_n - est_n, gps_e - est_e)
+        s["est_samples"].append(sample)
 
     def wait_for(self, condition, timeout, what):
         deadline = time.monotonic() + timeout
@@ -357,6 +427,8 @@ class Sitl:
             raise ScenarioFailed(f"untrusted baseline before injection: {self.status}")
         if any(behavior != "NOMINAL" for _, behavior in self.status["behavior_log"]):
             raise ScenarioFailed("false alarm during unspoofed takeoff; see the core transition log")
+        self.takeoff_estimate = summarize_estimate(self.status["est_samples"], self.status["est_rejects"])
+        self.takeoff_estimate["core_log"] = estimate_readiness_from_log(self.core_log)
 
     def close(self):
         if self.mav is not None:
@@ -411,6 +483,8 @@ def run_window(sitl, duration_s, step_fn, label):
     detect_time_s = None
     dashboard_samples = []
     dt = 0.5
+    sitl.status["est_samples"] = []
+    sitl.status["est_rejects"] = []
     began = time.monotonic()
     while (elapsed := time.monotonic() - began) < duration_s:
         true_pos = sitl.status["true_pos"]
@@ -426,10 +500,12 @@ def run_window(sitl, duration_s, step_fn, label):
         dashboard = dashboard_snapshot(sitl.dashboard_url)
         if not dashboard["Connected"] or dashboard["Nav"]["AtMs"] == 0 or dashboard["NowMs"] - dashboard["Nav"]["AtMs"] > 3000:
             raise ScenarioFailed("dashboard is not receiving live detector telemetry")
-        dashboard_samples.append({"elapsed_s": round(time.monotonic() - began, 2),
-                                  "nav_trust": dashboard["Nav"]["Value"],
-                                  "behavior": dashboard["Behavior"],
-                                  "estimate_from": dashboard["EstimateFrom"]})
+        sample = {"elapsed_s": round(time.monotonic() - began, 2),
+                  "nav_trust": dashboard["Nav"]["Value"],
+                  "behavior": dashboard["Behavior"],
+                  "estimate_from": dashboard["EstimateFrom"]}
+        sample.update(dashboard_estimate(dashboard, sitl.status["true_pos"]))
+        dashboard_samples.append(sample)
         furthest = max(furthest, distance_m(home, sitl.status["true_pos"]))
         lowest_trust = min(lowest_trust, sitl.status["nav_trust"])
         if detect_time_s is None and sitl.status["nav_trust"] < NAV_TRUST_DETECT_THRESHOLD:
@@ -452,14 +528,143 @@ def run_window(sitl, duration_s, step_fn, label):
             "lowest_nav_trust": round(min(s["nav_trust"] for s in dashboard_samples), 3),
             "behaviors": sorted(set(s["behavior"] for s in dashboard_samples if s["behavior"])),
             "estimate_sources": sorted(set(s["estimate_from"] for s in dashboard_samples)),
+            "core_estimate": summarize_dashboard_estimate(dashboard_samples),
             "samples": dashboard_samples,
         },
+        "core_estimate": summarize_estimate(sitl.status.get("est_samples", []), sitl.status.get("est_rejects", []),
+                                            began),
     }
     detected = f"{result['detect_time_s']}s" if result["detect_time_s"] is not None else "never"
     print(
         f"  max true drift: {result['max_true_drift_m']} m, lowest TRUST_NAV: {result['lowest_nav_trust']}, "
         f"detected at: {detected}, behaviors: {result['behaviors_entered'] or 'none'}"
     )
+    est = result["core_estimate"]
+    if est["scored_pairs"] == 0:
+        raise ScenarioFailed("no estimate pairs could be scored against fresh SIM_STATE truth")
+    print(f"  core estimate: {est['pairs']} pairs, error vs truth median {est.get('error_median_m')} m, "
+          f"p95 {est.get('error_p95_m')} m, max {est.get('error_max_m')} m; "
+          f"GPS-estimate gap at end {est.get('final_gps_est_m')} m; longest silence {est.get('longest_gap_s')} s")
+    return result
+
+
+def _percentile(values, fraction):
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(round(fraction * (len(ordered) - 1))))]
+
+
+def summarize_estimate(samples, rejects, began=None):
+    """Accuracy and continuity of core's EST_N/EST_E pairs over one window."""
+    out = {"pairs": len(samples), "rejected_pairs": len(rejects)}
+    errors = [s["error_m"] for s in samples if "error_m" in s]
+    out["scored_pairs"] = len(errors)
+    if errors:
+        ages = [s["truth_age_s"] for s in samples if "truth_age_s" in s]
+        out.update(error_median_m=round(statistics.median(errors), 2),
+                   error_p95_m=round(_percentile(errors, 0.95), 2),
+                   error_max_m=round(max(errors), 2),
+                   truth_age_median_s=round(statistics.median(ages), 3),
+                   truth_age_max_s=round(max(ages), 3))
+    times = [s["t"] for s in samples]
+    if times:
+        edges = ([began] if began is not None else []) + times
+        out["longest_gap_s"] = round(max(b - a for a, b in zip(edges, edges[1:])), 2) if len(edges) > 1 else None
+    tail = [s for s in samples if "gps_est_m" in s][-10:]
+    if tail:
+        out["final_gps_truth_m"] = round(statistics.median(s["gps_truth_m"] for s in tail), 2)
+        out["final_gps_est_m"] = round(statistics.median(s["gps_est_m"] for s in tail), 2)
+        out["final_error_m"] = round(statistics.median(s["error_m"] for s in tail), 2)
+    return out
+
+
+def dashboard_estimate(snapshot, true_pos):
+    """The estimate the dashboard bridge selected and delivered in its
+    telemetry API: its distance from truth, and the reported-GNSS-to-estimate
+    distance the drift line is drawn from. Read from the API only; no browser
+    rendering is checked."""
+    out = {}
+    if snapshot.get("HasEstimate") and true_pos is not None:
+        est = (snapshot["Estimated"]["lat"], snapshot["Estimated"]["lon"])
+        out["estimate_truth_m"] = round(distance_m(est, true_pos), 2)
+        if snapshot.get("HasPosition"):
+            reported = (snapshot["Reported"]["lat"], snapshot["Reported"]["lon"])
+            out["drift_m"] = round(distance_m(reported, est), 2)
+    return out
+
+
+def summarize_dashboard_estimate(samples):
+    core = [s for s in samples if s["estimate_from"] == "core" and "estimate_truth_m" in s]
+    out = {"core_fraction": round(len(core) / len(samples), 3) if samples else 0.0}
+    if core:
+        out["estimate_truth_max_m"] = max(s["estimate_truth_m"] for s in core)
+        drifts = [s["drift_m"] for s in core if "drift_m" in s]
+        if drifts:
+            out["drift_final_m"] = drifts[-1]
+            out["drift_max_m"] = max(drifts)
+    return out
+
+
+def estimate_readiness_from_log(path):
+    """core_main's own per-second [nav_est] lines up to the first published
+    estimate: what it was waiting for, and that nothing came out before."""
+    statuses = []
+    try:
+        for line in Path(path).read_text(errors="replace").splitlines():
+            if line.startswith("[nav_est] "):
+                status = line.split()[1]
+                statuses.append(status)
+                if status == "ready":
+                    break
+    except OSError:
+        return {"error": "no core log"}
+    before = statuses[:-1] if statuses and statuses[-1] == "ready" else statuses
+    return {"seconds_before_ready": len(before), "statuses_before_ready": sorted(set(before)),
+            "reached_ready": bool(statuses) and statuses[-1] == "ready"}
+
+
+class ImuGap:
+    """Hovers honestly, then freezes SITL (so every stream to core, IMU
+    included, stops) for IMU_GAP_S, once, to show core withholding the
+    estimate across the gap and until its filter re-anchors afterward."""
+
+    def __init__(self, sitl):
+        self.sitl = sitl
+        self.elapsed = 0.0
+        self.done = False
+
+    def step(self, dt, true_pos):
+        self.elapsed += dt
+        if not self.done and self.elapsed >= IMU_GAP_AT_S:
+            self.done = True
+            self.sitl.gap_started = time.monotonic()
+            os.kill(self.sitl.proc.pid, signal.SIGSTOP)
+            try:
+                time.sleep(IMU_GAP_S)
+            finally:
+                os.kill(self.sitl.proc.pid, signal.SIGCONT)
+        return None  # no spoof
+
+
+def run_imu_gap(sitl, duration):
+    gap = ImuGap(sitl)
+    result = run_window(sitl, duration, gap.step, "imu gap (unspoofed hover, SITL frozen 2 s)")
+    started = getattr(sitl, "gap_started", None)
+    lines = []
+    try:
+        lines = [line.split()[1] for line in sitl.core_log.read_text(errors="replace").splitlines()
+                 if line.startswith("[nav_est] ")]
+    except OSError:
+        pass
+    # Pairs core sent in the freeze's first 0.5 s (before its IMU freshness
+    # limit) sat in SITL's socket and arrive in a burst on resume, so judge the
+    # withholding by the silence after that burst, and by core's own log.
+    after = [s["t"] - started for s in sitl.status["est_samples"] if started is not None and s["t"] > started]
+    resumed = [t for t in after if t > IMU_GAP_S + 0.3]
+    result["imu_gap"] = {
+        "core_statuses_seen": sorted(set(lines)),
+        "pair_arrivals_after_freeze_s": [round(t, 2) for t in after[:12]],
+        "first_pair_after_resume_burst_s": round(min(resumed), 2) if resumed else None,
+    }
     return result
 
 
@@ -475,6 +680,7 @@ SCENARIOS = {
     "cruise": lambda sitl, rng, duration: run_window(
         sitl, duration, SquareRoute(sitl).step, "control cruise (unspoofed, flying a square)"
     ),
+    "imu_gap": lambda sitl, rng, duration: run_imu_gap(sitl, duration),
 }
 
 
@@ -539,6 +745,9 @@ def main():
                 sitl.take_off()
                 rng = random.Random(args.seed)
                 result = SCENARIOS[name](sitl, rng, args.duration)
+                takeoff_estimate = getattr(sitl, "takeoff_estimate", None)
+                if isinstance(result, dict) and isinstance(takeoff_estimate, dict):
+                    result["takeoff_estimate"] = takeoff_estimate
             finally:
                 sitl.close()
             results.append(result)
