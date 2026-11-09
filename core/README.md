@@ -130,8 +130,42 @@ reported-GNSS-to-core estimate separation was 36.61 m, calculated from API sampl
 not a browser observation. Core's log first reported `dr_expired` at an anchor age
 of 15.25 s. A 15 s cutoff is a heuristic, not a guaranteed error bound.
 
-The dashboard observations are the estimate selected and delivered by the live
-bridge's telemetry API, not evidence of browser rendering. In an earlier `imu_gap`
+### Combined live dashboard check
+
+`sitl/run_dashboard_e2e_scenario.py` launches a fresh local SITL, maintains real
+primary-GCS heartbeats, flies an honest hover, then injects a slow GPS ramp. It
+checks the real estimator/autonomy and read-only rendered dashboard together,
+with map tiles blocked. Build core, the bridge and WASM first:
+
+```sh
+cmake -S core -B core/build && cmake --build core/build --parallel 4
+(cd dashboard && make build && go build -o ../core/build/dashboard-serve ./cmd/serve)
+/path/to/venv/bin/python core/sitl/run_dashboard_e2e_scenario.py \
+  --ardupilot /path/to/ardupilot --log-dir core/build/dashboard-e2e
+```
+
+Requires `pymavlink`, Node 22+ and installed Chrome/Chromium. Defaults use instance
+18, core UDP 15465, dashboard UDP 15466 and HTTP 18188; flags can move them, and
+occupied ports are refused. Only this run's child processes are stopped. Each
+browser uses a fresh profile and rejects mutating requests. Screenshots, rendered
+state JSON and measured results stay in the log directory, not in source control.
+The displayed planned route is the dashboard's default local plan; the vehicle
+hovers in GUIDED, rather than executing that drawn route. The attack and operator
+heartbeats continue during browser capture.
+
+In the final combined run, honest-hover error was median 0.27 m, p95 1.22 m,
+maximum 1.48 m, with nav/link trust 1.0. Inspected live screenshots showed the
+offline planned route, a 21 m reported/core disagreement with a GNSS warning,
+then a critical GNSS panel and explicitly labelled EKF fallback. The slow spoof
+caused actual optical-flow fusion and `GNSS_FAILOVER`. During that attack the
+core estimate's maximum measured error reached 10.71 m before withdrawal
+(10.94 m in an earlier combined run):
+the expiry heuristic is not an accuracy guarantee. This is SITL/browser evidence,
+not physical flight, firmware or radio validation.
+
+The GNSS-only harness's dashboard observations are the estimate selected and
+delivered by the bridge's telemetry API, not evidence of browser rendering.
+In an earlier `imu_gap`
 scenario (SITL frozen for 2 s mid-hover), core logged
 `imu_stale` then `await_reanchor` and published nothing new until its filter
 re-anchored, 1.25 s after the freeze ended. The two pairs sent in the first 0.5 s of
@@ -402,7 +436,7 @@ scenario takes off on a fresh SITL, flies 60 m out at 20 m from a separate link 
 
 | Scenario | Injected | Checked |
 |---|---|---|
-| `jam` | noise up, RSSI high, packets gone over 8 s | `JAMMED` (never `LOST`), `BRAKE`, `RTL` after the 30 s hold, lands at home |
+| `jam` | noise up, RSSI high, packets gone over 8 s | settles as `JAMMED`, `BRAKE`, `RTL` after the 30 s hold, lands at home |
 | `lost` | signal gone over 2 s | `LOST` (never `JAMMED`), then the same hold and return |
 | `dropouts` | 4 × 2 s full dropouts | never `LOST`/`JAMMED`, trust never below 0.4, no autonomy action, still `GUIDED` |
 | `recover` | jamming until autonomy holds, then the link returns | back to `NOMINAL` before the hold runs out, no return, mode left in `BRAKE` for the operator |

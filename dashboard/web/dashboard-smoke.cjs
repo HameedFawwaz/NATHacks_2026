@@ -351,7 +351,9 @@ async function main() {
         await new Promise(resolve => chrome.once("exit", resolve));
       }
     }
-    fs.rmSync(profile, { recursive: true, force: true });
+    // Chrome helpers can finish a last profile write just after the main
+    // process exits. Retry only cleanup of this run's freshly created profile.
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
