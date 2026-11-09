@@ -114,6 +114,22 @@ latency; constant-velocity extrapolation and separate telemetry links also intro
 uncertainty, particularly during maneuvers. Earlier reported position-error numbers
 used EKF velocity and should not be treated as independent truth.
 
+In a fresh 60 s per scenario run on ArduCopter SITL `b720755` (Apple Silicon),
+all received pairs were scored with fresh simulator truth and none was rejected:
+
+| Scenario | Scored pairs | Error median / p95 / max | Truth arrival age median / max |
+|---|---:|---|---|
+| Honest hover | 295 | 0.24 / 0.82 / 1.54 m | 25 / 55 ms |
+| Honest 10 m/s cruise square | 296 | 1.49 / 2.15 / 2.49 m | 23 / 55 ms |
+| ~1.5 m/s spoof ramp | 97 | 4.24 / 7.79 / 7.80 m | 25 / 53 ms |
+
+Both controls stayed at nav trust 1.0 with no autonomy transitions. During the
+spoof, trust fell below 0.5 at 16.2 s and `GNSS_FAILOVER` followed; the bridge
+selected core until 22.93 s and then the labelled EKF fallback. Its largest
+reported-GNSS-to-core estimate separation was 36.61 m, calculated from API samples,
+not a browser observation. Core's log first reported `dr_expired` at an anchor age
+of 15.25 s. A 15 s cutoff is a heuristic, not a guaranteed error bound.
+
 The dashboard observations are the estimate selected and delivered by the live
 bridge's telemetry API, not evidence of browser rendering. In an earlier `imu_gap`
 scenario (SITL frozen for 2 s mid-hover), core logged
