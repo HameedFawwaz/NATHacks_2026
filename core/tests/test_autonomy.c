@@ -21,7 +21,6 @@
 #include "core/autonomy/autonomy.h"
 #include "core/common/time.h"
 
-#define CONN_PORT 14562
 #define MODE_GUIDED 4
 #define MODE_RTL 6
 #define MODE_LAND 9
@@ -72,6 +71,10 @@ static void vehicle_heartbeat(harness_t *h, uint32_t mode, bool armed) {
                                 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED | (armed ? MAV_MODE_FLAG_SAFETY_ARMED : 0), mode,
                                 MAV_STATE_ACTIVE);
     usleep(1500); /* so last_update_ms visibly changes */
+    /* tick() can override the harness copy with its simulated clock. Compare
+     * against the connection's actual timestamp, or the old armed heartbeat
+     * may appear "new" before this datagram has even arrived. */
+    core_mavlink_conn_get_telemetry(h->conn, &h->telemetry);
     g_prev_hb = h->telemetry.heartbeat.last_update_ms;
     vehicle_send(h, &msg);
     sync_conn(h, new_heartbeat);
@@ -150,6 +153,7 @@ static void reset(harness_t *h, uint32_t mode, bool armed) {
     core_autonomy_init(&h->autonomy, &cfg, h->log);
     core_trust_score_init(&h->score);
     h->now = 1000; /* well behind the real clock that stamps inbound acks */
+    h->vehicle_heard_ms = 0;
     h->last_mode = 0;
     h->last_source = 0;
     vehicle_heartbeat(h, mode, armed);
@@ -460,14 +464,19 @@ int main(void) {
     assert(bind(h.fd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0);
 
     h.conn_addr.sin_family = AF_INET;
-    h.conn_addr.sin_port = htons(CONN_PORT);
     inet_pton(AF_INET, "127.0.0.1", &h.conn_addr.sin_addr);
+    int probe = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(probe >= 0);
+    assert(bind(probe, (struct sockaddr *)&h.conn_addr, sizeof(h.conn_addr)) == 0);
+    socklen_t addr_len = sizeof(h.conn_addr);
+    assert(getsockname(probe, (struct sockaddr *)&h.conn_addr, &addr_len) == 0);
+    close(probe);
 
     core_mavlink_conn_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.type = CORE_MAVLINK_TRANSPORT_UDP;
     strncpy(cfg.transport.udp.bind_addr, "127.0.0.1", sizeof(cfg.transport.udp.bind_addr) - 1);
-    cfg.transport.udp.bind_port = CONN_PORT;
+    cfg.transport.udp.bind_port = ntohs(h.conn_addr.sin_port);
     cfg.system_id = 1;
     cfg.component_id = MAV_COMP_ID_ONBOARD_COMPUTER;
     cfg.reconnect_interval_ms = 1000;

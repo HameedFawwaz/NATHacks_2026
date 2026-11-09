@@ -232,7 +232,9 @@ node web/dashboard-smoke.cjs --mode live --url http://127.0.0.1:8080 --out /path
 Live mode only accepts an `http://localhost` URL, loads the existing page and
 telemetry, and does not click controls. A browser request guard allows only GET
 and HEAD requests; any attempted mutating request is aborted and reported. It
-captures `live-readonly.png`; it does not assert a particular flight state or
-simulate a fault. Start the dashboard/SITL separately if appropriate, and review
+waits for live health cards and the offline map, then captures `live-readonly.png`
+and `live-state.json` (rendered cards, drift text and route/drift canvas pixel
+counts). It does not assert a particular flight state or simulate a fault.
+Start the dashboard/SITL separately if appropriate, and review
 the screenshot as live evidence only when its source badge and telemetry confirm
 that status.

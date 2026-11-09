@@ -227,8 +227,31 @@ async function main() {
     };
     await cdp.call("Page.navigate", { url: targetUrl });
     if (opts.mode === "live") {
-      await waitFor(() => cdp.evaluate(`document.querySelector('#summary-title')?.textContent && document.querySelector('#source-badge')?.textContent`), "live dashboard render");
+      await waitFor(() => cdp.evaluate(`document.querySelector('#health .card') && document.querySelector('#source-badge')?.textContent === 'Live'`), "live telemetry render");
+      await waitFor(() => cdp.evaluate(`document.querySelector('#map-status')?.textContent.includes('Offline grid')`), "live offline map fallback");
       await wait(500);
+      const state = await cdp.evaluate(`(() => {
+        const canvas = document.querySelector('#map');
+        const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+        let plannedPixels = 0, driftPixels = 0;
+        for (let i = 0; i < pixels.length; i += 4) {
+          if (Math.abs(pixels[i] - 35) < 8 && Math.abs(pixels[i+1] - 186) < 8 && Math.abs(pixels[i+2] - 255) < 8) plannedPixels++;
+          if (Math.abs(pixels[i] - 255) < 8 && Math.abs(pixels[i+1] - 92) < 8 && Math.abs(pixels[i+2] - 92) < 8) driftPixels++;
+        }
+        return {
+          title: document.querySelector('#summary-title').textContent,
+          drift: document.querySelector('#i-drift').textContent,
+          map: document.querySelector('#map-status').textContent,
+          source: document.querySelector('#source-badge').textContent,
+          cards: [...document.querySelectorAll('#health .card')].map(card => ({
+            name: card.querySelector('.card-name').textContent,
+            level: card.querySelector('.card-level').textContent,
+            score: card.querySelector('.card-score').textContent,
+            reason: card.querySelector('.card-reason').textContent,
+          })), plannedPixels, driftPixels,
+        };
+      })()`);
+      fs.writeFileSync(path.join(out, 'live-state.json'), JSON.stringify(state, null, 2));
       await save("live-readonly");
       if (blockedMutations.length) throw new Error(`Blocked unexpected mutating request(s): ${blockedMutations.join(", ")}`);
       console.log("Live mode completed using localhost GETs only; no telemetry controls were clicked.");
