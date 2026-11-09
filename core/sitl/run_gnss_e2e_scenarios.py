@@ -21,6 +21,7 @@ import json
 import math
 import os
 import random
+import socket
 import subprocess
 import sys
 import tempfile
@@ -164,15 +165,49 @@ class RandomRouteSpoof:
 
 
 class Sitl:
-    def __init__(self, ardupilot, core_main, workdir, core_port, instance=0):
+    def __init__(self, ardupilot, core_main, workdir, core_port, instance=0,
+                 dashboard_serve=None, dashboard_port=14556, dashboard_http_port=8081, dashboard_url=None):
+        self.proc = self.core_proc = self.dashboard_proc = self.mav = None
+        self.logs = []
+        self.dashboard_url = dashboard_url or f"http://127.0.0.1:{dashboard_http_port}"
+        try:
+            self._start(ardupilot, core_main, workdir, core_port, instance,
+                        dashboard_serve, dashboard_port, dashboard_http_port, dashboard_url)
+        except BaseException:
+            self.close()
+            raise
+
+    def _launch(self, command, workdir, name):
+        output = open(workdir / f"{name}.log", "w")
+        self.logs.append(output)
+        return subprocess.Popen(command, cwd=workdir, stdout=output, stderr=subprocess.STDOUT)
+
+    def _start(self, ardupilot, core_main, workdir, core_port, instance,
+               dashboard_serve, dashboard_port, dashboard_http_port, dashboard_url):
+        # Refuse collisions instead of accidentally driving another running SITL.
+        ports = [(5760 + 10 * instance, socket.SOCK_STREAM), (core_port, socket.SOCK_DGRAM)]
+        if not dashboard_url:
+            ports += [(dashboard_port, socket.SOCK_DGRAM), (dashboard_http_port, socket.SOCK_STREAM)]
+        if len(set(ports)) != len(ports):
+            raise ScenarioFailed("SITL, core and dashboard must use distinct ports")
+        for port, kind in ports:
+            with socket.socket(socket.AF_INET, kind) as sock:
+                if kind == socket.SOCK_STREAM:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", port))
+                if kind == socket.SOCK_STREAM:
+                    sock.listen(1)
+        if not dashboard_url:
+            if dashboard_serve is None or not dashboard_serve.is_file():
+                raise ScenarioFailed("Build the dashboard bridge first: cd dashboard && go build -o ../core/build/dashboard-serve ./cmd/serve")
+            self.dashboard_proc = self._launch(
+                [str(dashboard_serve), "-addr", f"127.0.0.1:{dashboard_http_port}",
+                 "-mavlink", f"127.0.0.1:{dashboard_port}"], workdir, "dashboard")
         self.core_port = core_port
-        self.core_log = open(workdir / "core_main.log", "w")
-        self.core_proc = subprocess.Popen(
-            [str(core_main), str(core_port)], cwd=workdir, stdout=self.core_log, stderr=subprocess.STDOUT
-        )
+        self.core_proc = self._launch([str(core_main), str(core_port)], workdir, "core_main")
         time.sleep(1)  # let core_main bind before SITL's serial1 tries to reach it
 
-        self.proc = subprocess.Popen(
+        self.proc = self._launch(
             [
                 str(ardupilot / "build/sitl/bin/arducopter"),
                 "--model", "+",
@@ -182,13 +217,19 @@ class Sitl:
                 f"{ardupilot / 'Tools/autotest/default_params/copter.parm'},"
                 f"{Path(__file__).parent / 'autonomy_failover.parm'}",
                 f"--serial1=udpclient:127.0.0.1:{core_port}",
+                f"--serial2=udpclient:127.0.0.1:{dashboard_port}",
             ],
-            cwd=workdir,
-            stdout=open(workdir / "arducopter.log", "w"),
-            stderr=subprocess.STDOUT,
+            workdir, "arducopter",
         )
         self.mav = mavutil.mavlink_connection(f"tcp:127.0.0.1:{5760 + 10 * instance}", retries=60, dialect="ardupilotmega")
-        self.mav.wait_heartbeat(timeout=30)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            hb = self.mav.recv_match(type="HEARTBEAT", blocking=True, timeout=1)
+            if hb is not None and hb.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID:
+                self.mav.target_system, self.mav.target_component = hb.get_srcSystem(), hb.get_srcComponent()
+                break
+        else:
+            raise ScenarioFailed("no SITL autopilot heartbeat")
         self.mav.mav.request_data_stream_send(
             self.mav.target_system, self.mav.target_component, mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
         )
@@ -197,8 +238,10 @@ class Sitl:
             "armed": False,
             "rel_alt": 0.0,
             "true_pos": None,
+            "truth_at": 0.0,
             "heading_deg": 0.0,
-            "nav_trust": 1.0,
+            "nav_trust": None,
+            "nav_at": 0.0,
             "behavior": "NOMINAL",
             "behavior_log": [],  # (monotonic time, behavior) for each change
         }
@@ -227,6 +270,9 @@ class Sitl:
         """Reads telemetry for the given time, keeping self.status current."""
         deadline = time.monotonic() + seconds
         while True:
+            for name, proc in (("SITL", self.proc), ("core_main", self.core_proc), ("dashboard", self.dashboard_proc)):
+                if proc is not None and proc.poll() is not None:
+                    raise ScenarioFailed(f"{name} exited with status {proc.returncode}")
             msg = self.mav.recv_match(blocking=seconds > 0, timeout=0.1)
             if msg is not None:
                 self._note(msg)
@@ -236,6 +282,8 @@ class Sitl:
                 return
 
     def _note(self, msg):
+        if msg.get_srcSystem() != self.mav.target_system:
+            return
         kind = msg.get_type()
         if kind == "HEARTBEAT" and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID:
             self.status["mode"] = msg.custom_mode
@@ -245,8 +293,10 @@ class Sitl:
             self.status["heading_deg"] = msg.hdg / 100 if msg.hdg != 65535 else self.status["heading_deg"]
         elif kind == "SIMSTATE":
             self.status["true_pos"] = (msg.lat / 1e7, msg.lng / 1e7)
+            self.status["truth_at"] = time.monotonic()
         elif kind == "NAMED_VALUE_FLOAT" and msg.name == "TRUST_NAV":
             self.status["nav_trust"] = msg.value
+            self.status["nav_at"] = time.monotonic()
         elif kind == "STATUSTEXT":
             print(f"  [sitl] {msg.text}")
             if msg.text.startswith(AUTONOMY_PREFIX):
@@ -301,14 +351,28 @@ class Sitl:
         self.command(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, TAKEOFF_ALT_M)
         self.wait_for(lambda s: s["rel_alt"] > TAKEOFF_ALT_M - 1, 60, "takeoff altitude")
         self.pump(5)  # let it settle
+        self.wait_for(lambda s: s["true_pos"] is not None and s["nav_trust"] is not None,
+                      15, "real detector trust and simulator truth")
+        if self.status["behavior"] != "NOMINAL" or self.status["nav_trust"] < NAV_TRUST_DETECT_THRESHOLD:
+            raise ScenarioFailed(f"untrusted baseline before injection: {self.status}")
+        if any(behavior != "NOMINAL" for _, behavior in self.status["behavior_log"]):
+            raise ScenarioFailed("false alarm during unspoofed takeoff; see the core transition log")
 
     def close(self):
-        for proc, timeout in ((self.proc, 10), (self.core_proc, 10)):
-            proc.terminate()
+        if self.mav is not None:
+            self.mav.close()
+        for proc in (self.proc, self.core_proc, self.dashboard_proc):
+            if proc is None:
+                continue
+            if proc.poll() is None:
+                proc.terminate()
             try:
-                proc.wait(timeout=timeout)
+                proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
+        for output in self.logs:
+            output.close()
 
 
 def expect(condition, message):
@@ -345,6 +409,7 @@ def run_window(sitl, duration_s, step_fn, label):
     furthest = 0.0
     lowest_trust = sitl.status["nav_trust"]
     detect_time_s = None
+    dashboard_samples = []
     dt = 0.5
     began = time.monotonic()
     while (elapsed := time.monotonic() - began) < duration_s:
@@ -354,10 +419,21 @@ def run_window(sitl, duration_s, step_fn, label):
             if fake is not None:
                 sitl.set_gps_glitch(fake[0] - true_pos[0], fake[1] - true_pos[1])
         sitl.pump(dt)
+        if time.monotonic() - sitl.status["nav_at"] > 3:
+            raise ScenarioFailed("real detector TRUST_NAV stopped arriving")
+        if time.monotonic() - sitl.status["truth_at"] > 3:
+            raise ScenarioFailed("SITL truth position stopped arriving")
+        dashboard = dashboard_snapshot(sitl.dashboard_url)
+        if not dashboard["Connected"] or dashboard["Nav"]["AtMs"] == 0 or dashboard["NowMs"] - dashboard["Nav"]["AtMs"] > 3000:
+            raise ScenarioFailed("dashboard is not receiving live detector telemetry")
+        dashboard_samples.append({"elapsed_s": round(time.monotonic() - began, 2),
+                                  "nav_trust": dashboard["Nav"]["Value"],
+                                  "behavior": dashboard["Behavior"],
+                                  "estimate_from": dashboard["EstimateFrom"]})
         furthest = max(furthest, distance_m(home, sitl.status["true_pos"]))
         lowest_trust = min(lowest_trust, sitl.status["nav_trust"])
         if detect_time_s is None and sitl.status["nav_trust"] < NAV_TRUST_DETECT_THRESHOLD:
-            detect_time_s = elapsed
+            detect_time_s = time.monotonic() - began
 
     if step_fn is not None:
         sitl.set_gps_glitch(0.0, 0.0)
@@ -372,6 +448,12 @@ def run_window(sitl, duration_s, step_fn, label):
         "detect_time_s": round(detect_time_s, 1) if detect_time_s is not None else None,
         "behaviors_entered": [b for _, b in behaviors],
         "time_to_first_behavior_s": round(behaviors[0][0] - began, 1) if behaviors else None,
+        "dashboard": {
+            "lowest_nav_trust": round(min(s["nav_trust"] for s in dashboard_samples), 3),
+            "behaviors": sorted(set(s["behavior"] for s in dashboard_samples if s["behavior"])),
+            "estimate_sources": sorted(set(s["estimate_from"] for s in dashboard_samples)),
+            "samples": dashboard_samples,
+        },
     }
     detected = f"{result['detect_time_s']}s" if result["detect_time_s"] is not None else "never"
     print(
@@ -398,10 +480,13 @@ SCENARIOS = {
 
 def dashboard_snapshot(url):
     try:
-        with urllib.request.urlopen(f"{url.rstrip('/')}/api/status", timeout=3) as resp:
-            return json.loads(resp.read())
-    except Exception as err:  # noqa: BLE001 - this is best-effort, not a hard dependency
-        return {"error": str(err)}
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/telemetry", timeout=3) as resp:
+            for line in resp:
+                if line.startswith(b"data: "):
+                    return json.loads(line[6:])["Snapshot"]
+        raise ScenarioFailed("dashboard returned no telemetry")
+    except (OSError, ValueError, KeyError) as err:
+        raise ScenarioFailed(f"dashboard telemetry unavailable: {err}") from err
 
 
 def main():
@@ -412,6 +497,11 @@ def main():
         help="built core_main binary (default: core/build/core_main)",
     )
     parser.add_argument("--core-port", type=int, default=14555, help="UDP port core_main listens on")
+    parser.add_argument("--dashboard-serve", type=Path,
+                        default=Path(__file__).resolve().parent.parent / "build/dashboard-serve",
+                        help="built dashboard serve binary (started for each scenario)")
+    parser.add_argument("--dashboard-port", type=int, default=14556, help="dashboard MAVLink UDP port")
+    parser.add_argument("--dashboard-http-port", type=int, default=8081, help="dashboard HTTP port")
     parser.add_argument(
         "--instance", type=int, default=0,
         help="SITL instance; each one uses its own ports (5760 + 10*N), so a non-zero one can run beside run.sh",
@@ -419,13 +509,15 @@ def main():
     parser.add_argument("--duration", type=float, default=60.0, help="seconds per scenario")
     parser.add_argument("--seed", type=int, default=1, help="RNG seed for the random-route scenario, for repeatability")
     parser.add_argument("--log-dir", type=Path, help="keep logs here instead of a temp directory")
-    parser.add_argument("--dashboard-url", help="also record a GET /api/status snapshot from a running dashboard")
+    parser.add_argument("--dashboard-url", help="use an existing live bridge instead of starting one; it must listen on --dashboard-port")
     parser.add_argument("scenarios", nargs="*", choices=[*SCENARIOS, "all"], default=["all"])
     args = parser.parse_args()
+    if args.duration <= 0 or args.instance < 0:
+        parser.error("duration must be positive and instance non-negative")
 
     scenarios = list(SCENARIOS) if "all" in args.scenarios else args.scenarios
 
-    workdir = args.log_dir or Path(tempfile.mkdtemp(prefix="gnss_e2e_"))
+    workdir = args.log_dir.resolve() if args.log_dir else Path(tempfile.mkdtemp(prefix="gnss_e2e_"))
     workdir.mkdir(parents=True, exist_ok=True)
     print(f"logs in {workdir}")
 
@@ -440,7 +532,8 @@ def main():
             # rather than the clean one its own result implies.
             scenario_dir = workdir / name
             scenario_dir.mkdir(parents=True, exist_ok=True)
-            sitl = Sitl(args.ardupilot.resolve(), args.core_main.resolve(), scenario_dir, args.core_port, args.instance)
+            sitl = Sitl(args.ardupilot.resolve(), args.core_main.resolve(), scenario_dir, args.core_port, args.instance,
+                        args.dashboard_serve.resolve(), args.dashboard_port, args.dashboard_http_port, args.dashboard_url)
             try:
                 print(f"\n[{name}] taking off")
                 sitl.take_off()
@@ -448,14 +541,15 @@ def main():
                 result = SCENARIOS[name](sitl, rng, args.duration)
             finally:
                 sitl.close()
-            if args.dashboard_url:
-                result["dashboard_status"] = dashboard_snapshot(args.dashboard_url)
             results.append(result)
 
         print("\n=== summary ===")
         no_false_alarm = True
         for r in results:
-            print(f"{r['label']}: {json.dumps(r)}")
+            summary = dict(r)
+            if "dashboard" in summary:
+                summary["dashboard"] = {k: v for k, v in r["dashboard"].items() if k != "samples"}
+            print(f"{r['label']}: {json.dumps(summary)}")
             if r["label"].startswith("control") and (r["behaviors_entered"] or r["lowest_nav_trust"] < NAV_TRUST_DETECT_THRESHOLD):
                 no_false_alarm = False
         if any(r["label"].startswith("control") for r in results):
@@ -464,8 +558,8 @@ def main():
         results_path = workdir / "results.json"
         results_path.write_text(json.dumps(results, indent=2))
         print(f"\nfull results written to {results_path}")
-        return 0
-    except ScenarioFailed as err:
+        return 0 if no_false_alarm else 1
+    except (ScenarioFailed, OSError) as err:
         print(f"\nFAIL: {err}")
         return 1
 

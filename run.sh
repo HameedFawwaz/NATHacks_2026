@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_DIR="$(mktemp -d /tmp/trust-issues-run.XXXXXX)"
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/trust-issues-run.XXXXXX")"
 echo "run directory (SITL state, logs): $RUN_DIR"
 
 if [[ -f "$ARDUPILOT_VENV/bin/activate" ]]; then
@@ -68,6 +68,7 @@ CORE_PID=""
 DASHBOARD_PID=""
 
 cleanup() {
+  trap - EXIT INT TERM
   echo
   echo "shutting down..."
   [[ -n "$DASHBOARD_PID" ]] && kill "$DASHBOARD_PID" 2>/dev/null || true
@@ -75,21 +76,40 @@ cleanup() {
   if [[ -n "$SITL_PGID" ]]; then
     kill -TERM "-$SITL_PGID" 2>/dev/null || true
   fi
-  # Fallback net, in case anything detached from the group above (sim_vehicle.py
-  # forks arducopter/MAVProxy/an xterm, and not all of them necessarily stay in it).
-  pkill -f "arducopter.*-I${INSTANCE}( |$)" 2>/dev/null || true
-  pkill -f "mavproxy\.py.*${DASH_PORT}.*${CONSOLE_PORT}" 2>/dev/null || true
+  # Only our own PIDs/process group; never kill an unrelated simulator by name.
   wait 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- Build ---
 echo "building core..."
 cmake -B "$REPO_ROOT/core/build" -S "$REPO_ROOT/core" >/dev/null
-cmake --build "$REPO_ROOT/core/build" -j"$(nproc)" >/dev/null
+cmake --build "$REPO_ROOT/core/build" --parallel "${BUILD_JOBS:-4}" >/dev/null
 
 echo "building dashboard..."
 ( cd "$REPO_ROOT/dashboard" && make build >/dev/null )
+( cd "$REPO_ROOT/dashboard" && go build -o "$RUN_DIR/dashboard-serve" ./cmd/serve )
+
+# Refuse collisions before starting children, rather than joining another simulator.
+python3 - "$INSTANCE" "$CORE_PORT" "$DASH_PORT" "$CONSOLE_PORT" "$WEB_ADDR" <<'PY'
+import socket, sys
+instance, core, dash, console = map(int, sys.argv[1:5])
+host, http = sys.argv[5].rsplit(":", 1)
+ports = [("127.0.0.1", 5760 + 10 * instance, socket.SOCK_STREAM),
+         ("127.0.0.1", core, socket.SOCK_DGRAM), ("127.0.0.1", dash, socket.SOCK_DGRAM),
+         ("127.0.0.1", console, socket.SOCK_DGRAM), (host or "0.0.0.0", int(http), socket.SOCK_STREAM)]
+if len({(p, kind) for _, p, kind in ports}) != len(ports):
+    sys.exit("Each component needs a distinct port")
+for host, port, kind in ports:
+    with socket.socket(socket.AF_INET, kind) as s:
+        if kind == socket.SOCK_STREAM:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        if kind == socket.SOCK_STREAM:
+            s.listen(1)
+PY
 
 # --- core: the real GNSS detector + autonomy. Started first so its port is bound
 # before SITL's SERIAL1 starts sending to it. ---
@@ -109,7 +129,9 @@ sleep 1
 # The dashboard and this script's console each get a MAVProxy --out, so neither
 # can collide with the other over a UDP port. ---
 echo "starting SITL (instance $INSTANCE)..."
-( cd "$RUN_DIR" && exec setsid sim_vehicle.py -v ArduCopter -I"$INSTANCE" --no-rebuild --no-extra-ports \
+( cd "$RUN_DIR" && exec python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    sim_vehicle.py -v ArduCopter -I"$INSTANCE" --no-rebuild --no-extra-ports \
+    --add-param-file "$REPO_ROOT/core/sitl/autonomy_failover.parm" \
     -A "--serial1=udpclient:127.0.0.1:$CORE_PORT" \
     --out "udp:127.0.0.1:$DASH_PORT" \
     --out "udp:127.0.0.1:$CONSOLE_PORT" \
@@ -129,7 +151,7 @@ done
 
 # --- dashboard, live mode ---
 echo "starting dashboard on $WEB_ADDR, live mode..."
-( cd "$REPO_ROOT/dashboard" && exec go run ./cmd/serve -addr "$WEB_ADDR" -mavlink "127.0.0.1:$DASH_PORT" ) \
+( cd "$REPO_ROOT/dashboard" && exec "$RUN_DIR/dashboard-serve" -addr "$WEB_ADDR" -mavlink "127.0.0.1:$DASH_PORT" ) \
     > "$RUN_DIR/dashboard.log" 2>&1 &
 DASHBOARD_PID=$!
 
