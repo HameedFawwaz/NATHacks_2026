@@ -150,10 +150,15 @@ or browser-rendering validation is claimed.
 `include/core/autonomy/autonomy.h`. Each transition goes to stderr, to a STATUSTEXT, and
 to a CSV log.
 
-`core_main` now calls the real decision loop using the nav detector's measured trust.
-The link and hardware producers are still separate work. For isolated scenarios,
-`tools/autonomy_runner` reads scores from stdin (`nav 0.1`, `link 0`, `hw 1`,
-`crypto 1`) and runs the same decision loop.
+`core_main` now calls the real decision loop using the nav detector's and the link
+monitor's measured trust (see [End-to-end link scenarios](#end-to-end-link-scenarios)).
+The hardware producer is still separate work. While the vehicle's own heartbeat is more
+than 3 s old, autonomy holds its decisions: armed state and mode are unknown then, every
+producer fed by the autopilot goes quiet with it, and nothing commanded could arrive. After
+the heartbeat returns, autonomy waits another 3 s for producers to catch up; a persistent
+attack is acted on after that delay. For
+isolated scenarios, `tools/autonomy_runner` reads scores from stdin (`nav 0.1`, `link 0`,
+`hw 1`, `crypto 1`) and runs the same decision loop.
 
 `sitl/run_autonomy_scenario.py` runs this end to end against ArduPilot SITL. It flies a
 copter, injects an attack, and checks the vehicle's response:
@@ -261,8 +266,11 @@ Limits:
   never reported.
 - **No backup link.** The issue allows switching to one, but the hardware has none, so the
   response is left to autonomy.
-- **`core_main` doesn't run autonomy yet**, so in SITL the vehicle doesn't act on the
-  verdict. `tools/autonomy_runner` is still the way to exercise autonomy.
+- **An autopilot outage isn't blamed on the operator.** While the autopilot is silent the
+  link is `UNKNOWN`. When it's back, an operator heard before is judged at once, with its
+  silence timed from the autopilot's return: one still there stays trusted, and one gone
+  is `LOST` 5 s later. Operator heartbeats missed in the 2 s before the autopilot is
+  treated as late still count as loss, so trust dips to about 0.8, still trusted.
 
 ### Scripted jamming in SITL
 
@@ -277,7 +285,8 @@ python3 sitl/run_link_scenario.py --ardupilot /path/to/ardupilot --core-main bui
 It checks that a steady link stays `NOMINAL`, that 2 s dropouts never reach `LOST` or
 untrusted, that 30% loss is `DEGRADED`, that jamming is `JAMMED` and not `LOST`, that a
 clean loss is `LOST` and not `JAMMED`, and that each recovers without bouncing. The vehicle
-stays on the ground. Needs `pymavlink`.
+stays on the ground. Needs `pymavlink`. `--instance`, `--core-port`, `--proxy-fc-port` and
+`--proxy-gcs-port` move it off instance 0's ports, so it can run beside another simulator.
 
 To try it by hand with MAVProxy as the operator, start the proxy and type a profile
 (`nominal`, `degraded`, `jam`, `lost`) to switch:
@@ -289,6 +298,61 @@ arducopter ... --defaults <copter.parm>,sitl/link_jam.parm \
 ./build/core_main 14551
 mavproxy.py --master=udpout:127.0.0.1:14562
 ```
+
+## End-to-end link scenarios
+
+`sitl/run_link_e2e_scenarios.py` flies ArduCopter SITL with `core_main` (the real link
+monitor, nav detector and autonomy together), the live dashboard bridge, and the operator's
+link through `link_jam_proxy`. Nothing types a trust score: the proxy drops the operator's
+real heartbeats and reports RSSI and noise as a SiK radio would, `core_main` judges the
+link from what ArduPilot forwards, and autonomy commands the vehicle. ArduPilot's own GCS
+failsafe is off (`sitl/link_e2e.parm`), so any hold or return comes from core. Each
+scenario takes off on a fresh SITL, flies 60 m out at 20 m from a separate link (sysid
+200, like a mission), then attacks the operator's link:
+
+| Scenario | Injected | Checked |
+|---|---|---|
+| `jam` | noise up, RSSI high, packets gone over 8 s | `JAMMED` (never `LOST`), `BRAKE`, `RTL` after the 30 s hold, lands at home |
+| `lost` | signal gone over 2 s | `LOST` (never `JAMMED`), then the same hold and return |
+| `dropouts` | 4 × 2 s full dropouts | never `LOST`/`JAMMED`, trust never below 0.4, no autonomy action, still `GUIDED` |
+| `recover` | jamming until autonomy holds, then the link returns | back to `NOMINAL` before the hold runs out, no return, mode left in `BRAKE` for the operator |
+| `companion_outage` | core's own link to the autopilot cut for 8 s, operator fine | no autonomy action at all, still `GUIDED` |
+
+Every scenario also checks that navigation stayed trusted (no `GNSS_FAILOVER` or
+`SAFE_LAND`) and that no ArduPilot failsafe fired; attack scenarios check the
+`autonomy_transitions.csv` rows and that the dashboard showed the measured `TRUST_LNK` and
+the behaviors. `companion_outage` puts `core_main` behind a pausable UDP relay.
+
+```sh
+cmake -S core -B core/build && cmake --build core/build --parallel 4
+(cd dashboard && go build -o ../core/build/dashboard-serve ./cmd/serve)
+/path/to/venv/bin/python core/sitl/run_link_e2e_scenarios.py --ardupilot /path/to/ardupilot \
+  --instance 14 --core-port 15065 --proxy-fc-port 15066 --proxy-gcs-port 15067 \
+  --dashboard-port 15068 --dashboard-http-port 18065 --relay-port 15069 \
+  --log-dir core/build/link-e2e all
+```
+
+It refuses to start on ports already in use. Results, events and transition rows go to
+`results.json`, logs to one directory per scenario.
+
+### Results (2026-11-09, ArduCopter 4.5 SITL, macOS arm64)
+
+Seconds after injection; each line is one run.
+
+| Scenario | Link verdict | `LINK_HOLD` | `BRAKE` confirmed | `LINK_RETURN` | `RTL` confirmed | Landed, from home |
+|---|---|---|---|---|---|---|
+| `jam` | `JAMMED` 7.0 / 8.4 | 7.2 / 8.6 | 7.5 / 8.8 | 37.0 / 38.3 | 37.2 / 38.5 | 86.8 / 88.6 s, 0.0 m |
+| `lost` | `LOST` 6.1 | 6.3 | 6.6 | 35.8 | 36.0 | 85.6 s, 0.0 m |
+
+- In `BRAKE` the vehicle held at 0.02 m/s and moved under 0.1 m before the return; every
+  hold lasted 29.5 to 29.8 s, then `RTL` brought it back 60 m and landed it at home.
+- `dropouts`: `NOMINAL -> DEGRADED -> NOMINAL`, minimum `TRUST_LNK` 0.45, no autonomy
+  transition, still `GUIDED`.
+- `recover`: hold at 11.5 s, link restored at 11.7 s, autonomy `NOMINAL` 13.0 s later
+  (trust climbs at 0.1/s to 0.7, then autonomy's 5 s recovery hold); no return, mode left
+  in `BRAKE`.
+- `companion_outage`: see the final run's `results.json` for the outcome; an earlier run
+  before the reconnect and settling fixes incorrectly entered `GNSS_FAILOVER` on return.
 
 ## Testing against ArduPilot SITL
 

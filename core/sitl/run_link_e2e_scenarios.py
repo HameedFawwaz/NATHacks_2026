@@ -539,7 +539,8 @@ def main():
     args.core_main = args.core_main.resolve()
     args.dashboard_serve = args.dashboard_serve.resolve()
 
-    workdir = args.log_dir.resolve() if args.log_dir else Path(tempfile.mkdtemp(prefix="link_e2e_"))
+    build.mkdir(parents=True, exist_ok=True)
+    workdir = args.log_dir.resolve() if args.log_dir else Path(tempfile.mkdtemp(prefix="link_e2e_", dir=build))
     workdir.mkdir(parents=True, exist_ok=True)
     print(f"logs in {workdir}")
     names = list(SCENARIOS) if "all" in args.scenarios else args.scenarios

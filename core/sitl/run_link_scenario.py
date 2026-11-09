@@ -239,10 +239,14 @@ def main():
     parser.add_argument("--proxy-fc-port", type=int, default=PROXY_FC_PORT)
     parser.add_argument("--proxy-gcs-port", type=int, default=PROXY_GCS_PORT)
     args = parser.parse_args()
+    args.ardupilot = args.ardupilot.resolve()
+    args.core_main = args.core_main.resolve()
     check_ports([(5760 + 10 * args.instance, socket.SOCK_STREAM), (args.core_port, socket.SOCK_DGRAM),
                  (args.proxy_fc_port, socket.SOCK_DGRAM), (args.proxy_gcs_port, socket.SOCK_DGRAM)])
 
-    work = Path(tempfile.mkdtemp(prefix="link_scenario_"))
+    build_dir = Path(__file__).resolve().parent.parent / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="link_scenario_", dir=build_dir))
     here = Path(__file__).parent
     procs = []
     proxy = LinkJamProxy(args.proxy_fc_port, args.proxy_gcs_port, seed=2).start()

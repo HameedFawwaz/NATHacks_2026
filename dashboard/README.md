@@ -69,8 +69,10 @@ Each button replaces whichever fault was active. The bridge waits for the autopi
 echo every parameter back, and sends older ArduPilot releases' names
 (`SIM_GPS_GLITCH_X`, `SIM_GPS_JAM`) alongside the current ones. A real autopilot has
 no `SIM_*` parameters, so injection fails there and changes nothing. There's no link
-jam button: core has no link detector yet (`core/link/` is still empty), so nothing
-would react to one.
+jam button: jamming the operator's link means sitting in its radio path, which SITL
+parameters can't do. `core/sitl/link_jam_proxy.py` does that, and
+`core/sitl/run_link_e2e_scenarios.py` uses it to fly the jam, loss and dropout
+scenarios against core's link monitor and autonomy (see `core/README.md`).
 
 If an injection is unconfirmed, the snapshot reports `unknown`: some parameters may
 have changed even though the operation failed. The state also becomes unknown after
