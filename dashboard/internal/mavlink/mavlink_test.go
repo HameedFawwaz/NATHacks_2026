@@ -121,8 +121,9 @@ func TestPackRequestMessage(t *testing.T) {
 
 func TestDecodeHomePosition(t *testing.T) {
 	pl := make([]byte, 60)
-	binary.LittleEndian.PutUint32(pl, uint32(int32(-353632620)))
-	binary.LittleEndian.PutUint32(pl[4:], uint32(int32(1491652370)))
+	latE7, lonE7 := int32(-353632620), int32(1491652370)
+	binary.LittleEndian.PutUint32(pl, uint32(latE7))
+	binary.LittleEndian.PutUint32(pl[4:], uint32(lonE7))
 	f := Parse(Encode(0, 1, 1, MsgHomePosition, pl))
 	if len(f) != 1 {
 		t.Fatal("home position frame not parsed")

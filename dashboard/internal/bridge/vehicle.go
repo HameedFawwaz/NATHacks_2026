@@ -47,16 +47,16 @@ type vehicleState struct {
 
 	// The EKF's position, kept apart from core's estimate so snapshot can pick
 	// whichever is current.
-	ekf       model.LatLon
-	ekfKnown  bool
-	home      model.LatLon
-	homeKnown bool
-	estN      float64 // core's estimate, metres north of home
-	estE      float64 // and east
-	estNAt    int64   // when each last arrived; 0 means never
-	estEAt    int64
-	events        []model.Event
-	nextEventSeq  int
+	ekf          model.LatLon
+	ekfKnown     bool
+	home         model.LatLon
+	homeKnown    bool
+	estN         float64 // core's estimate, metres north of home
+	estE         float64 // and east
+	estNAt       int64   // when each last arrived; 0 means never
+	estEAt       int64
+	events       []model.Event
+	nextEventSeq int
 }
 
 // isVehicle tells the autopilot apart from ground stations and companion
