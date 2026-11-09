@@ -173,7 +173,9 @@ class Sitl:
                 str(ardupilot / "build/sitl/bin/arducopter"),
                 "--model", "+",
                 "--wipe",
-                "--defaults", str(ardupilot / "Tools/autotest/default_params/copter.parm"),
+                "--defaults",
+                f"{ardupilot / 'Tools/autotest/default_params/copter.parm'},"
+                f"{Path(__file__).parent / 'autonomy_failover.parm'}",
                 f"--serial1=udpclient:127.0.0.1:{core_port}",
             ],
             cwd=workdir,
@@ -195,6 +197,25 @@ class Sitl:
             "behavior": "NOMINAL",
             "behavior_log": [],  # (monotonic time, behavior) for each change
         }
+        # ArduCopter's default per-serial-port stream rates are all zero (see
+        # AP_MAV_DEFAULT_STREAM_RATE_* in GCS_MAVLink_Parameters.cpp): unlike the
+        # primary link above, which just asked for its own streams, SERIAL1 -
+        # core_main's own link - sends nothing but HEARTBEAT until something sets
+        # its rates. A real companion-computer link would have these configured
+        # already; here that's our job, standing in for that one-time setup.
+        self._set_stream_rates(instance=1, rate_hz=10)
+
+    def _set_stream_rates(self, instance, rate_hz):
+        """Sets every SRn_* stream-rate group for serial port n, over the primary
+        link (these are plain vehicle parameters, not per-channel state, so
+        setting them here takes effect on serial1 too)."""
+        for group in ("RAW_SENS", "EXT_STAT", "RC_CHAN", "RAW_CTRL", "POSITION", "EXTRA1", "EXTRA2", "EXTRA3", "PARAMS"):
+            name = f"SR{instance}_{group}"
+            self.mav.mav.param_set_send(
+                self.mav.target_system, self.mav.target_component, name.encode(), rate_hz,
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+        self.pump(2)  # let the param sets land before anything depends on their streams
 
     def pump(self, seconds=0.0):
         """Reads telemetry for the given time, keeping self.status current."""
@@ -235,18 +256,6 @@ class Sitl:
             if condition(self.status):
                 return
         raise ScenarioFailed(f"timed out waiting for {what}; last status {self.status}")
-
-    def wait_for_soft(self, condition, timeout, what):
-        """Like wait_for, but reports rather than fails when the condition never
-        holds - used between scenarios, where a slow recovery is informative, not
-        a reason to abandon the remaining scenarios."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            self.pump(0.2)
-            if condition(self.status):
-                return True
-        print(f"  note: {what} didn't happen within {timeout}s; continuing anyway")
-        return False
 
     def command(self, command, *params):
         params = list(params) + [0] * (7 - len(params))
@@ -377,22 +386,28 @@ def main():
     workdir.mkdir(parents=True, exist_ok=True)
     print(f"logs in {workdir}")
 
-    sitl = Sitl(args.ardupilot.resolve(), args.core_main.resolve(), workdir, args.core_port)
     results = []
     try:
-        print("taking off")
-        sitl.take_off()
-
         for name in scenarios:
-            rng = random.Random(args.seed)
-            result = SCENARIOS[name](sitl, rng, args.duration)
+            # Each scenario gets its own fresh flight: once autonomy fails
+            # over away from GPS it deliberately doesn't rush back (flapping
+            # back onto a source that might still be spoofed would defeat the
+            # point), so a scenario chained right after one that triggered
+            # failover would start from a contaminated, non-NOMINAL baseline
+            # rather than the clean one its own result implies.
+            scenario_dir = workdir / name
+            scenario_dir.mkdir(parents=True, exist_ok=True)
+            sitl = Sitl(args.ardupilot.resolve(), args.core_main.resolve(), scenario_dir, args.core_port)
+            try:
+                print(f"\n[{name}] taking off")
+                sitl.take_off()
+                rng = random.Random(args.seed)
+                result = SCENARIOS[name](sitl, rng, args.duration)
+            finally:
+                sitl.close()
             if args.dashboard_url:
                 result["dashboard_status"] = dashboard_snapshot(args.dashboard_url)
             results.append(result)
-            # Give trust a chance to recover to NOMINAL before the next scenario,
-            # so each one starts from a clean baseline. Not recovering in time is
-            # itself worth recording, not a reason to abandon the remaining runs.
-            sitl.wait_for_soft(lambda s: s["nav_trust"] > 0.9, 30, "trust recovering to NOMINAL")
 
         print("\n=== summary ===")
         no_false_alarm = True
@@ -410,8 +425,6 @@ def main():
     except ScenarioFailed as err:
         print(f"\nFAIL: {err}")
         return 1
-    finally:
-        sitl.close()
 
 
 if __name__ == "__main__":
