@@ -60,6 +60,8 @@ type Snapshot struct {
 
 	Overall, Nav, Link, IMU, Motors, Battery Reading
 
+	Signing LinkSecurity
+
 	// Hardware is core's combined TRUST_HW score. It can trigger a landing, so it
 	// has a row of its own once anything reports it.
 	Hardware Reading
@@ -73,6 +75,17 @@ func (s Snapshot) Drift() (meters float64, show bool) {
 	}
 	meters = DistanceM(s.Reported, s.Estimated)
 	return meters, meters >= DriftThresholdM
+}
+
+// LinkSecurity is what the dashboard's own end of a signed link has dropped.
+// The counts only rise when something without the key sends to the dashboard, or
+// replays what it has sent, so a rising count is evidence of an attack on the link.
+// It doesn't include what the drone dropped.
+type LinkSecurity struct {
+	Enabled          bool // the dashboard is signing and verifying
+	RejectedUnsigned uint32
+	RejectedBadSig   uint32
+	RejectedReplay   uint32
 }
 
 // Event is one entry in the operator's event log. Seq increases with each event,

@@ -67,6 +67,27 @@ Things to know when reading the live view:
   happened shows "hasn't reported an autonomy state yet" until the next.
 - **GNSS and link stay "No data" until core is running** and publishing those scores.
 
+## Signed link
+
+If the autopilot requires MAVLink 2 signing (see "Link signing" in `core/README.md`), the
+dashboard needs the same key or the autopilot will ignore it and mission upload will fail:
+
+```sh
+core/build/tools/signing_keygen signing.key          # or: --from-passphrase, for MAVProxy
+go run ./cmd/serve -mavlink 127.0.0.1:14552 -signing-key signing.key
+```
+
+The key file is `signing_keygen`'s: 64 hex characters. With `-signing-key` the dashboard signs
+everything it sends and drops everything it receives that is unsigned, signed with another
+key, tampered with or replayed, so none of it is displayed. If the key can't be loaded the
+dashboard exits instead of falling back to an unsigned link. Without the flag nothing is
+signed or checked, as before. Signing authenticates but doesn't encrypt.
+
+`Snapshot.Signing` counts what the dashboard dropped (`RejectedUnsigned`, `RejectedBadSig`,
+`RejectedReplay`). A rising count means something is sending to the link without the key, or
+replaying frames. It doesn't include what the drone dropped, which core counts but doesn't
+publish over MAVLink yet.
+
 ## Simulation
 
 `internal/sim` generates telemetry in the browser, and the buttons under "Demo: inject
