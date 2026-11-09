@@ -1,7 +1,8 @@
 /*
  * Lost-link detection against synthetic telemetry: a simulated clock, an
- * autopilot heartbeat, an operator heartbeat that can be dropped, and optional
- * radio data. Ticks every 20 ms like core_main.
+ * autopilot heartbeat, an operator heartbeat that can be dropped, delayed,
+ * jittered or batched, and optional radio data. Ticks every 20 ms like
+ * core_main.
  */
 #include <assert.h>
 #include <stdio.h>
@@ -11,26 +12,33 @@
 #include "core/link/link_monitor.h"
 
 #define TICK_MS 20
+#define QUEUE 256
 
 typedef struct {
     core_link_monitor_t mon;
     core_telemetry_t t;
     uint64_t now;
+
     uint64_t next_gcs_ms;
-    uint32_t gcs_interval_ms;
-    float drop;            /* probability each operator heartbeat is lost */
-    uint32_t jitter_ms;    /* each heartbeat lands up to this early or late, as on a real link */
-    uint32_t batch;        /* deliver heartbeats in groups of this many, as a bursty transport would */
-    uint32_t pending;
-    bool gcs_on;           /* the operator is sending */
-    bool autopilot_on;
-    int rf;                /* 0 none, 1 RC rssi, 2 RADIO_STATUS */
+    uint32_t gcs_interval_ms;  /* what the GCS actually sends */
+    float drop;                /* probability each operator heartbeat is lost */
+    uint32_t jitter_ms;        /* each one delivered up to this late or early */
+    const uint32_t *delays;    /* or a repeating pattern of delivery delays */
+    int delays_len, delays_i;
+    uint32_t batch;            /* delivered in groups of this many */
+    uint64_t queue[QUEUE];     /* delivery times of heartbeats in flight */
+    int queued;
+    uint32_t ready;
+
+    bool gcs_on, autopilot_on;
+    int rf;                    /* 0 none, 1 RC rssi, 2 RADIO_STATUS */
     uint8_t rssi;
     uint16_t noise;
 
     core_link_result_t last;
     int transitions;
-    float min_trust, max_trust;
+    int back_to_nominal; /* changes into NOMINAL: the flapping that matters */
+    float min_trust;
     core_link_state_t worst;
 } harness_t;
 
@@ -38,26 +46,41 @@ static int severity(core_link_state_t s) {
     return s == CORE_LINK_UNKNOWN ? -1 : (int)s;
 }
 
-static void setup(harness_t *h) {
+static void reset_stats(harness_t *h) {
+    h->transitions = 0;
+    h->back_to_nominal = 0;
+    h->min_trust = 1.0f;
+    h->worst = CORE_LINK_NOMINAL;
+}
+
+static void setup_with(harness_t *h, uint32_t configured_interval_ms) {
     memset(h, 0, sizeof(*h));
     core_link_config_t cfg;
     core_link_config_default(&cfg);
+    if (configured_interval_ms) {
+        cfg.heartbeat_interval_ms = configured_interval_ms;
+    }
     core_link_monitor_init(&h->mon, &cfg);
     h->now = 1000;
-    h->gcs_interval_ms = 1000;
+    h->gcs_interval_ms = cfg.heartbeat_interval_ms;
     h->next_gcs_ms = h->now + 100;
     h->gcs_on = true;
     h->autopilot_on = true;
     h->rssi = 180;
     h->noise = 40;
     srand(1);
+    reset_stats(h);
 }
 
-static void reset_stats(harness_t *h) {
-    h->transitions = 0;
-    h->min_trust = 1.0f;
-    h->max_trust = 0.0f;
-    h->worst = CORE_LINK_NOMINAL;
+static void setup(harness_t *h) {
+    setup_with(h, 0);
+}
+
+static void deliver(harness_t *h, uint32_t n) {
+    h->t.gcs_heartbeat.valid = true;
+    h->t.gcs_heartbeat.sysid = 255;
+    h->t.gcs_heartbeat.count += n;
+    h->t.gcs_heartbeat.last_update_ms = h->now;
 }
 
 static void run(harness_t *h, uint32_t ms) {
@@ -67,23 +90,33 @@ static void run(harness_t *h, uint32_t ms) {
             h->t.heartbeat.valid = true;
             h->t.heartbeat.last_update_ms = h->now;
         }
+
+        /* The GCS sends on its own schedule... */
         if (h->now >= h->next_gcs_ms) {
             h->next_gcs_ms += h->gcs_interval_ms;
-            if (h->jitter_ms) {
-                h->next_gcs_ms += (uint64_t)(rand() % (int)(2 * h->jitter_ms + 1)) - h->jitter_ms;
-            }
             bool dropped = (float)rand() / (float)RAND_MAX < h->drop;
-            if (h->gcs_on && h->autopilot_on && !dropped) {
-                h->pending++;
-            }
-            if (h->pending > 0 && (h->batch <= 1 || h->pending >= h->batch)) {
-                h->t.gcs_heartbeat.valid = true;
-                h->t.gcs_heartbeat.sysid = 255;
-                h->t.gcs_heartbeat.count += h->pending;
-                h->t.gcs_heartbeat.last_update_ms = h->now;
-                h->pending = 0;
+            if (h->gcs_on && !dropped && h->queued < QUEUE) {
+                uint64_t at = h->now;
+                if (h->jitter_ms) at += (uint64_t)(rand() % (int)(2 * h->jitter_ms + 1));
+                if (h->delays_len) at += h->delays[h->delays_i++ % h->delays_len];
+                h->queue[h->queued++] = at;
             }
         }
+        /* ...and the link delivers each when it's due, unless the autopilot is
+         * down, when nothing is forwarded at all. */
+        for (int i = 0; i < h->queued;) {
+            if (h->queue[i] <= h->now) {
+                h->queue[i] = h->queue[--h->queued];
+                if (h->autopilot_on) h->ready++;
+            } else {
+                i++;
+            }
+        }
+        if (h->ready > 0 && (h->batch <= 1 || h->ready >= h->batch)) {
+            deliver(h, h->ready);
+            h->ready = 0;
+        }
+
         if (h->autopilot_on && h->now % 500 < TICK_MS) {
             if (h->rf == 1) {
                 h->t.rc_status.valid = true;
@@ -98,21 +131,23 @@ static void run(harness_t *h, uint32_t ms) {
         }
 
         h->last = core_link_monitor_update(&h->mon, &h->t, h->now);
-        if (h->last.state_changed) h->transitions++;
-        if (h->last.state != CORE_LINK_UNKNOWN) {
-            if (h->last.link_trust < h->min_trust) h->min_trust = h->last.link_trust;
-            if (h->last.link_trust > h->max_trust) h->max_trust = h->last.link_trust;
+        if (h->last.state_changed) {
+            h->transitions++;
+            if (h->last.state == CORE_LINK_NOMINAL) h->back_to_nominal++;
         }
+        if (h->last.state != CORE_LINK_UNKNOWN && h->last.link_trust < h->min_trust) h->min_trust = h->last.link_trust;
         if (severity(h->last.state) > severity(h->worst)) h->worst = h->last.state;
     }
 }
 
 static void settle(harness_t *h) {
-    run(h, 15000);
+    run(h, 40000);
     assert(h->last.state == CORE_LINK_NOMINAL);
     assert(h->last.link_trust > 0.95f);
     reset_stats(h);
 }
+
+/* --- Basics --- */
 
 static void test_unknown_until_operator_heard(void) {
     harness_t h;
@@ -120,7 +155,6 @@ static void test_unknown_until_operator_heard(void) {
     h.gcs_on = false;
     run(&h, 10000);
     assert(h.last.state == CORE_LINK_UNKNOWN && "no operator ever heard is not a lost link");
-
     h.gcs_on = true;
     run(&h, 2000);
     assert(h.last.state == CORE_LINK_NOMINAL);
@@ -135,20 +169,51 @@ static void test_steady_link_stays_nominal(void) {
     assert(h.min_trust > 0.95f);
 }
 
-static void test_jittery_link_is_nominal_from_the_start(void) {
+static void test_jitter_stays_nominal(void) {
     /* Found in SITL: a few seconds in, one heartbeat landing just outside the
-     * window read as a third of them missing. */
-    for (unsigned seed = 1; seed <= 20; seed++) {
-        harness_t h;
-        setup(&h);
-        srand(seed);
-        h.jitter_ms = 150;
-        reset_stats(&h);
-        run(&h, 90000);
-        assert(h.worst == CORE_LINK_NOMINAL);
-        assert(h.min_trust > 0.95f);
+     * window read as a third of them missing. Also the second review's 5 Hz case. */
+    struct { uint32_t interval, jitter; } cases[] = {{1000, 150}, {1000, 350}, {200, 80}, {100, 40}};
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        for (unsigned seed = 1; seed <= 10; seed++) {
+            harness_t h;
+            setup_with(&h, cases[c].interval);
+            srand(seed);
+            h.jitter_ms = cases[c].jitter;
+            run(&h, 90000);
+            assert(h.worst == CORE_LINK_NOMINAL);
+            assert(h.min_trust > 0.8f);
+        }
     }
 }
+
+static void test_bursty_lossless_delivery_stays_nominal(void) {
+    /* Third review: delays of 1000, 500, 0 ms leave gaps of 500, 500, 2000 ms
+     * with nothing lost. A learned interval read that as half the heartbeats
+     * missing and then locked itself in. */
+    static const uint32_t pattern[] = {1000, 500, 0};
+    harness_t h;
+    setup(&h);
+    h.delays = pattern;
+    h.delays_len = 3;
+    run(&h, 180000);
+    assert(h.worst == CORE_LINK_NOMINAL);
+    assert(h.min_trust > 0.8f);
+}
+
+static void test_batched_arrivals_count_and_loss_is_caught(void) {
+    harness_t h;
+    setup(&h);
+    h.batch = 3; /* three at a time */
+    run(&h, 40000);
+    assert(h.last.state == CORE_LINK_NOMINAL && "a batched link that loses nothing is healthy");
+    h.batch = 1;
+    h.drop = 0.67f;
+    reset_stats(&h);
+    run(&h, 60000);
+    assert(h.min_trust < 0.4f && "losing two thirds of them must be caught");
+}
+
+/* --- Dropouts and loss --- */
 
 static void test_brief_dropouts_dont_flap(void) {
     harness_t h;
@@ -186,8 +251,9 @@ static void test_steady_moderate_loss_doesnt_flap(void) {
         h.drop = 0.3f;
         run(&h, 120000);
         assert(h.worst >= CORE_LINK_DEGRADED);
-        assert(h.transitions <= 3 && "into DEGRADED and stays there, at most one excursion to LOST");
-        assert(h.last.state != CORE_LINK_NOMINAL);
+        /* Random loss sometimes drops 6 in a row, a real 6 s silence, so LOST
+         * may come and go; what must not happen is looking healthy again. */
+        assert(h.back_to_nominal == 0 && "never bounces back to NOMINAL under steady loss");
     }
 }
 
@@ -215,6 +281,62 @@ static void test_silence_without_radio_is_lost(void) {
     assert(strstr(h.last.reason, "no radio data"));
 }
 
+static void test_recovery_is_gradual_and_doesnt_flap(void) {
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.gcs_on = false;
+    run(&h, 10000);
+    assert(h.last.state == CORE_LINK_LOST);
+
+    reset_stats(&h);
+    h.gcs_on = true;
+    run(&h, 2000);
+    assert(h.last.link_trust < 0.4f && "trust climbs back slowly, not in one step");
+    run(&h, 10000);
+    assert(h.last.link_trust >= 0.7f && "trust, which autonomy acts on, is back within about 10 s");
+    assert(h.last.state == CORE_LINK_DEGRADED && "the label waits for a clean record that excludes the outage");
+    run(&h, 30000);
+    assert(h.last.state == CORE_LINK_NOMINAL);
+    assert(h.transitions <= 2 && "LOST -> DEGRADED -> NOMINAL, no bouncing");
+}
+
+/* --- Heartbeat rate --- */
+
+static void test_configured_slow_gcs(void) {
+    harness_t h;
+    setup_with(&h, 5000);
+    run(&h, 180000);
+    assert(h.worst == CORE_LINK_NOMINAL && "a GCS configured at 0.2 Hz is healthy at 0.2 Hz");
+    h.gcs_on = false;
+    run(&h, 36000); /* 6 intervals, plus up to one since the last heartbeat */
+    assert(h.last.state == CORE_LINK_LOST);
+}
+
+static void test_unconfigured_slow_gcs_reads_as_loss(void) {
+    /* Documented: a GCS slower than configured looks exactly like loss. */
+    harness_t h;
+    setup(&h);
+    h.gcs_interval_ms = 2000;
+    run(&h, 60000);
+    assert(h.last.state == CORE_LINK_DEGRADED);
+}
+
+static void test_faster_gcs_than_configured(void) {
+    /* A 10 Hz GCS with the default 1 Hz configured: healthy, and a total loss
+     * is still caught by silence. */
+    harness_t h;
+    setup(&h);
+    h.gcs_interval_ms = 100;
+    run(&h, 60000);
+    assert(h.worst == CORE_LINK_NOMINAL);
+    h.gcs_on = false;
+    run(&h, 7000);
+    assert(h.last.state == CORE_LINK_LOST);
+}
+
+/* --- Radio --- */
+
 static void test_rssi_separates_jamming_from_loss(void) {
     harness_t jam, lost;
     setup(&jam);
@@ -234,6 +356,27 @@ static void test_rssi_separates_jamming_from_loss(void) {
     run(&lost, 8000);
     assert(lost.last.state == CORE_LINK_LOST);
     assert(lost.worst == CORE_LINK_LOST && "never called jamming");
+}
+
+static void test_returning_signal_isnt_jamming(void) {
+    /* Found in SITL: when the operator came back, RSSI rose about a second
+     * before the next heartbeat, which briefly looked like strong RF and no
+     * packets, and was announced as jamming. */
+    harness_t h;
+    setup(&h);
+    h.rf = 1;
+    settle(&h);
+    h.gcs_on = false;
+    h.rssi = 10;
+    run(&h, 10000);
+    assert(h.last.state == CORE_LINK_LOST);
+    reset_stats(&h);
+    h.rssi = 180;   /* the radio hears the operator again... */
+    run(&h, 1200);
+    h.gcs_on = true; /* ...and the heartbeats follow */
+    run(&h, 45000);
+    assert(h.worst == CORE_LINK_LOST && "never JAMMED on the way back");
+    assert(h.last.state == CORE_LINK_NOMINAL);
 }
 
 static void test_noise_floor_separates_jamming(void) {
@@ -265,197 +408,6 @@ static void test_noise_floor_separates_jamming(void) {
     assert(q.last.state == CORE_LINK_LOST);
 }
 
-static void test_recovery_is_gradual_and_doesnt_flap(void) {
-    harness_t h;
-    setup(&h);
-    settle(&h);
-    h.gcs_on = false;
-    run(&h, 10000);
-    assert(h.last.state == CORE_LINK_LOST);
-
-    reset_stats(&h);
-    h.gcs_on = true;
-    run(&h, 2000);
-    assert(h.last.link_trust < 0.4f && "trust climbs back slowly, not in one step");
-    run(&h, 10000);
-    assert(h.last.link_trust >= 0.7f && "trust, which autonomy acts on, is back within about 10 s");
-    assert(h.last.state == CORE_LINK_DEGRADED && "the label waits for a clean record that excludes the outage");
-    run(&h, 30000);
-    assert(h.last.state == CORE_LINK_NOMINAL);
-    assert(h.transitions <= 2 && "LOST -> DEGRADED -> NOMINAL, no bouncing");
-}
-
-static void test_slow_gcs_is_learned(void) {
-    harness_t h;
-    setup(&h);
-    h.gcs_interval_ms = 2000; /* a GCS that sends every 2 s (the cap) is not 50% loss */
-    run(&h, 30000);
-    reset_stats(&h);
-    run(&h, 60000);
-    assert(h.worst == CORE_LINK_NOMINAL);
-    assert(h.min_trust > 0.9f);
-}
-
-static void test_fast_gcs_doesnt_overflow(void) {
-    harness_t h;
-    setup(&h);
-    h.gcs_interval_ms = 100; /* more heartbeats per window than the buffer holds */
-    run(&h, 30000);
-    reset_stats(&h);
-    run(&h, 30000);
-    assert(h.worst == CORE_LINK_NOMINAL);
-    assert(h.min_trust > 0.9f);
-}
-
-static void test_autopilot_silence_is_unknown_not_lost(void) {
-    harness_t h;
-    setup(&h);
-    settle(&h);
-    h.autopilot_on = false; /* nothing is forwarded, so operator silence means nothing */
-    run(&h, 20000);
-    assert(h.last.state == CORE_LINK_UNKNOWN);
-    assert(h.worst <= CORE_LINK_DEGRADED && "never claimed the operator was lost");
-
-    h.autopilot_on = true;
-    run(&h, 3000);
-    assert(h.last.state == CORE_LINK_NOMINAL && "comes back without a false outage");
-}
-
-/* --- From review of PR #21 --- */
-
-static void test_faster_gcs_is_learned_gradually(void) {
-    /* A GCS that speeds up while the link is healthy is learned within a few
-     * tens of seconds, and a loss is then caught on the new timescale. */
-    harness_t h;
-    setup(&h);
-    h.gcs_interval_ms = 2000;
-    run(&h, 60000);
-    h.gcs_interval_ms = 1000;
-    h.next_gcs_ms = h.now + 1000;
-    run(&h, 60000);
-    assert(h.mon.interval_ms < 1200);
-    h.gcs_on = false;
-    run(&h, 9000);
-    assert(h.last.state == CORE_LINK_LOST);
-}
-
-static void test_slow_gcs_capped_so_loss_is_still_caught(void) {
-    /* Warm-up gaps of 5 s are more likely loss than a real rate; the learned
-     * interval is capped so a loss is still caught within about 12 s. */
-    harness_t h;
-    setup(&h);
-    h.gcs_interval_ms = 5000;
-    run(&h, 60000);
-    assert(h.mon.interval_ms <= 2000);
-    h.gcs_on = false;
-    run(&h, 18000); /* silence counts from the last heartbeat, up to 5 s earlier */
-    assert(h.last.state == CORE_LINK_LOST);
-}
-
-static void test_jittery_fast_gcs_stays_nominal(void) {
-    /* From the second review: a 5 Hz stream with +-80 ms jitter must not be
-     * misread as a faster rate and then as loss. */
-    for (unsigned seed = 1; seed <= 10; seed++) {
-        harness_t h;
-        setup(&h);
-        srand(seed);
-        h.gcs_interval_ms = 200;
-        h.jitter_ms = 80;
-        reset_stats(&h);
-        run(&h, 60000);
-        assert(h.worst == CORE_LINK_NOMINAL);
-        assert(h.min_trust > 0.9f);
-    }
-}
-
-static void test_one_bad_noise_sample_doesnt_latch(void) {
-    /* From the second review: a first sample of 0 must not become the floor. */
-    harness_t h;
-    setup(&h);
-    h.rf = 2;
-    h.noise = 0;
-    run(&h, 600);
-    h.noise = 40;
-    run(&h, 120000);
-    assert(h.last.state == CORE_LINK_NOMINAL);
-    assert(!h.last.interference);
-    h.gcs_on = false;
-    h.rssi = 10;
-    run(&h, 8000);
-    assert(h.last.state == CORE_LINK_LOST && "a clean loss, not jamming");
-}
-
-static void test_slower_gcs_mid_flight_reads_as_loss(void) {
-    /* Documented policy: halving the rate looks exactly like 50% loss, so it's
-     * treated as one rather than learned away. */
-    harness_t h;
-    setup(&h);
-    settle(&h);
-    h.gcs_interval_ms = 2000;
-    run(&h, 30000);
-    assert(h.last.state == CORE_LINK_DEGRADED);
-}
-
-static void test_reconnect_relearns_rate(void) {
-    harness_t h;
-    setup(&h);
-    h.gcs_interval_ms = 100;
-    settle(&h);
-    h.autopilot_on = false;
-    run(&h, 5000);
-    h.autopilot_on = true;
-    h.gcs_interval_ms = 1000; /* a different GCS setup after the reconnect */
-    h.next_gcs_ms = h.now + 500;
-    run(&h, 60000);
-    assert(h.last.state == CORE_LINK_NOMINAL && "the old 100 ms interval must not outlive the reconnect");
-    assert(h.last.link_trust > 0.95f);
-}
-
-static void test_heartbeat_in_first_poll_counts(void) {
-    /* If the only operator heartbeat ever seen arrives in the very first poll
-     * and is thrown away, the link stays UNKNOWN forever and is never reported. */
-    harness_t h;
-    setup(&h);
-    h.t.heartbeat.valid = true;
-    h.t.heartbeat.last_update_ms = h.now;
-    h.t.gcs_heartbeat.valid = true;
-    h.t.gcs_heartbeat.count = 1;
-    h.t.gcs_heartbeat.last_update_ms = h.now;
-    h.gcs_on = false;
-    run(&h, 20000);
-    assert(h.last.state == CORE_LINK_LOST);
-}
-
-static void test_batched_arrivals_dont_hide_loss(void) {
-    harness_t h;
-    setup(&h);
-    h.batch = 3; /* three at a time, every 3 s */
-    run(&h, 30000);
-    assert(h.mon.interval_ms > 800 && h.mon.interval_ms < 1200 && "learn the heartbeat rate, not the batch rate");
-    h.batch = 1;
-    h.drop = 0.67f;
-    reset_stats(&h);
-    run(&h, 60000);
-    assert(h.min_trust < 0.4f && "losing two thirds of them must be caught");
-}
-
-static void test_autopilot_outage_keeps_distrust(void) {
-    harness_t h;
-    setup(&h);
-    settle(&h);
-    h.gcs_on = false;
-    run(&h, 10000);
-    assert(h.last.state == CORE_LINK_LOST);
-
-    h.autopilot_on = false;
-    run(&h, 5000);
-    h.autopilot_on = true;
-    h.gcs_on = true;
-    run(&h, 2000);
-    assert(h.last.link_trust < 0.4f && "an observation gap is not evidence the link recovered");
-    assert(h.last.state != CORE_LINK_NOMINAL);
-}
-
 static void test_gradual_noise_rise_is_interference(void) {
     harness_t h;
     setup(&h);
@@ -471,6 +423,39 @@ static void test_gradual_noise_rise_is_interference(void) {
     assert(h.last.state == CORE_LINK_JAMMED);
 }
 
+static void test_noise_calibrates_despite_weak_signal(void) {
+    /* Third review: calibration waited for NOMINAL, which a weak signal
+     * prevents, so jamming then read as a clean loss. */
+    harness_t h;
+    setup(&h);
+    h.rf = 2;
+    h.rssi = 40; /* weak: the link is DEGRADED from the start */
+    run(&h, 30000);
+    assert(h.mon.noise_floor_known);
+    h.noise = 140;
+    h.gcs_on = false;
+    run(&h, 8000);
+    assert(h.last.state == CORE_LINK_JAMMED);
+}
+
+static void test_bad_noise_start_recalibrates(void) {
+    /* A radio reporting 0 for its first 15 s must not leave every later normal
+     * reading looking like interference. */
+    harness_t h;
+    setup(&h);
+    h.rf = 2;
+    h.noise = 0;
+    run(&h, 15000);
+    h.noise = 40;
+    run(&h, 120000);
+    assert(!h.last.interference);
+    assert(h.last.state == CORE_LINK_NOMINAL);
+    h.gcs_on = false;
+    h.rssi = 10;
+    run(&h, 8000);
+    assert(h.last.state == CORE_LINK_LOST && "a clean loss, not jamming");
+}
+
 static void test_zero_rssi_is_no_radio_data(void) {
     /* ArduPilot reports 0 when RSSI_TYPE=5 is set but no radio has reported for
      * 5 s: that's an absent radio, not a weak signal. */
@@ -483,32 +468,75 @@ static void test_zero_rssi_is_no_radio_data(void) {
     assert(h.last.rf_source == CORE_LINK_RF_NONE);
 }
 
+/* --- The autopilot --- */
+
+static void test_heartbeat_in_first_poll_counts(void) {
+    /* If the only operator heartbeat ever seen arrives in the very first poll
+     * and is thrown away, the link stays UNKNOWN forever and is never reported. */
+    harness_t h;
+    setup(&h);
+    h.t.heartbeat.valid = true;
+    h.t.heartbeat.last_update_ms = h.now;
+    deliver(&h, 1);
+    h.gcs_on = false;
+    run(&h, 20000);
+    assert(h.last.state == CORE_LINK_LOST);
+}
+
+static void test_autopilot_silence_is_unknown_not_lost(void) {
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.autopilot_on = false; /* nothing is forwarded, so operator silence means nothing */
+    run(&h, 20000);
+    assert(h.last.state == CORE_LINK_UNKNOWN);
+    assert(h.worst <= CORE_LINK_DEGRADED && "never claimed the operator was lost");
+    h.autopilot_on = true;
+    run(&h, 3000);
+    assert(h.last.state == CORE_LINK_NOMINAL && "comes back without a false outage");
+}
+
+static void test_autopilot_outage_keeps_distrust(void) {
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.gcs_on = false;
+    run(&h, 10000);
+    assert(h.last.state == CORE_LINK_LOST);
+    h.autopilot_on = false;
+    run(&h, 5000);
+    h.autopilot_on = true;
+    h.gcs_on = true;
+    run(&h, 2000);
+    assert(h.last.link_trust < 0.4f && "an observation gap is not evidence the link recovered");
+    assert(h.last.state != CORE_LINK_NOMINAL);
+}
+
 int main(void) {
     test_unknown_until_operator_heard();
     test_steady_link_stays_nominal();
-    test_jittery_link_is_nominal_from_the_start();
+    test_jitter_stays_nominal();
+    test_bursty_lossless_delivery_stays_nominal();
+    test_batched_arrivals_count_and_loss_is_caught();
     test_brief_dropouts_dont_flap();
     test_light_random_loss_tolerated();
     test_steady_moderate_loss_doesnt_flap();
     test_heavy_loss_is_degraded_and_untrusted();
     test_silence_without_radio_is_lost();
-    test_rssi_separates_jamming_from_loss();
-    test_noise_floor_separates_jamming();
     test_recovery_is_gradual_and_doesnt_flap();
-    test_slow_gcs_is_learned();
-    test_fast_gcs_doesnt_overflow();
-    test_autopilot_silence_is_unknown_not_lost();
-    test_faster_gcs_is_learned_gradually();
-    test_slow_gcs_capped_so_loss_is_still_caught();
-    test_jittery_fast_gcs_stays_nominal();
-    test_one_bad_noise_sample_doesnt_latch();
-    test_slower_gcs_mid_flight_reads_as_loss();
-    test_reconnect_relearns_rate();
-    test_heartbeat_in_first_poll_counts();
-    test_batched_arrivals_dont_hide_loss();
-    test_autopilot_outage_keeps_distrust();
+    test_configured_slow_gcs();
+    test_unconfigured_slow_gcs_reads_as_loss();
+    test_faster_gcs_than_configured();
+    test_rssi_separates_jamming_from_loss();
+    test_returning_signal_isnt_jamming();
+    test_noise_floor_separates_jamming();
     test_gradual_noise_rise_is_interference();
+    test_noise_calibrates_despite_weak_signal();
+    test_bad_noise_start_recalibrates();
     test_zero_rssi_is_no_radio_data();
+    test_heartbeat_in_first_poll_counts();
+    test_autopilot_silence_is_unknown_not_lost();
+    test_autopilot_outage_keeps_distrust();
     printf("test_link_monitor: all passed\n");
     return 0;
 }

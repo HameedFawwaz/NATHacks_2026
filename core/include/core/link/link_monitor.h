@@ -58,8 +58,12 @@ typedef enum {
 } core_link_rf_source_t;
 
 typedef struct {
+    /* How often the operator's GCS sends heartbeats. Configured, not learned:
+     * from here a GCS that slows down looks exactly like one losing packets.
+     * One slower than this reads as loss; one faster still has total loss
+     * caught by silence, but partial loss shows less. */
+    uint32_t heartbeat_interval_ms;
     uint32_t window_ms;           /* loss is measured over this long (at least 10 heartbeat intervals) */
-    uint32_t default_interval_ms; /* expected heartbeat interval until one is learned */
     uint32_t silence_grace_ms;    /* silence this short costs nothing (at least 3 heartbeat intervals) */
     uint32_t lost_after_ms;       /* silence this long is LOST or JAMMED (at least 6 intervals) */
 
@@ -73,6 +77,7 @@ typedef struct {
     uint16_t jam_noise_margin;   /* RADIO_STATUS noise this far above the learned floor is interference */
     float interference_cap;      /* trust ceiling while interference is seen but packets still arrive */
     uint32_t rf_stale_ms;        /* radio data older than this is ignored */
+    uint32_t jam_confirm_ms;     /* interference must last this long to call the link JAMMED */
 
     float degraded_below;   /* trust below this is DEGRADED... */
     float nominal_at;       /* ...and it takes this much to be NOMINAL again, so it can't bounce, */
@@ -94,8 +99,7 @@ typedef struct {
     char reason[40];           /* short, so "LINK <STATE>: <reason>" fits a STATUSTEXT */
 } core_link_result_t;
 
-#define CORE_LINK_ARRIVALS 64
-#define CORE_LINK_GAPS 32 /* the interval is their median: many keeps jitter out of it */
+#define CORE_LINK_ARRIVALS 320 /* nominal_window_ms at 10 Hz */
 
 typedef struct {
     core_link_config_t cfg;
@@ -106,14 +110,12 @@ typedef struct {
     uint64_t arrivals[CORE_LINK_ARRIVALS];
     int arrivals_head, arrivals_len;
 
-    uint32_t interval_ms;
-    uint32_t gaps[CORE_LINK_GAPS];
-    int gaps_head, gaps_len;
-
     float noise_floor;
     bool noise_floor_known;
     uint16_t noise_cal[10]; /* NOISE_CAL_SAMPLES in link_monitor.c */
     int noise_cal_len;
+    uint64_t noisy_but_healthy_since_ms;
+    uint64_t interference_since_ms; /* 0 = none now */
     uint64_t last_radio_ms; /* the RADIO_STATUS sample already folded into the floor */
 
     float trust;

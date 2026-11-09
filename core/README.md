@@ -144,17 +144,20 @@ Limits:
 
 - **Jamming versus loss is a heuristic.** With RSSI only, the assumption is that a jammed
   radio still reports strong RF energy. That holds in the SITL scenario because the
-  scenario is built on it; check it against the real radio.
-- **The heartbeat rate is learned, not configured.** It's the median of recent gaps,
-  learned at startup and again after an autopilot reconnect, and kept to 0.1 to 2 s.
-  Partial loss isn't measured until 16 gaps have been learned (16 s at 1 Hz); a total loss
-  is still caught by silence in that time. After warm-up the rate only follows the link
-  while it's healthy, so a GCS that speeds up is picked up over about 30 s, but one that
-  slows down mid-flight reads as loss, since halving the rate looks exactly like losing
-  half the heartbeats.
-- **A very slow rise in noise can be absorbed.** The noise floor follows a healthy link
-  with a time constant of about a minute, so a jammer that ramps up over tens of seconds
-  is caught, but one that creeps up over many minutes may not be.
+  scenario is built on it; check it against the real radio. Interference must last 2 s
+  to count, because a returning signal shows strong RF a moment before its next heartbeat.
+- **The GCS heartbeat rate is configured, not learned**: `heartbeat_interval_ms`, 1 s by
+  default, which is what MAVProxy, QGroundControl and Mission Planner send. From the
+  companion computer a GCS that slows down looks exactly like one losing heartbeats, and
+  learning the rate kept turning that into wrong verdicts. So a GCS slower than configured
+  reads as loss and must be configured; a faster one still has total loss caught by
+  silence, but partial loss shows less. Partial loss is measured once 10 intervals have
+  passed; silence covers the first 10 s.
+- **The noise floor is calibrated, then follows the link slowly.** It starts as the median
+  of 10 samples while heartbeats are arriving, then follows with a time constant of about a
+  minute, so a jammer that ramps up over tens of seconds is caught but one that creeps up
+  over many minutes may not be. Raised noise that costs no heartbeats for 60 s is taken as
+  the new normal and calibrated again.
 - **`RC_CHANNELS.rssi` of 0 is read as "no radio"**, which is what ArduPilot sends with
   `RSSI_TYPE=5` and no radio reporting. Other `RSSI_TYPE`s report the RC receiver's RSSI
   instead, which the monitor can't tell apart; use 5.

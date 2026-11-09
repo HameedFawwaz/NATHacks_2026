@@ -172,6 +172,7 @@ def run(proxy, observer):
     proxy.profile("nominal")
     p = Phase(observer, "recovery 1")
     expect(p.watch(60, until="NOMINAL"), "recovers to NOMINAL")
+    expect("JAMMED" not in p.states[1:], f"without being called jamming on the way back ({' -> '.join(p.states)})")
     p.watch(10)
     results.append(p)
     expect(p.states[-1] == "NOMINAL", "and stays there")
@@ -188,6 +189,7 @@ def run(proxy, observer):
     proxy.profile("nominal")
     p = Phase(observer, "recovery 2")
     expect(p.watch(60, until="NOMINAL"), "recovers to NOMINAL")
+    expect("JAMMED" not in p.states[1:], f"without being called jamming on the way back ({' -> '.join(p.states)})")
     p.watch(10)
     results.append(p)
     expect(len(p.states) <= 3, f"without bouncing ({' -> '.join(p.states)})")
@@ -203,6 +205,7 @@ def run(proxy, observer):
     proxy.profile("nominal")
     p = Phase(observer, "recovery 3")
     expect(p.watch(60, until="NOMINAL"), "recovers to NOMINAL")
+    expect("JAMMED" not in p.states[1:], f"without being called jamming on the way back ({' -> '.join(p.states)})")
     results.append(p)
     return results
 

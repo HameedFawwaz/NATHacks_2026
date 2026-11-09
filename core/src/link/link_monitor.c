@@ -9,23 +9,18 @@
  * a time constant of about a minute, so a jammer ramping up over tens of
  * seconds is seen as interference before the floor can follow it. */
 #define NOISE_FLOOR_ALPHA 0.01f
-/* After warm-up, gaps over this many intervals are outages and not learned. The
- * median takes care of the odd dropped heartbeat. */
-#define LEARN_GAP_MAX 3
-#define MIN_LOSS_INTERVALS 10     /* the window always spans this many heartbeats, so +-1 from jitter stays under loss_ok */
-#define WARMUP_MAX_GAP_MS 5000  /* until then, accept any gap up to this, so a slow GCS can be learned */
-/* Learned intervals are kept to this range. MAVLink GCSes send 1 Hz; a learned
- * interval above 2 s is more likely loss during warm-up than a real rate, and
- * the cap bounds how slowly a loss can be detected (6 intervals). */
-#define MIN_INTERVAL_MS 100
-#define MAX_INTERVAL_MS 2000
-#define LOSS_MIN_GAPS 16 /* loss isn't measured until the interval rests on this many gaps */
-#define NOISE_CAL_SAMPLES 10    /* the noise floor starts as the median of this many samples */
+#define NOISE_CAL_SAMPLES 10 /* the floor starts as the median of this many samples */
+/* "Interference" that costs not one heartbeat for this long is the new normal,
+ * or a floor calibrated wrongly: calibrate again. */
+#define NOISE_RECAL_MS 60000
+/* The window always spans this many heartbeats, so being off by one from jitter
+ * stays under loss_ok. */
+#define MIN_LOSS_INTERVALS 10
 
 void core_link_config_default(core_link_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
+    cfg->heartbeat_interval_ms = 1000; /* what MAVProxy, QGroundControl and Mission Planner send */
     cfg->window_ms = 10000;
-    cfg->default_interval_ms = 1000; /* MAVLink's usual GCS heartbeat rate */
     cfg->silence_grace_ms = 3000;
     cfg->lost_after_ms = 6000;
     cfg->loss_ok = 0.15f;
@@ -37,6 +32,7 @@ void core_link_config_default(core_link_config_t *cfg) {
     cfg->jam_noise_margin = 20; /* SiK units are about 0.5 dB, so about 10 dB */
     cfg->interference_cap = 0.6f;
     cfg->rf_stale_ms = 3000;
+    cfg->jam_confirm_ms = 2000;
     cfg->degraded_below = 0.7f; /* autonomy's trusted_at */
     cfg->nominal_at = 0.85f;
     cfg->nominal_window_ms = 30000;
@@ -46,20 +42,19 @@ void core_link_config_default(core_link_config_t *cfg) {
     cfg->autopilot_stale_ms = 3000;
 }
 
-/* After the autopilot has been silent: what was heard before no longer
- * describes the link, and the GCS may be a different one, so its rate is
- * learned again. Trust is kept, so a link that was lost recovers gradually
- * rather than being declared healthy by the gap. */
+/* After the autopilot has been silent, what was heard before no longer
+ * describes the link, and the radio may be a different one. Trust is kept, so a
+ * link that was lost recovers gradually rather than being declared healthy by
+ * the gap. */
 static void reset_history(core_link_monitor_t *mon) {
     mon->first_heard_ms = 0;
     mon->last_heard_ms = 0;
     mon->arrivals_head = 0;
     mon->arrivals_len = 0;
-    mon->gaps_head = 0;
-    mon->gaps_len = 0;
-    mon->interval_ms = mon->cfg.default_interval_ms;
-    mon->noise_floor_known = false; /* the radio may have changed too */
+    mon->noise_floor_known = false;
     mon->noise_cal_len = 0;
+    mon->noisy_but_healthy_since_ms = 0;
+    mon->interference_since_ms = 0;
     mon->state = CORE_LINK_UNKNOWN;
     mon->easing_since_ms = 0;
 }
@@ -67,6 +62,9 @@ static void reset_history(core_link_monitor_t *mon) {
 void core_link_monitor_init(core_link_monitor_t *mon, const core_link_config_t *cfg) {
     memset(mon, 0, sizeof(*mon));
     mon->cfg = *cfg;
+    if (mon->cfg.heartbeat_interval_ms == 0) {
+        mon->cfg.heartbeat_interval_ms = 1000;
+    }
     mon->blind = true;
     mon->trust = 1.0f;
     reset_history(mon);
@@ -98,43 +96,6 @@ static float ramp(float value, float good, float bad, float floor) {
     return 1.0f - t * (1.0f - floor);
 }
 
-static void learn_gap(core_link_monitor_t *mon, uint32_t gap) {
-    /* Warm-up lasts until loss can be measured, and learns in any state, so a
-     * link that falters early can't stop its own interval being learned. */
-    bool warming_up = mon->gaps_len < LOSS_MIN_GAPS;
-    if (gap == 0) {
-        return;
-    }
-    if (gap > (warming_up ? WARMUP_MAX_GAP_MS : LEARN_GAP_MAX * mon->interval_ms)) {
-        return;
-    }
-    if (!warming_up && mon->state != CORE_LINK_NOMINAL) {
-        return; /* gaps from a lossy link would teach it that loss is normal */
-    }
-    mon->gaps[mon->gaps_head] = gap;
-    mon->gaps_head = (mon->gaps_head + 1) % CORE_LINK_GAPS;
-    if (mon->gaps_len < CORE_LINK_GAPS) {
-        mon->gaps_len++;
-    }
-    if (mon->gaps_len >= 3) {
-        /* The median of many gaps: unbiased under symmetric jitter, unmoved by an
-         * occasional dropped heartbeat's double gap, and needing no clipping band
-         * (a band that follows the estimate feeds back into it). */
-        uint32_t sorted[CORE_LINK_GAPS];
-        int n = mon->gaps_len;
-        memcpy(sorted, mon->gaps, sizeof(sorted[0]) * (size_t)n);
-        for (int i = 1; i < n; i++) {
-            for (int j = i; j > 0 && sorted[j - 1] > sorted[j]; j--) {
-                uint32_t tmp = sorted[j];
-                sorted[j] = sorted[j - 1];
-                sorted[j - 1] = tmp;
-            }
-        }
-        uint32_t median = n % 2 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
-        mon->interval_ms = median < MIN_INTERVAL_MS ? MIN_INTERVAL_MS : (median > MAX_INTERVAL_MS ? MAX_INTERVAL_MS : median);
-    }
-}
-
 static void record_arrivals(core_link_monitor_t *mon, const core_gcs_heartbeat_t *hb) {
     if (!hb->valid) {
         return;
@@ -147,47 +108,38 @@ static void record_arrivals(core_link_monitor_t *mon, const core_gcs_heartbeat_t
     if (fresh > CORE_LINK_ARRIVALS) {
         fresh = CORE_LINK_ARRIVALS;
     }
-
-    /* Several in one tick share the tick's timestamp. Learn the average spacing
-     * of what arrived, not the time between batches. */
-    uint64_t at = hb->last_update_ms;
-    if (mon->last_heard_ms != 0 && at > mon->last_heard_ms) {
-        learn_gap(mon, (uint32_t)((at - mon->last_heard_ms) / fresh));
-    }
+    /* Several in one tick share the tick's timestamp. */
     for (uint32_t i = 0; i < fresh; i++) {
-        mon->arrivals[mon->arrivals_head] = at;
+        mon->arrivals[mon->arrivals_head] = hb->last_update_ms;
         mon->arrivals_head = (mon->arrivals_head + 1) % CORE_LINK_ARRIVALS;
         if (mon->arrivals_len < CORE_LINK_ARRIVALS) {
             mon->arrivals_len++;
         }
     }
     if (mon->first_heard_ms == 0) {
-        mon->first_heard_ms = at;
+        mon->first_heard_ms = hb->last_update_ms;
     }
-    mon->last_heard_ms = at;
+    mon->last_heard_ms = hb->last_update_ms;
 }
 
-/* Fraction of expected heartbeats missing over the window, or -1 while it can't
- * be measured yet. */
+/* Fraction of expected heartbeats missing over the window, or -1 while there
+ * hasn't been enough of the link yet to say. */
 static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint64_t window) {
-    if (window < MIN_LOSS_INTERVALS * (uint64_t)mon->interval_ms) {
-        window = MIN_LOSS_INTERVALS * (uint64_t)mon->interval_ms; /* a slow GCS gets a longer window */
-    }
-    uint64_t span = now_ms - mon->first_heard_ms;
-    if (span > window) {
-        span = window;
+    uint64_t interval = mon->cfg.heartbeat_interval_ms;
+    if (window < MIN_LOSS_INTERVALS * interval) {
+        window = MIN_LOSS_INTERVALS * interval;
     }
     /* A GCS fast enough to overflow the buffer gets a shorter window instead. */
-    uint64_t fits = (uint64_t)(CORE_LINK_ARRIVALS - 1) * mon->interval_ms;
-    if (span > fits) {
-        span = fits;
+    uint64_t fits = (uint64_t)(CORE_LINK_ARRIVALS - 1) * interval;
+    if (window > fits) {
+        window = fits;
     }
-    /* Over only a few heartbeats, one landing just outside the window by jitter
-     * reads as a large loss, and an interval learned from a few gaps can be well
-     * off. Until both have enough behind them, only silence counts, which still
-     * catches a total loss. */
-    if (span < MIN_LOSS_INTERVALS * (uint64_t)mon->interval_ms || mon->gaps_len < LOSS_MIN_GAPS) {
+    uint64_t span = now_ms - mon->first_heard_ms;
+    if (span < MIN_LOSS_INTERVALS * interval) {
         return -1.0f;
+    }
+    if (span > window) {
+        span = window;
     }
     int received = 0;
     for (int i = 0; i < mon->arrivals_len; i++) {
@@ -197,7 +149,7 @@ static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint6
     }
     /* Rounded down: the window catches a whole number of heartbeats, and the
      * fraction left over is phase, not loss. */
-    float expected = (float)(span / mon->interval_ms);
+    float expected = (float)(span / interval);
     float loss = 1.0f - (float)received / expected;
     return loss < 0.0f ? 0.0f : (loss > 1.0f ? 1.0f : loss);
 }
@@ -205,11 +157,36 @@ static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint6
 typedef struct {
     core_link_rf_source_t source;
     float rssi;        /* normalized, valid unless source is NONE */
-    bool noise_high;   /* RADIO_STATUS noise above the learned floor */
+    bool noise_known;  /* RADIO_STATUS with a calibrated floor */
+    bool noise_high;   /* noise above that floor */
     int noise_excess;
 } rf_view_t;
 
-static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, uint64_t now_ms, bool healthy) {
+static void calibrate_noise(core_link_monitor_t *mon, uint16_t noise) {
+    /* The median of several samples, so one odd reading can't set the baseline
+     * that every later sample is judged against. */
+    mon->noise_cal[mon->noise_cal_len++] = noise;
+    if (mon->noise_cal_len < NOISE_CAL_SAMPLES) {
+        return;
+    }
+    uint16_t sorted[NOISE_CAL_SAMPLES];
+    memcpy(sorted, mon->noise_cal, sizeof(sorted));
+    for (int i = 1; i < NOISE_CAL_SAMPLES; i++) {
+        for (int j = i; j > 0 && sorted[j - 1] > sorted[j]; j--) {
+            uint16_t tmp = sorted[j];
+            sorted[j] = sorted[j - 1];
+            sorted[j - 1] = tmp;
+        }
+    }
+    mon->noise_floor = (float)sorted[NOISE_CAL_SAMPLES / 2];
+    mon->noise_floor_known = true;
+    mon->noise_cal_len = 0;
+}
+
+/* heard_well: heartbeats are arriving with no more than loss_ok missing. That,
+ * not the overall state, gates learning, so a weak signal can't stop the noise
+ * floor being calibrated. */
+static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, uint64_t now_ms, bool heard_well) {
     rf_view_t rf = {0};
     const core_radio_status_t *radio = &t->radio_status;
     const core_rc_status_t *rc = &t->rc_status;
@@ -217,36 +194,30 @@ static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, ui
     if (radio->valid && now_ms - radio->last_update_ms <= mon->cfg.rf_stale_ms) {
         rf.source = CORE_LINK_RF_NOISE;
         rf.rssi = radio->rssi == RSSI_UNKNOWN ? 0.0f : (float)radio->rssi / RSSI_MAX;
-        /* Judged against the floor before this sample, which is then learned
-         * once, and only from a healthy link that shows no interference. */
+        /* Judged against the floor before this sample, which is then learned. */
         if (mon->noise_floor_known) {
+            rf.noise_known = true;
             rf.noise_excess = (int)((float)radio->noise - mon->noise_floor);
             rf.noise_high = rf.noise_excess >= (int)mon->cfg.jam_noise_margin;
         }
+
         bool new_sample = radio->last_update_ms != mon->last_radio_ms;
         mon->last_radio_ms = radio->last_update_ms;
-        if (!new_sample || !healthy) {
-            return rf;
+        if (!(rf.noise_high && heard_well)) {
+            mon->noisy_but_healthy_since_ms = 0;
+        } else if (mon->noisy_but_healthy_since_ms == 0) {
+            mon->noisy_but_healthy_since_ms = now_ms;
+        } else if (now_ms - mon->noisy_but_healthy_since_ms >= NOISE_RECAL_MS) {
+            mon->noise_floor_known = false;
+            mon->noise_cal_len = 0;
+            mon->noisy_but_healthy_since_ms = 0;
         }
-        if (!mon->noise_floor_known) {
-            /* Calibrate from the median of several samples, so one odd reading
-             * can't set a baseline that every later sample is judged against. */
-            mon->noise_cal[mon->noise_cal_len++] = radio->noise;
-            if (mon->noise_cal_len == NOISE_CAL_SAMPLES) {
-                uint16_t sorted[NOISE_CAL_SAMPLES];
-                memcpy(sorted, mon->noise_cal, sizeof(sorted));
-                for (int i = 1; i < NOISE_CAL_SAMPLES; i++) { /* insertion sort, 10 items */
-                    for (int j = i; j > 0 && sorted[j - 1] > sorted[j]; j--) {
-                        uint16_t tmp = sorted[j];
-                        sorted[j] = sorted[j - 1];
-                        sorted[j - 1] = tmp;
-                    }
-                }
-                mon->noise_floor = (float)sorted[NOISE_CAL_SAMPLES / 2];
-                mon->noise_floor_known = true;
+        if (new_sample && heard_well) {
+            if (!mon->noise_floor_known) {
+                calibrate_noise(mon, radio->noise);
+            } else if (!rf.noise_high) {
+                mon->noise_floor += NOISE_FLOOR_ALPHA * ((float)radio->noise - mon->noise_floor);
             }
-        } else if (!rf.noise_high) {
-            mon->noise_floor += NOISE_FLOOR_ALPHA * ((float)radio->noise - mon->noise_floor);
         }
         return rf;
     }
@@ -316,22 +287,34 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
         return r;
     }
 
+    uint32_t interval = cfg->heartbeat_interval_ms;
     r.silence_ms = (uint32_t)(now_ms - mon->last_heard_ms);
     float loss = measure_loss(mon, now_ms, cfg->window_ms);
     r.loss = loss < 0.0f ? 0.0f : loss;
     /* Ten heartbeats can't tell steady 30% loss from a clean link, so calling it
      * NOMINAL again takes a longer clean record. */
     float long_loss = measure_loss(mon, now_ms, cfg->nominal_window_ms);
-    /* Scaled up for a GCS that legitimately sends slowly. */
-    uint32_t grace_ms = cfg->silence_grace_ms > 3 * mon->interval_ms ? cfg->silence_grace_ms : 3 * mon->interval_ms;
-    uint32_t lost_ms = cfg->lost_after_ms > 6 * mon->interval_ms ? cfg->lost_after_ms : 6 * mon->interval_ms;
+    /* Scaled up for a GCS configured to send slowly. */
+    uint32_t grace_ms = cfg->silence_grace_ms > 3 * interval ? cfg->silence_grace_ms : 3 * interval;
+    uint32_t lost_ms = cfg->lost_after_ms > 6 * interval ? cfg->lost_after_ms : 6 * interval;
     bool silent_long = r.silence_ms >= lost_ms;
     bool silent_short = r.silence_ms > grace_ms;
 
-    rf_view_t rf = read_rf(mon, telemetry, now_ms, mon->state == CORE_LINK_NOMINAL && !silent_short);
+    bool heard_well = !silent_short && r.loss <= cfg->loss_ok;
+    rf_view_t rf = read_rf(mon, telemetry, now_ms, heard_well);
     r.rf_source = rf.source;
-    /* With RSSI only, strong RF energy is suspicious just when nothing gets through. */
-    r.interference = rf.noise_high || (rf.source == CORE_LINK_RF_RSSI && silent_short && rf.rssi >= cfg->jam_rssi_min);
+    /* Without a calibrated noise floor, fall back to RSSI: strong RF energy is
+     * suspicious just when nothing gets through. */
+    bool rssi_rule = rf.source == CORE_LINK_RF_RSSI || (rf.source == CORE_LINK_RF_NOISE && !rf.noise_known);
+    r.interference = rf.noise_high || (rssi_rule && silent_short && rf.rssi >= cfg->jam_rssi_min);
+    /* Calling it jamming takes interference that lasts: a returning signal shows
+     * strong RF a moment before its next heartbeat. */
+    if (!r.interference) {
+        mon->interference_since_ms = 0;
+    } else if (mon->interference_since_ms == 0) {
+        mon->interference_since_ms = now_ms;
+    }
+    bool jam_confirmed = r.interference && now_ms - mon->interference_since_ms >= cfg->jam_confirm_ms;
 
     float loss_score = ramp(r.loss, cfg->loss_ok, cfg->loss_bad, 0.0f);
     float silence_score = ramp((float)r.silence_ms, (float)grace_ms, (float)lost_ms, 0.0f);
@@ -353,7 +336,7 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
 
     core_link_state_t indicated = CORE_LINK_NOMINAL;
     if (silent_long) {
-        indicated = r.interference ? CORE_LINK_JAMMED : CORE_LINK_LOST;
+        indicated = jam_confirmed ? CORE_LINK_JAMMED : CORE_LINK_LOST;
     } else if (mon->trust < cfg->degraded_below ||
                (mon->state != CORE_LINK_NOMINAL && mon->state != CORE_LINK_UNKNOWN &&
                 (mon->trust < cfg->nominal_at || long_loss < 0.0f || long_loss > cfg->loss_ok))) {
