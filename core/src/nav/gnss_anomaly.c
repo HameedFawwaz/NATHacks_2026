@@ -13,6 +13,15 @@
  * 80-340 deg on the pad). */
 #define COG_SEED_MIN_SPEED_CMS 300
 
+/* Agreement is meaningful only for a configured GPS-independent backup.
+ * Eight seconds exceeds the time a 1.5 m/s linear offset ramp can spend
+ * traversing the six-metre diameter of the allowed position region. */
+#define BACKUP_RECOVERY_WINDOW_MS 8000
+#define BACKUP_GPS_MAX_AGE_MS 800
+#define BACKUP_IMU_POSITION_MAX_AGE_MS 500
+#define BACKUP_POSITION_ERROR_M 3.0f
+#define BACKUP_VELOCITY_ERROR_MPS 1.0f
+
 static float linear_score(float value, float warn, float reject) {
     if (reject <= warn) {
         return (value <= warn) ? 1.0f : 0.0f;
@@ -106,15 +115,15 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
     const core_imu_t *imu = &telemetry->imu;
     const core_nav_result_t *s = &detector->cached_scores;
     bool good = telemetry->heartbeat.valid && rebaseline_fresh(now_ms, telemetry->heartbeat.last_update_ms, 2000) &&
-        imu->valid && rebaseline_fresh(now_ms, imu->last_update_ms, 500) &&
+        imu->valid && rebaseline_fresh(now_ms, imu->last_update_ms, BACKUP_IMU_POSITION_MAX_AGE_MS) &&
         isfinite(imu->xacc_mps2) && isfinite(imu->yacc_mps2) && isfinite(imu->zacc_mps2) &&
         isfinite(imu->xgyro_rps) && isfinite(imu->ygyro_rps) && isfinite(imu->zgyro_rps) &&
-        gps->valid && gps->fix_type >= 3 && rebaseline_fresh(now_ms, gps->last_update_ms, 800) &&
+        gps->valid && gps->fix_type >= 3 && rebaseline_fresh(now_ms, gps->last_update_ms, BACKUP_GPS_MAX_AGE_MS) &&
         gps->time_usec && gps->eph != UINT16_MAX && gps->eph <= 200 && gps->vel_cms != UINT16_MAX &&
         (gps->vel_cms < 30 || gps->cog_cdeg < 36000) &&
         (gps->lat != 0 || gps->lon != 0) && gps->lat >= -850000000 && gps->lat <= 850000000 &&
         gps->lon >= -1800000000 && gps->lon <= 1800000000 && pos->valid &&
-        rebaseline_fresh(now_ms, pos->last_update_ms, 500) &&
+        rebaseline_fresh(now_ms, pos->last_update_ms, BACKUP_IMU_POSITION_MAX_AGE_MS) &&
         pos->lat >= -850000000 && pos->lat <= 850000000 && pos->lon >= -1800000000 && pos->lon <= 1800000000 &&
         detector->have_prev_gps && detector->prev_gps_raw.last_update_ms == gps->last_update_ms &&
         detector->have_cached_scores && s->score_jump >= 1.0f && s->score_time >= 1.0f &&
@@ -123,12 +132,12 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
         float speed = gps->vel_cms / 100.0f;
         float cog = gps->cog_cdeg < 36000 ? cog_cdeg_to_rad(gps->cog_cdeg) : 0.0f;
         float vn = speed * cosf(cog), ve = speed * sinf(cog);
-        good = distance_m(gps->lat / 1e7, gps->lon / 1e7, pos->lat / 1e7, pos->lon / 1e7) <= 3.0f &&
-               hypotf(vn - pos->vx / 100.0f, ve - pos->vy / 100.0f) <= 1.0f;
+        good = distance_m(gps->lat / 1e7, gps->lon / 1e7, pos->lat / 1e7, pos->lon / 1e7) <= BACKUP_POSITION_ERROR_M &&
+               hypotf(vn - pos->vx / 100.0f, ve - pos->vy / 100.0f) <= BACKUP_VELOCITY_ERROR_MPS;
     }
     if (!good || (recovery->last_gps_ms && gps->last_update_ms < recovery->last_gps_ms) ||
         (recovery->last_gps_ms && gps->last_update_ms != recovery->last_gps_ms &&
-         (gps->last_update_ms - recovery->last_gps_ms >= 800 || gps->time_usec <= recovery->last_gps_time_usec))) {
+         (gps->last_update_ms - recovery->last_gps_ms >= BACKUP_GPS_MAX_AGE_MS || gps->time_usec <= recovery->last_gps_time_usec))) {
         recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
         return false;
     }
@@ -143,7 +152,7 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
         recovery->last_gps_ms = gps->last_update_ms;
         recovery->last_gps_time_usec = gps->time_usec;
     }
-    if (new_fix && now_ms >= recovery->start_ms && now_ms - recovery->start_ms >= 8000 &&
+    if (new_fix && now_ms >= recovery->start_ms && now_ms - recovery->start_ms >= BACKUP_RECOVERY_WINDOW_MS &&
         (s->score_dr < 1.0f || s->score_drift < 1.0f)) {
         core_nav_kf_set_reanchor(&detector->kf_short, gps);
         core_nav_kf_set_reanchor(&detector->kf_long, gps);

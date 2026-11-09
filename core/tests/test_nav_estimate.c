@@ -477,6 +477,14 @@ static void test_backup_recovery(void) {
         invalid.imu.xacc_mps2 = NAN;
         CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &invalid, r.v.t_ms, true));
         CHECK(rec.start_ms == 0);
+        for (int i = 0; i < 350; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+        invalid = make_telemetry(&r.v, false, 0);
+        invalid.gps_raw = gps;
+        invalid.heartbeat.valid = true;
+        invalid.heartbeat.last_update_ms = r.v.t_ms;
+        invalid.global_position.last_update_ms = r.v.t_ms - 1000;
+        CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &invalid, r.v.t_ms, true));
+        CHECK(rec.start_ms == 0);
         bool recovered = false;
         for (int i = 0; i < 1500; ++i) recovered |= backup_step(&r, &rec, &gps, 0, true, false);
         CHECK(recovered);
