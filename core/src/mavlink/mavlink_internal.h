@@ -35,6 +35,9 @@ struct core_mavlink_conn {
     int sock_fd; /* -1 when closed */
     bool peer_known;
     struct sockaddr_in peer_addr;
+    struct sockaddr_in pending_peer_addr;
+    bool pending_peer_active;
+    bool pending_peer_consistent;
 
     mavlink_channel_t chan; /* dedicated parse channel, avoids cross-talk between connections */
     mavlink_status_t parse_status;
