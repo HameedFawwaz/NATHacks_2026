@@ -109,7 +109,13 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
         }
     }
     if (detector->have_seen_any_gps) {
-        uint64_t age_ms = now - detector->last_gps_message_ms;
+        /* Saturating, not a plain `now - last_gps_message_ms`: GPS and IMU are
+         * decoded independently within the same poll batch, so a GPS sample
+         * can end up timestamped slightly ahead of `now` (the IMU-paced
+         * clock) even though it just arrived - that's not staleness, and as
+         * an unsigned subtraction it would underflow to a near-infinite age
+         * and crash the score to 0 for one tick. */
+        uint64_t age_ms = (now > detector->last_gps_message_ms) ? now - detector->last_gps_message_ms : 0;
         float staleness_score = linear_score((float)age_ms, (float)cfg->gps_stale_warn_ms,
                                               (float)cfg->gps_stale_reject_ms);
         if (staleness_score < score_health) score_health = staleness_score;
