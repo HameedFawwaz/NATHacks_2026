@@ -145,10 +145,13 @@ Limits:
 - **Jamming versus loss is a heuristic.** With RSSI only, the assumption is that a jammed
   radio still reports strong RF energy. That holds in the SITL scenario because the
   scenario is built on it; check it against the real radio.
-- **A GCS that slows its heartbeat mid-flight reads as loss.** Halving the rate looks
-  exactly like losing half the heartbeats, so it's treated as loss rather than learned
-  away. The rate is learned at startup and after an autopilot reconnect, and a GCS that
-  speeds up is re-learned at once, since extra heartbeats can't be loss.
+- **The heartbeat rate is learned, not configured.** It's the median of recent gaps,
+  learned at startup and again after an autopilot reconnect, and kept to 0.1 to 2 s.
+  Partial loss isn't measured until 16 gaps have been learned (16 s at 1 Hz); a total loss
+  is still caught by silence in that time. After warm-up the rate only follows the link
+  while it's healthy, so a GCS that speeds up is picked up over about 30 s, but one that
+  slows down mid-flight reads as loss, since halving the rate looks exactly like losing
+  half the heartbeats.
 - **A very slow rise in noise can be absorbed.** The noise floor follows a healthy link
   with a time constant of about a minute, so a jammer that ramps up over tens of seconds
   is caught, but one that creeps up over many minutes may not be.

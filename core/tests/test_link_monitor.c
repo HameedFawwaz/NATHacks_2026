@@ -288,7 +288,7 @@ static void test_recovery_is_gradual_and_doesnt_flap(void) {
 static void test_slow_gcs_is_learned(void) {
     harness_t h;
     setup(&h);
-    h.gcs_interval_ms = 2000; /* a GCS that sends every 2 s is not 50% loss */
+    h.gcs_interval_ms = 2000; /* a GCS that sends every 2 s (the cap) is not 50% loss */
     run(&h, 30000);
     reset_stats(&h);
     run(&h, 60000);
@@ -323,19 +323,66 @@ static void test_autopilot_silence_is_unknown_not_lost(void) {
 
 /* --- From review of PR #21 --- */
 
-static void test_faster_gcs_is_relearned(void) {
-    /* A GCS that speeds up must not leave loss detection tuned to the old rate. */
+static void test_faster_gcs_is_learned_gradually(void) {
+    /* A GCS that speeds up while the link is healthy is learned within a few
+     * tens of seconds, and a loss is then caught on the new timescale. */
+    harness_t h;
+    setup(&h);
+    h.gcs_interval_ms = 2000;
+    run(&h, 60000);
+    h.gcs_interval_ms = 1000;
+    h.next_gcs_ms = h.now + 1000;
+    run(&h, 60000);
+    assert(h.mon.interval_ms < 1200);
+    h.gcs_on = false;
+    run(&h, 9000);
+    assert(h.last.state == CORE_LINK_LOST);
+}
+
+static void test_slow_gcs_capped_so_loss_is_still_caught(void) {
+    /* Warm-up gaps of 5 s are more likely loss than a real rate; the learned
+     * interval is capped so a loss is still caught within about 12 s. */
     harness_t h;
     setup(&h);
     h.gcs_interval_ms = 5000;
     run(&h, 60000);
-    h.gcs_interval_ms = 1000;
-    h.next_gcs_ms = h.now + 1000;
-    run(&h, 40000);
-    assert(h.mon.interval_ms < 1300);
+    assert(h.mon.interval_ms <= 2000);
     h.gcs_on = false;
-    run(&h, 9000);
-    assert(h.last.state == CORE_LINK_LOST && "a loss must be caught on the new rate's timescale");
+    run(&h, 18000); /* silence counts from the last heartbeat, up to 5 s earlier */
+    assert(h.last.state == CORE_LINK_LOST);
+}
+
+static void test_jittery_fast_gcs_stays_nominal(void) {
+    /* From the second review: a 5 Hz stream with +-80 ms jitter must not be
+     * misread as a faster rate and then as loss. */
+    for (unsigned seed = 1; seed <= 10; seed++) {
+        harness_t h;
+        setup(&h);
+        srand(seed);
+        h.gcs_interval_ms = 200;
+        h.jitter_ms = 80;
+        reset_stats(&h);
+        run(&h, 60000);
+        assert(h.worst == CORE_LINK_NOMINAL);
+        assert(h.min_trust > 0.9f);
+    }
+}
+
+static void test_one_bad_noise_sample_doesnt_latch(void) {
+    /* From the second review: a first sample of 0 must not become the floor. */
+    harness_t h;
+    setup(&h);
+    h.rf = 2;
+    h.noise = 0;
+    run(&h, 600);
+    h.noise = 40;
+    run(&h, 120000);
+    assert(h.last.state == CORE_LINK_NOMINAL);
+    assert(!h.last.interference);
+    h.gcs_on = false;
+    h.rssi = 10;
+    run(&h, 8000);
+    assert(h.last.state == CORE_LINK_LOST && "a clean loss, not jamming");
 }
 
 static void test_slower_gcs_mid_flight_reads_as_loss(void) {
@@ -451,7 +498,10 @@ int main(void) {
     test_slow_gcs_is_learned();
     test_fast_gcs_doesnt_overflow();
     test_autopilot_silence_is_unknown_not_lost();
-    test_faster_gcs_is_relearned();
+    test_faster_gcs_is_learned_gradually();
+    test_slow_gcs_capped_so_loss_is_still_caught();
+    test_jittery_fast_gcs_stays_nominal();
+    test_one_bad_noise_sample_doesnt_latch();
     test_slower_gcs_mid_flight_reads_as_loss();
     test_reconnect_relearns_rate();
     test_heartbeat_in_first_poll_counts();

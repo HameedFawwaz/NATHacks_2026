@@ -95,7 +95,7 @@ typedef struct {
 } core_link_result_t;
 
 #define CORE_LINK_ARRIVALS 64
-#define CORE_LINK_GAPS 9
+#define CORE_LINK_GAPS 32 /* the interval is their median: many keeps jitter out of it */
 
 typedef struct {
     core_link_config_t cfg;
@@ -112,6 +112,8 @@ typedef struct {
 
     float noise_floor;
     bool noise_floor_known;
+    uint16_t noise_cal[10]; /* NOISE_CAL_SAMPLES in link_monitor.c */
+    int noise_cal_len;
     uint64_t last_radio_ms; /* the RADIO_STATUS sample already folded into the floor */
 
     float trust;
