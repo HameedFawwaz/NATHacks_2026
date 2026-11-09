@@ -713,6 +713,41 @@ static void test_nonfinite_fc_attitude_uses_fallback(void) {
     assert(isfinite(lat) && isfinite(lon) && isfinite(alt));
 }
 
+/* --- IMU and GPS both stop while the link stays up (e.g. heartbeat still
+ * arriving). The detector's simulated clock is paced by IMU timestamps, so it
+ * freezes too; GPS staleness must still be judged on real elapsed time, or
+ * total silence would leave nav_trust at its last healthy value. Shortened
+ * thresholds keep the real wait well under a second. --- */
+static void test_gps_and_imu_silence_not_healthy(void) {
+    core_nav_config_t cfg;
+    core_nav_config_default(&cfg);
+    cfg.gps_stale_warn_ms = 100;
+    cfg.gps_stale_reject_ms = 300;
+    cfg.imu_stale_ms = 100;
+    core_nav_detector_t detector;
+    core_nav_detector_init(&detector, &cfg);
+
+    sim_vehicle_t v;
+    sim_vehicle_init(&v, 47.397742, -122.397456, 10.0, 0.0f, 0.0f);
+    core_telemetry_t t;
+    core_nav_result_t result;
+    for (int i = 0; i < 100; i++) { /* GPS every tick: no simulated staleness */
+        t = make_telemetry(&v);
+        result = core_nav_detector_update(&detector, &t, &cfg);
+        sim_vehicle_step(&v, 20);
+    }
+    assert(result.nav_trust > 0.99f);
+
+    usleep(400000); /* both streams silent past gps_stale_reject_ms of real time */
+    for (int i = 0; i < 5; i++) {
+        result = core_nav_detector_update(&detector, &t, &cfg); /* same, frozen sample */
+    }
+    assert(result.flags & CORE_NAV_FLAG_IMU_LOST);
+    assert(result.flags & CORE_NAV_FLAG_GPS_UNHEALTHY);
+    assert(result.score_health <= 0.0f);
+    assert(result.nav_trust <= 0.0f);
+}
+
 int main(void) {
     test_normal_flight();
     test_instant_jump();
@@ -731,5 +766,6 @@ int main(void) {
     test_bias_calibration_does_not_include_flight_gap();
     test_unknown_speed_does_not_seed_cog();
     test_nonfinite_fc_attitude_uses_fallback();
+    test_gps_and_imu_silence_not_healthy();
     return 0;
 }

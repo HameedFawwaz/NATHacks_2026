@@ -50,6 +50,9 @@ typedef struct {
      * unhealthy, vs. not arriving at all). */
     uint64_t last_gps_message_ms;
     bool have_seen_any_gps;
+    /* core_now_ms() when that message was seen. The IMU-paced clock above
+     * freezes if the IMU stops too, so staleness also uses real time. */
+    uint64_t last_gps_wall_ms;
 
     /* IMU freshness tracked against real wall-clock time, decoupled from
      * the deterministic (IMU-sample-paced) clock used for KF/slew timing -

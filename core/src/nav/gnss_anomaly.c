@@ -161,6 +161,7 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
                              telemetry->gps_raw.last_update_ms != detector->last_gps_message_ms);
     if (new_gps_message) {
         detector->last_gps_message_ms = telemetry->gps_raw.last_update_ms;
+        detector->last_gps_wall_ms = core_now_ms();
         detector->have_seen_any_gps = true;
         if (telemetry->gps_raw.fix_type < 2) {
             score_health = 0.0f;
@@ -174,6 +175,14 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
          * an unsigned subtraction it would underflow to a near-infinite age
          * and crash the score to 0 for one tick. */
         uint64_t age_ms = (now > detector->last_gps_message_ms) ? now - detector->last_gps_message_ms : 0;
+        /* `now` stops advancing when the IMU stream stops, so if GPS went
+         * silent with it, the age above would freeze and total silence would
+         * look healthy. Real time since arrival catches that; synthetic tests
+         * run in a fraction of a second, so it never dominates their
+         * deterministic simulated ages. */
+        uint64_t wall_now = core_now_ms();
+        uint64_t wall_age_ms = (wall_now > detector->last_gps_wall_ms) ? wall_now - detector->last_gps_wall_ms : 0;
+        if (wall_age_ms > age_ms) age_ms = wall_age_ms;
         float staleness_score = linear_score((float)age_ms, (float)cfg->gps_stale_warn_ms,
                                               (float)cfg->gps_stale_reject_ms);
         if (staleness_score < score_health) score_health = staleness_score;
