@@ -1088,7 +1088,7 @@ func TestHTTPStart(t *testing.T) {
 	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	go func() {
@@ -1116,7 +1116,7 @@ func TestHTTPStartRefusedWhileArmed(t *testing.T) {
 	b, f, _ := setup(t)
 	f.armed = true
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/start", "application/json", nil)

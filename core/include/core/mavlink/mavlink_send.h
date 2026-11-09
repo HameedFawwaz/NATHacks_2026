@@ -44,6 +44,9 @@ bool core_mavlink_send_named_value_float(core_mavlink_conn_t *conn, const char *
 /* Publishes score as five NAMED_VALUE_FLOAT messages: TRUST, TRUST_NAV, TRUST_LNK, TRUST_CRY, TRUST_HW. */
 bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trust_score_t *score);
 
+/* Publishes SIG_UNSGN, SIG_BADSG and SIG_REPLY only when signing is enabled. */
+bool core_mavlink_publish_link_security(core_mavlink_conn_t *conn, const core_link_security_t *security);
+
 /*
  * Commands to the autopilot. These also return false until a heartbeat has
  * identified the vehicle. true only means the command was sent: confirm the
