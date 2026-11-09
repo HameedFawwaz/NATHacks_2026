@@ -127,14 +127,34 @@ The companion computer isn't on the operator's link, so it measures it indirectl
 | `UNKNOWN` | no operator heard yet, or the autopilot itself is silent | not reported |
 | `NOMINAL` | heartbeats arriving as expected | about 1 |
 | `DEGRADED` | heartbeats missing, weak signal, or interference while connected | below 0.7 |
-| `LOST` | silent for 6 s, no sign of jamming | 0 |
-| `JAMMED` | silent for 6 s while the radio shows interference | 0 |
+| `LOST` | silent for 5 s, no sign of jamming | 0 |
+| `JAMMED` | silent for 5 s while the radio shows interference lasting 2 s | 0 |
 
 Each state change goes out as a `LINK <STATE>: <reason>` STATUSTEXT, and the state and
 loss are published as `LNK_STATE` and `LNK_LOSS` alongside `TRUST_LNK`.
 
-Brief dropouts don't trip it: loss is measured over 10 s, the first 3 s of silence cost
-nothing, trust drops at once but climbs back at 0.1/s, and the state only steps back down
+**When autonomy acts.** Autonomy acts when `link_trust` falls below 0.4, which happens
+when the operator can't control the vehicle for more than 5 s: either no heartbeat for 5 s,
+or more than 30% of heartbeats lost over the last 30 s, continuously for 5 s. Short of that,
+trust stays at 0.45 or above, so the link can be `DEGRADED` without autonomy acting.
+
+The 30% rule is judged over 30 s because at 1 Hz ten heartbeats can't measure 30%: 10%
+random loss read as over 30% often enough to act. Even 30 samples can't fully separate a
+link near the threshold from one over it. In simulation, over five minutes of random loss:
+
+| Average loss | Autonomy acts, by the 30% rule (20 runs) |
+|---|---|
+| 10% | never |
+| 20% | 7 of 20 |
+| 25% | 16 of 20 |
+| 35% or more | every run, after about 35 to 50 s |
+
+Random loss also sometimes drops four heartbeats in a row, which is 5 s without contact
+and acts by the silence rule. `loss_act` and `loss_act_after_ms` in
+`core_link_config_default()` are the knobs.
+
+Brief dropouts don't trip it: a full dropout of up to 3 s never acts, the first 3 s of
+silence cost nothing, trust drops at once but climbs back at 0.1/s, and the state only steps back down
 after holding for 3 s. Steady loss doesn't make it bounce either: the link becomes
 `DEGRADED` below 0.7 trust but is only `NOMINAL` again at 0.85 with a clean 30 s record. So
 after an outage, trust (which autonomy acts on) recovers in about 10 s while the label
@@ -152,7 +172,8 @@ Limits:
   learning the rate kept turning that into wrong verdicts. So a GCS slower than configured
   reads as loss and must be configured; a faster one still has total loss caught by
   silence, but partial loss shows less. Partial loss is measured once 10 intervals have
-  passed; silence covers the first 10 s.
+  passed; silence covers the first 10 s. After an outage long enough to be `LOST`, loss is
+  counted again from the operator's return, so the outage isn't acted on twice.
 - **The noise floor is calibrated, then follows the link slowly.** It starts as the median
   of 10 samples while heartbeats are arriving, then follows with a time constant of about a
   minute, so a jammer that ramps up over tens of seconds is caught but one that creeps up

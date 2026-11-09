@@ -23,6 +23,7 @@ typedef struct {
     uint32_t gcs_interval_ms;  /* what the GCS actually sends */
     float drop;                /* probability each operator heartbeat is lost */
     uint32_t drop_every, sent; /* or exactly every Nth */
+    uint32_t drop_mask, drop_period; /* or the ones whose bit is set, repeating */
     uint32_t jitter_ms;        /* each one delivered up to this late or early */
     const uint32_t *delays;    /* or a repeating pattern of delivery delays */
     int delays_len, delays_i;
@@ -96,7 +97,9 @@ static void run(harness_t *h, uint32_t ms) {
         if (h->now >= h->next_gcs_ms) {
             h->next_gcs_ms += h->gcs_interval_ms;
             bool dropped = (float)rand() / (float)RAND_MAX < h->drop;
-            if (h->drop_every && ++h->sent % h->drop_every == 0) dropped = true;
+            h->sent++;
+            if (h->drop_every && h->sent % h->drop_every == 0) dropped = true;
+            if (h->drop_period && (h->drop_mask >> (h->sent % h->drop_period)) & 1u) dropped = true;
             if (h->gcs_on && !dropped && h->queued < QUEUE) {
                 uint64_t at = h->now;
                 if (h->jitter_ms) at += (uint64_t)(rand() % (int)(2 * h->jitter_ms + 1));
@@ -238,7 +241,7 @@ static void test_light_random_loss_tolerated(void) {
     h.drop = 0.1f;
     run(&h, 120000);
     assert(h.worst <= CORE_LINK_DEGRADED);
-    assert(h.min_trust >= 0.4f);
+    assert(h.min_trust >= 0.4f && "10% loss doesn't act in this seed; over long flights it occasionally can (README)");
 }
 
 static void test_steady_moderate_loss_doesnt_flap(void) {
@@ -259,6 +262,27 @@ static void test_steady_moderate_loss_doesnt_flap(void) {
     }
 }
 
+static void test_loss_under_30_percent_never_acts(void) {
+    /* Agreed threshold: autonomy acts above 30% loss, not at or below it. */
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.drop_every = 4; /* exactly 25% */
+    run(&h, 120000);
+    assert(h.worst == CORE_LINK_DEGRADED || h.worst == CORE_LINK_NOMINAL);
+    assert(h.min_trust >= 0.4f && "25% loss is degraded but still trusted");
+}
+
+static void test_loss_over_30_percent_acts(void) {
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.drop_mask = 0x5;  /* 2 of every 5: exactly 40% */
+    h.drop_period = 5;
+    run(&h, 30000);
+    assert(h.min_trust < 0.4f && "above 30% loss, autonomy acts");
+}
+
 static void test_heavy_loss_is_degraded_and_untrusted(void) {
     harness_t h;
     setup(&h);
@@ -274,11 +298,13 @@ static void test_silence_without_radio_is_lost(void) {
     setup(&h);
     settle(&h);
     h.gcs_on = false; /* silence counts from the last heartbeat, up to 1 s before this */
-    run(&h, 4800);
-    assert(h.last.silence_ms < 6000);
-    assert(h.last.state != CORE_LINK_LOST && "not yet: under lost_after_ms");
-    run(&h, 2400);
-    assert(h.last.state == CORE_LINK_LOST);
+    run(&h, 3800);
+    assert(h.last.silence_ms < 5000);
+    assert(h.last.state != CORE_LINK_LOST && "not yet: under 5 s");
+    assert(h.last.link_trust >= 0.4f && "and autonomy doesn't act yet");
+    while (h.last.silence_ms < 5000) run(&h, TICK_MS);
+    run(&h, 100);
+    assert(h.last.state == CORE_LINK_LOST && "operator unable to control for 5 s");
     assert(h.last.link_trust == 0.0f);
     assert(strstr(h.last.reason, "no radio data"));
 }
@@ -311,7 +337,7 @@ static void test_configured_slow_gcs(void) {
     run(&h, 180000);
     assert(h.worst == CORE_LINK_NOMINAL && "a GCS configured at 0.2 Hz is healthy at 0.2 Hz");
     h.gcs_on = false;
-    run(&h, 36000); /* 6 intervals, plus up to one since the last heartbeat */
+    run(&h, 31000); /* 5 intervals, plus up to one since the last heartbeat */
     assert(h.last.state == CORE_LINK_LOST);
 }
 
@@ -570,6 +596,8 @@ int main(void) {
     test_brief_dropouts_dont_flap();
     test_light_random_loss_tolerated();
     test_steady_moderate_loss_doesnt_flap();
+    test_loss_under_30_percent_never_acts();
+    test_loss_over_30_percent_acts();
     test_heavy_loss_is_degraded_and_untrusted();
     test_silence_without_radio_is_lost();
     test_recovery_is_gradual_and_doesnt_flap();

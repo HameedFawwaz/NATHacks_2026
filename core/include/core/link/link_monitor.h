@@ -23,7 +23,7 @@
  *   NOMINAL    heartbeats arriving as expected              about 1
  *   DEGRADED   heartbeats missing, weak signal, or          below 0.7
  *              interference while still connected
- *   LOST       silent, and the radio shows no jamming       0
+ *   LOST       silent 5 s, and the radio shows no jamming   0
  *   JAMMED     silent while the radio shows interference    0
  *
  * Telling JAMMED from LOST is a heuristic. With only RSSI to go on, "silent
@@ -65,10 +65,15 @@ typedef struct {
     uint32_t heartbeat_interval_ms;
     uint32_t window_ms;           /* loss is measured over this long (at least 10 heartbeat intervals) */
     uint32_t silence_grace_ms;    /* silence this short costs nothing (at least 3 heartbeat intervals) */
-    uint32_t lost_after_ms;       /* silence this long is LOST or JAMMED (at least 6 intervals) */
+    uint32_t lost_after_ms;       /* silence this long is LOST or JAMMED (at least 5 intervals) */
 
-    float loss_ok;  /* loss at or below this costs nothing... */
-    float loss_bad; /* ...and at or above this, trust is 0 */
+    /* Loss at or below loss_ok costs nothing. Up to loss_act the link is
+     * DEGRADED but still trusted; above loss_act for loss_act_after_ms,
+     * the operator can't control the vehicle and trust drops to 0. */
+    float loss_ok;
+    float loss_act;
+    uint32_t loss_act_after_ms;
+    float trusted_floor;    /* lowest trust before acting: just above autonomy's untrusted_below */
 
     float rssi_ok;          /* normalized RSSI (0..1) at or above this costs nothing... */
     float rssi_bad;         /* ...and at or below this, the score is rssi_floor_score */
@@ -121,6 +126,8 @@ typedef struct {
     uint64_t noise_pending_at[8];
     int noise_pending_len;
     uint64_t interference_since_ms; /* 0 = none now */
+    uint64_t heavy_loss_since_ms;   /* 0 = loss under loss_act now */
+    uint64_t window_start_ms;       /* loss is only counted from here: after an outage, from its end */
     uint64_t last_radio_ms; /* the RADIO_STATUS sample already folded into the floor */
 
     float trust;

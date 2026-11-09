@@ -23,9 +23,14 @@ void core_link_config_default(core_link_config_t *cfg) {
     cfg->heartbeat_interval_ms = 1000; /* what MAVProxy, QGroundControl and Mission Planner send */
     cfg->window_ms = 10000;
     cfg->silence_grace_ms = 3000;
-    cfg->lost_after_ms = 6000;
+    /* Autonomy acts when the operator can't control the vehicle for more than
+     * 5 s: silent that long, or losing 30% or more of heartbeats that long.
+     * Until then trust stays above autonomy's untrusted_below (0.4). */
+    cfg->lost_after_ms = 5000;
     cfg->loss_ok = 0.15f;
-    cfg->loss_bad = 0.6f;
+    cfg->loss_act = 0.30f;
+    cfg->loss_act_after_ms = 5000;
+    cfg->trusted_floor = 0.45f;
     cfg->rssi_ok = 0.35f;
     cfg->rssi_bad = 0.10f;
     cfg->rssi_floor_score = 0.5f;
@@ -57,6 +62,8 @@ static void reset_history(core_link_monitor_t *mon) {
     mon->noisy_but_healthy_since_ms = 0;
     mon->noise_pending_len = 0;
     mon->interference_since_ms = 0;
+    mon->heavy_loss_since_ms = 0;
+    mon->window_start_ms = 0;
     mon->state = CORE_LINK_UNKNOWN;
     mon->easing_since_ms = 0;
 }
@@ -136,7 +143,8 @@ static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint6
     if (window > fits) {
         window = fits;
     }
-    uint64_t span = now_ms - mon->first_heard_ms;
+    uint64_t start = mon->first_heard_ms > mon->window_start_ms ? mon->first_heard_ms : mon->window_start_ms;
+    uint64_t span = now_ms - start;
     if (span < MIN_LOSS_INTERVALS * interval) {
         return -1.0f;
     }
@@ -149,6 +157,7 @@ static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint6
             received++;
         }
     }
+
     /* Rounded down: the window catches a whole number of heartbeats, and the
      * fraction left over is phase, not loss. */
     float expected = (float)(span / interval);
@@ -316,7 +325,15 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
         return r;
     }
 
+    uint64_t heard_before = mon->last_heard_ms;
     record_arrivals(mon, &telemetry->gcs_heartbeat);
+    /* An outage long enough to be LOST was acted on already. Once the operator
+     * is back, it mustn't be counted again as loss in the window. */
+    uint32_t lost_ms_now = cfg->lost_after_ms > 5 * cfg->heartbeat_interval_ms ? cfg->lost_after_ms : 5 * cfg->heartbeat_interval_ms;
+    if (heard_before != 0 && mon->last_heard_ms - heard_before >= lost_ms_now) {
+        mon->window_start_ms = mon->last_heard_ms;
+        mon->heavy_loss_since_ms = 0;
+    }
     if (mon->last_heard_ms == 0) {
         mon->last_update_ms = now_ms;
         r.state = CORE_LINK_UNKNOWN;
@@ -333,7 +350,7 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
     float long_loss = measure_loss(mon, now_ms, cfg->nominal_window_ms);
     /* Scaled up for a GCS configured to send slowly. */
     uint32_t grace_ms = cfg->silence_grace_ms > 3 * interval ? cfg->silence_grace_ms : 3 * interval;
-    uint32_t lost_ms = cfg->lost_after_ms > 6 * interval ? cfg->lost_after_ms : 6 * interval;
+    uint32_t lost_ms = cfg->lost_after_ms > 5 * interval ? cfg->lost_after_ms : 5 * interval;
     bool silent_long = r.silence_ms >= lost_ms;
     bool silent_short = r.silence_ms > grace_ms;
 
@@ -354,8 +371,19 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
     }
     bool jam_confirmed = r.interference && now_ms - mon->interference_since_ms >= cfg->jam_confirm_ms;
 
-    float loss_score = ramp(r.loss, cfg->loss_ok, cfg->loss_bad, 0.0f);
-    float silence_score = ramp((float)r.silence_ms, (float)grace_ms, (float)lost_ms, 0.0f);
+    /* Heavy loss or silence only takes trust below the floor once it has lasted
+     * long enough that the operator can't control the vehicle. Measured loss
+     * moves in steps of a tenth, and 3 of 10 missing turns up now and then even
+     * on a 10% link, so it takes more than loss_act. */
+    bool heavy_loss = long_loss > cfg->loss_act + 0.001f;
+    if (!heavy_loss) {
+        mon->heavy_loss_since_ms = 0;
+    } else if (mon->heavy_loss_since_ms == 0) {
+        mon->heavy_loss_since_ms = now_ms;
+    }
+    bool loss_acts = heavy_loss && now_ms - mon->heavy_loss_since_ms >= cfg->loss_act_after_ms;
+    float loss_score = loss_acts ? 0.0f : ramp(r.loss, cfg->loss_ok, cfg->loss_act, cfg->trusted_floor);
+    float silence_score = silent_long ? 0.0f : ramp((float)r.silence_ms, (float)grace_ms, (float)lost_ms, cfg->trusted_floor);
     float rssi_score = rf.source == CORE_LINK_RF_NONE ? 1.0f : ramp(rf.rssi, cfg->rssi_ok, cfg->rssi_bad, cfg->rssi_floor_score);
     float raw = loss_score;
     if (silence_score < raw) raw = silence_score;
