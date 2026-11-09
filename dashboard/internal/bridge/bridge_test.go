@@ -399,6 +399,21 @@ type fakeVehicle struct {
 	silent            bool
 	loseFirstFinalAck bool // installs the mission but loses the ack, as a real link can
 	received          chan []mavlink.Frame
+	signer            *mavlink.Signer // nil: sends unsigned and accepts anything
+}
+
+func (f *fakeVehicle) encode(msgID uint32, payload []byte) []byte {
+	if f.signer != nil {
+		return f.signer.Encode(0, 1, 1, msgID, payload)
+	}
+	return mavlink.Encode(0, 1, 1, msgID, payload)
+}
+
+func (f *fakeVehicle) parse(data []byte) []mavlink.Frame {
+	if f.signer != nil {
+		return f.signer.Parse(data)
+	}
+	return mavlink.Parse(data)
 }
 
 func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
@@ -412,7 +427,7 @@ func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
 }
 
 func (f *fakeVehicle) send(msgID uint32, payload []byte) {
-	if _, err := f.conn.WriteToUDP(mavlink.Encode(0, 1, 1, msgID, payload), f.bridge); err != nil {
+	if _, err := f.conn.WriteToUDP(f.encode(msgID, payload), f.bridge); err != nil {
 		f.t.Error(err)
 	}
 }
@@ -436,7 +451,7 @@ func (f *fakeVehicle) serve(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		for _, fr := range mavlink.Parse(buf[:n]) {
+		for _, fr := range f.parse(buf[:n]) {
 			if f.silent {
 				continue
 			}
