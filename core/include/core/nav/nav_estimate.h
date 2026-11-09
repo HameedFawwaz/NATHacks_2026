@@ -72,7 +72,8 @@ void core_nav_estimate_config_default(core_nav_estimate_config_t *cfg);
 void core_nav_estimator_init(core_nav_estimator_t *estimator);
 
 /*
- * Call once per main-loop tick, after core_nav_detector_update. now_ms is on
+ * Call once per main-loop tick, after core_nav_detector_update. Any NULL
+ * argument yields CORE_NAV_EST_INVALID without touching state. now_ms is on
  * the same clock as telemetry timestamps (core_now_ms() in core_main).
  */
 core_nav_estimate_t core_nav_estimator_update(core_nav_estimator_t *estimator,
@@ -86,13 +87,14 @@ core_nav_estimate_t core_nav_estimator_update(core_nav_estimator_t *estimator,
  * Equirectangular projection about origin: north = R*dlat, east =
  * R*cos(origin_lat)*dlon, dlon wrapped to [-180,180). The exact inverse of
  * the dashboard's model.FromLocal. Returns false for non-finite or
- * out-of-range input, or an origin too near a pole for the projection.
+ * out-of-range input, an origin too near a pole for the projection (|lat| >
+ * 85 deg), or NULL outputs; the outputs are left untouched then.
  */
 bool core_nav_local_from_geo(double origin_lat_deg, double origin_lon_deg, double lat_deg, double lon_deg,
                              double *north_m, double *east_m);
 
 /* Sends EST_N then EST_E, and nothing at all unless estimate->status is READY.
- * Returns true only if both were sent. */
+ * Returns true only if both were sent; false for a NULL conn or estimate. */
 bool core_nav_estimate_publish(core_mavlink_conn_t *conn, const core_nav_estimate_t *estimate);
 
 const char *core_nav_estimate_status_name(core_nav_estimate_status_t status);

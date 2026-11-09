@@ -191,9 +191,22 @@ static void test_nothing_before_ready(void) {
     e = rig_step_with(&r, &t);
     CHECK(e.status == CORE_NAV_EST_READY);
 
-    /* publish() must refuse anything that isn't ready, before touching conn. */
+    /* publish() must refuse anything that isn't ready, before touching conn,
+     * and NULL arguments anywhere. */
     core_nav_estimate_t not_ready = {.status = CORE_NAV_EST_NOT_ANCHORED};
     CHECK(!core_nav_estimate_publish(NULL, &not_ready));
+    CHECK(!core_nav_estimate_publish(NULL, &e)); /* e is READY */
+    CHECK(!core_nav_estimate_publish((core_mavlink_conn_t *)&r, NULL));
+    double n = 1.0, east = 2.0;
+    CHECK(!core_nav_local_from_geo(HOME_LAT, HOME_LON, HOME_LAT, HOME_LON, NULL, &east));
+    CHECK(!core_nav_local_from_geo(HOME_LAT, HOME_LON, HOME_LAT, HOME_LON, &n, NULL));
+    CHECK(n == 1.0 && east == 2.0);
+    CHECK(core_nav_estimator_update(NULL, &r.detector, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
+    CHECK(core_nav_estimator_update(&r.estimator, NULL, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, NULL, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
 }
 
 /* The KF's origin is its last GPS anchor; the output must be relative to home,
@@ -316,6 +329,29 @@ static void test_invalid_values_withheld(void) {
     t.home_position.lat = 950000000; /* out of range */
     CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
           CORE_NAV_EST_NO_HOME);
+
+    /* Home is a valid position, but too near the pole for the projection. */
+    t = make_telemetry(&r.v, false, 0);
+    t.home_position.lat = 890000000;
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
+
+    /* A non-finite or out-of-range KF anchor fails projection. */
+    t = make_telemetry(&r.v, false, 0);
+    double saved_lat = r.detector.kf_long.anchor_lat_deg, saved_lon = r.detector.kf_long.anchor_lon_deg;
+    r.detector.kf_long.anchor_lat_deg = NAN;
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
+    r.detector.kf_long.anchor_lat_deg = saved_lat;
+    r.detector.kf_long.anchor_lon_deg = INFINITY;
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
+    r.detector.kf_long.anchor_lon_deg = 200.0;
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
+    r.detector.kf_long.anchor_lon_deg = saved_lon;
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_READY);
 
     t = make_telemetry(&r.v, false, 0);
     r.detector.kf_long.east.p = NAN;

@@ -33,7 +33,7 @@ static bool lat_lon_in_range(double lat_deg, double lon_deg) {
 
 bool core_nav_local_from_geo(double origin_lat_deg, double origin_lon_deg, double lat_deg, double lon_deg,
                              double *north_m, double *east_m) {
-    if (!lat_lon_in_range(origin_lat_deg, origin_lon_deg) || !lat_lon_in_range(lat_deg, lon_deg) ||
+    if (!north_m || !east_m || !lat_lon_in_range(origin_lat_deg, origin_lon_deg) || !lat_lon_in_range(lat_deg, lon_deg) ||
         fabs(origin_lat_deg) > MAX_ORIGIN_ABS_LAT_DEG) {
         return false;
     }
@@ -75,7 +75,11 @@ core_nav_estimate_t core_nav_estimator_update(core_nav_estimator_t *estimator,
                                                const core_nav_config_t *nav_cfg,
                                                const core_nav_estimate_config_t *cfg,
                                                uint64_t now_ms) {
-    core_nav_estimate_t out = {.status = CORE_NAV_EST_READY, .north_m = 0.0, .east_m = 0.0, .dead_reckon_ms = 0};
+    core_nav_estimate_t out = {.status = CORE_NAV_EST_INVALID, .north_m = 0.0, .east_m = 0.0, .dead_reckon_ms = 0};
+    if (!estimator || !detector || !telemetry || !nav_cfg || !cfg) {
+        return out;
+    }
+    out.status = CORE_NAV_EST_READY;
     const core_nav_kf_set_t *kf = &detector->kf_long;
 
     /* Gap tracking runs every tick, whatever else is missing, so a gap during
@@ -125,13 +129,18 @@ core_nav_estimate_t core_nav_estimator_update(core_nav_estimator_t *estimator,
         return out;
     }
 
-    double anchor_north_m, anchor_east_m;
-    bool projected = core_nav_local_from_geo((double)telemetry->home_position.lat / 1e7,
-                                             (double)telemetry->home_position.lon / 1e7, kf->anchor_lat_deg,
-                                             kf->anchor_lon_deg, &anchor_north_m, &anchor_east_m);
+    /* Fails for a non-finite or out-of-range anchor, or a home too near a pole
+     * for the projection; the outputs are unassigned then, so stop here. */
+    double anchor_north_m = 0.0, anchor_east_m = 0.0;
+    if (!core_nav_local_from_geo((double)telemetry->home_position.lat / 1e7,
+                                 (double)telemetry->home_position.lon / 1e7, kf->anchor_lat_deg, kf->anchor_lon_deg,
+                                 &anchor_north_m, &anchor_east_m)) {
+        out.status = CORE_NAV_EST_INVALID;
+        return out;
+    }
     double north_m = anchor_north_m + (double)kf->north.p;
     double east_m = anchor_east_m + (double)kf->east.p;
-    if (!projected || !isfinite(north_m) || !isfinite(east_m) || fabs(north_m) > (double)cfg->max_abs_m ||
+    if (!isfinite(north_m) || !isfinite(east_m) || fabs(north_m) > (double)cfg->max_abs_m ||
         fabs(east_m) > (double)cfg->max_abs_m) {
         out.status = CORE_NAV_EST_INVALID;
         return out;
@@ -142,7 +151,7 @@ core_nav_estimate_t core_nav_estimator_update(core_nav_estimator_t *estimator,
 }
 
 bool core_nav_estimate_publish(core_mavlink_conn_t *conn, const core_nav_estimate_t *estimate) {
-    if (estimate->status != CORE_NAV_EST_READY) {
+    if (!conn || !estimate || estimate->status != CORE_NAV_EST_READY) {
         return false;
     }
     bool ok = core_mavlink_send_named_value_float(conn, "EST_N", (float)estimate->north_m);
