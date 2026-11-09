@@ -97,6 +97,18 @@
       <h2>01 <span>System health</span></h2>
       <div id="health" class="health"></div>
 
+      <section class="recovery-panel" aria-labelledby="recovery-heading">
+        <h2 id="recovery-heading">Automatic recovery <span id="recovery-state">Recovery: unavailable</span></h2>
+        <p id="recovery-explanation" class="section-description">Detection stays on. Disabling stops new automatic commands; it does not undo the current flight mode or navigation source.</p>
+        <p id="recovery-capability" class="section-description" hidden></p>
+        <p id="recovery-behavior" class="section-description" hidden></p>
+        <p class="section-description">All clear ends fault injection only. Health recovers after detector validation, not instantly.</p>
+        <div class="actions" id="recovery-controls" hidden>
+          <button id="recovery-toggle" class="btn">Enable automatic recovery</button>
+        </div>
+        <p id="recovery-status" class="plan-status" role="status" hidden></p>
+      </section>
+
       <div id="sim-demo">
         <h2>02 <span>Threat simulator</span><small>DEMO ONLY</small></h2>
         <p class="section-description">Inject a fault. Watch trust respond.</p>

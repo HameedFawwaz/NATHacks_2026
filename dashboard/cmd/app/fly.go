@@ -24,6 +24,12 @@ func (a *app) bindFly() {
 				go a.startFlight()
 			}
 		})
+		onClick(byID("recovery-toggle"), func(js.Value) {
+			if a.live.recovering || !a.recoveryFresh() || !a.snap.RecoveryControllable {
+				return
+			}
+			go a.setRecovery(!a.snap.RecoveryEnabled)
+		})
 		onClick(byID("live-faults"), func(e js.Value) {
 			value := e.Get("target").Call("closest", "button[data-fault]")
 			if value.IsNull() || a.live.injecting || !a.snap.Connected {
@@ -77,6 +83,7 @@ func (a *app) renderFly() {
 	a.health.render(subsystems)
 	a.renderSummary(subsystems)
 	a.renderInstruments()
+	a.renderRecovery()
 
 	if a.live != nil {
 		a.renderFlyAction()
@@ -92,6 +99,66 @@ func (a *app) renderFly() {
 		b := buttons.Index(i)
 		setClass(b, "active", b.Call("getAttribute", "data-scenario").String() == strconv.Itoa(int(a.sim.Scenario())))
 	}
+}
+
+func (a *app) recoveryFresh() bool {
+	return a.live != nil && a.snap.Connected && a.snap.RecoveryAtMs != 0 && a.snap.NowMs-a.snap.RecoveryAtMs <= model.StaleAfterMs
+}
+
+func (a *app) renderRecovery() {
+	state := byID("recovery-state")
+	button := byID("recovery-toggle")
+	controls := byID("recovery-controls")
+	if a.recoveryFresh() {
+		enabled := a.snap.RecoveryEnabled
+		if enabled {
+			setText(state, "Automatic recovery enabled")
+			setText(button, "Disable automatic recovery")
+		} else {
+			setText(state, "Automatic recovery disabled")
+			setText(button, "Enable automatic recovery")
+		}
+		controls.Set("hidden", false)
+		button.Set("disabled", a.live.recovering || !a.snap.RecoveryControllable)
+		if a.snap.RecoveryControllable {
+			button.Set("title", "")
+		} else {
+			button.Set("title", "Controls unavailable on this core.")
+		}
+	} else {
+		setText(state, "Recovery: unavailable")
+		controls.Set("hidden", false)
+		button.Set("disabled", true)
+		if a.live == nil {
+			button.Set("title", "Recovery controls are unavailable in browser simulation.")
+		} else {
+			button.Set("title", "Waiting for fresh connected telemetry with a recovery setting.")
+		}
+	}
+	capability := byID("recovery-capability")
+	if a.recoveryFresh() && !a.snap.RecoveryControllable {
+		setText(capability, "Controls unavailable on this core. The recovery setting is reported but cannot be changed here.")
+		capability.Set("hidden", false)
+	} else if a.live == nil {
+		setText(capability, "Controls unavailable in browser simulation; this is not a recovery control test.")
+		capability.Set("hidden", false)
+	} else {
+		capability.Set("hidden", true)
+	}
+	behavior := byID("recovery-behavior")
+	if a.snap.Connected && a.snap.Armed && a.snap.Behavior != "" {
+		setText(behavior, model.BehaviorText(a.snap.Behavior))
+		behavior.Set("hidden", false)
+	} else {
+		behavior.Set("hidden", true)
+	}
+}
+
+func (a *app) showRecoveryStatus(text string, isError bool) {
+	status := byID("recovery-status")
+	setText(status, text)
+	status.Set("hidden", text == "")
+	setClass(status, "error", isError)
 }
 
 // renderFlyAction enables the live "Start flight" button only when it can
