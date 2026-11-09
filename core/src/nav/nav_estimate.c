@@ -12,10 +12,12 @@ void core_nav_estimate_config_default(core_nav_estimate_config_t *cfg) {
     /* 25 samples at the requested 50 Hz; a longer silence means the filter
      * has stopped propagating and anything published would be stale. */
     cfg->imu_max_age_ms = 500;
-    /* Normal flight re-anchors every dr_long_horizon_ms (8 s). Only a spoof
-     * the drift check rejects keeps the anchor older; past a minute of pure
-     * accelerometer integration the position is no longer worth drawing. */
-    cfg->max_dead_reckon_ms = 60000;
+    /* Normal flight re-anchors every dr_long_horizon_ms (8 s); only a spoof
+     * the drift check rejects keeps the anchor older. With no bias tracking,
+     * pure dead reckoning degrades fast: in the SITL slow-ramp run (after the
+     * autopilot failed over) error versus truth stayed under ~5 m to 15 s
+     * from the anchor, passed 10 m near 19 s and grew ~4 m/s after that. */
+    cfg->max_dead_reckon_ms = 15000;
     /* Same bound the dashboard applies to EST_N/EST_E. */
     cfg->max_abs_m = 100000.0f;
 }

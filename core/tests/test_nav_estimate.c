@@ -259,6 +259,22 @@ static void test_stale_imu_withholds_until_reanchor(void) {
     CHECK(est_error_m(&e, &r.v) < 0.5);
 }
 
+/* IMU and GPS both stop while the autopilot link (home, attitude) stays up:
+ * the detector's IMU-paced clock freezes, but the estimate must still go. */
+static void test_imu_and_gps_silence_withheld(void) {
+    rig_t r;
+    rig_init(&r, 10.0, 10.0, 3.0f, 0.0f);
+    for (int i = 0; i < 100; i++) rig_step(&r, 0.0);
+    core_telemetry_t frozen = make_telemetry(&r.v, true, 0);
+    frozen.imu.last_update_ms = frozen.gps_raw.last_update_ms = r.v.t_ms - 20;
+    core_nav_estimate_t e = {0};
+    for (int i = 0; i < 50; i++) {
+        frozen.attitude.last_update_ms = frozen.home_position.last_update_ms = r.v.t_ms;
+        e = rig_step_with(&r, &frozen);
+    }
+    CHECK(e.status == CORE_NAV_EST_IMU_STALE);
+}
+
 static void test_imu_absent_from_start_is_not_a_gap(void) {
     rig_t r;
     rig_init(&r, 0, 0, 0, 0);
@@ -307,28 +323,32 @@ static void test_invalid_values_withheld(void) {
           CORE_NAV_EST_INVALID);
 }
 
-/* 1.5 m/s spoof north, hovering truth: GPS walks away, the estimate stays. */
+/* 1.5 m/s spoof north, hovering truth: GPS walks away, the estimate stays
+ * until the dead-reckoning cap, then is withdrawn rather than left to rot. */
 static void test_slow_spoof_not_followed(void) {
     rig_t r;
     rig_init(&r, 40.0, 25.0, 0.0f, 0.0f);
     for (int i = 0; i < 500; i++) rig_step(&r, 0.0); /* 10 s clean */
 
-    double offset = 0.0, worst = 0.0;
+    double offset = 0.0, worst = 0.0, widest_gap = 0.0;
     core_nav_estimate_t e = {0};
     for (int i = 0; i < 2000; i++) { /* 40 s of spoof */
         offset += 1.5 * 0.02;
         e = rig_step(&r, offset);
-        if (i > 750 && e.status == CORE_NAV_EST_READY) {
+        if (e.status == CORE_NAV_EST_READY) {
             double err = est_error_m(&e, &r.v);
             if (err > worst) worst = err;
+            if (offset - err > widest_gap) widest_gap = offset - err;
+            CHECK(e.dead_reckon_ms <= r.est_cfg.max_dead_reckon_ms);
+        } else {
+            CHECK(e.status == CORE_NAV_EST_DR_EXPIRED);
         }
     }
-    CHECK(e.status == CORE_NAV_EST_READY);
-    CHECK(offset > 55.0);
+    CHECK(e.status == CORE_NAV_EST_DR_EXPIRED);
     /* At most the drift absorbed before the long check reached warn (~10 m)
-     * is carried; the gap to GPS keeps growing with the spoof. */
+     * is carried, while the gap to GPS visibly opens. */
     CHECK(worst < 12.5);
-    CHECK(offset - est_error_m(&e, &r.v) > 40.0);
+    CHECK(widest_gap > 15.0);
 }
 
 int main(void) {
@@ -336,6 +356,7 @@ int main(void) {
     test_nothing_before_ready();
     test_home_relative_in_normal_flight();
     test_stale_imu_withholds_until_reanchor();
+    test_imu_and_gps_silence_withheld();
     test_imu_absent_from_start_is_not_a_gap();
     test_dead_reckoning_age_limit();
     test_invalid_values_withheld();

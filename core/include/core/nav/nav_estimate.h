@@ -48,7 +48,7 @@ typedef enum {
 
 typedef struct {
     uint32_t imu_max_age_ms;       /* newest IMU sample older than this = stale. default 500 */
-    uint32_t max_dead_reckon_ms;   /* stop publishing this long after the last anchor. default 60000 */
+    uint32_t max_dead_reckon_ms;   /* stop publishing this long after the last anchor. default 15000 */
     float max_abs_m;               /* |north|,|east| bound, matches the dashboard's. default 100000 */
 } core_nav_estimate_config_t;
 
