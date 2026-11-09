@@ -328,9 +328,10 @@ def run_window(sitl, duration_s, step_fn, label):
         "behaviors_entered": [b for _, b in behaviors],
         "time_to_first_behavior_s": round(behaviors[0][0] - began, 1) if behaviors else None,
     }
+    detected = f"{result['detect_time_s']}s" if result["detect_time_s"] is not None else "never"
     print(
         f"  max true drift: {result['max_true_drift_m']} m, lowest TRUST_NAV: {result['lowest_nav_trust']}, "
-        f"detected at: {result['detect_time_s']}s, behaviors: {result['behaviors_entered'] or 'none'}"
+        f"detected at: {detected}, behaviors: {result['behaviors_entered'] or 'none'}"
     )
     return result
 
