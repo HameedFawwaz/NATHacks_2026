@@ -105,14 +105,18 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
      * "cruise" control). The gyro's bias is learned over the same disarmed
      * stretch, for the same reason. */
     {
-        bool armed = telemetry->heartbeat.valid && (telemetry->heartbeat.base_mode & MAV_MODE_FLAG_ARMED) != 0;
+        bool disarmed = telemetry->heartbeat.valid && (telemetry->heartbeat.base_mode & MAV_MODE_FLAG_ARMED) == 0;
         bool attitude_fresh = telemetry->attitude.valid &&
-                              (core_now_ms() - telemetry->attitude.last_update_ms) < cfg->imu_stale_ms;
-        if (!armed) {
+                              (core_now_ms() - telemetry->attitude.last_update_ms) < cfg->imu_stale_ms &&
+                              isfinite(telemetry->attitude.yaw);
+        if (disarmed) {
             /* Disarmed means sitting still, so whatever the gyro reads is bias. */
             core_attitude_filter_learn_gyro_bias(&detector->attitude, &telemetry->imu);
+        } else {
+            /* Never treat the entire flight as one calibration interval on landing. */
+            detector->attitude.bias_last_ms = 0;
         }
-        if (!armed && attitude_fresh && detector->attitude.initialized) {
+        if (disarmed && attitude_fresh && detector->attitude.initialized) {
             core_attitude_filter_seed_yaw(&detector->attitude, telemetry->attitude.yaw);
             detector->yaw_seeded = true;
         }
@@ -132,6 +136,7 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
     const core_attitude_filter_t *kf_attitude = &detector->attitude;
     core_attitude_filter_t fc_attitude;
     if (cfg->kf_attitude_from_fc && telemetry->attitude.valid &&
+        isfinite(telemetry->attitude.roll) && isfinite(telemetry->attitude.pitch) && isfinite(telemetry->attitude.yaw) &&
         (core_now_ms() - telemetry->attitude.last_update_ms) < cfg->imu_stale_ms) {
         fc_attitude = detector->attitude;
         fc_attitude.roll = telemetry->attitude.roll;
@@ -201,7 +206,8 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
          * anything. Assumes the nose points along the track, as a copter's
          * does in AUTO/GUIDED by default. Only once; it free-integrates from
          * gyro after that, as designed. */
-        if (!detector->yaw_seeded && gps->cog_cdeg != UINT16_MAX && gps->vel_cms >= COG_SEED_MIN_SPEED_CMS) {
+        if (!detector->yaw_seeded && gps->cog_cdeg != UINT16_MAX && gps->vel_cms != UINT16_MAX &&
+            gps->vel_cms >= COG_SEED_MIN_SPEED_CMS) {
             core_attitude_filter_seed_yaw(&detector->attitude, cog_cdeg_to_rad(gps->cog_cdeg));
             detector->yaw_seeded = true;
         }

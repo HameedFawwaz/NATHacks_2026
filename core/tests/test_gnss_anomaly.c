@@ -640,6 +640,79 @@ static void test_yaw_not_seeded_from_stationary_cog(void) {
     assert(fabsf(detector.attitude.yaw - (float)M_PI / 2.0f) < 0.01f);
 }
 
+static void test_gps_sample_ahead_of_imu_is_fresh(void) {
+    core_nav_config_t cfg;
+    core_nav_config_default(&cfg);
+    core_nav_detector_t detector;
+    core_nav_detector_init(&detector, &cfg);
+    sim_vehicle_t v;
+    sim_vehicle_init(&v, 47.397742, -122.397456, 10.0, 0.0f, 0.0f);
+    core_telemetry_t t = make_telemetry(&v);
+    t.imu.last_update_ms = 1000;
+    t.gps_raw.last_update_ms = 1001;
+    core_nav_result_t r = core_nav_detector_update(&detector, &t, &cfg);
+    assert(r.score_health == 1.0f);
+    assert(!(r.flags & CORE_NAV_FLAG_GPS_UNHEALTHY));
+}
+
+static void test_bias_calibration_does_not_include_flight_gap(void) {
+    core_nav_config_t cfg;
+    core_nav_config_default(&cfg);
+    core_nav_detector_t detector;
+    core_nav_detector_init(&detector, &cfg);
+    sim_vehicle_t v;
+    sim_vehicle_init(&v, 47.397742, -122.397456, 10.0, 0.0f, 0.0f);
+    core_telemetry_t t = make_telemetry(&v);
+    t.heartbeat.valid = true;
+    t.imu.last_update_ms = 1000;
+    core_nav_detector_update(&detector, &t, &cfg);
+    t.heartbeat.base_mode = 128;
+    t.imu.last_update_ms = 61000;
+    core_nav_detector_update(&detector, &t, &cfg);
+    t.heartbeat.base_mode = 0;
+    t.imu.last_update_ms = 61020;
+    t.imu.xgyro_rps = 0.5f; /* a brief landing motion, not a minute of bias */
+    core_nav_detector_update(&detector, &t, &cfg);
+    assert(detector.attitude.gyro_bias[0] == 0.0f);
+}
+
+static void test_unknown_speed_does_not_seed_cog(void) {
+    core_nav_config_t cfg;
+    core_nav_config_default(&cfg);
+    core_nav_detector_t detector;
+    core_nav_detector_init(&detector, &cfg);
+    sim_vehicle_t v;
+    sim_vehicle_init(&v, 47.397742, -122.397456, 10.0, 0.0f, 0.0f);
+    core_telemetry_t t = make_telemetry(&v);
+    t.gps_raw.cog_cdeg = 9000;
+    t.gps_raw.vel_cms = UINT16_MAX;
+    core_nav_detector_update(&detector, &t, &cfg);
+    assert(!detector.yaw_seeded);
+}
+
+static void test_nonfinite_fc_attitude_uses_fallback(void) {
+    core_nav_config_t cfg;
+    core_nav_config_default(&cfg);
+    core_nav_detector_t detector;
+    core_nav_detector_init(&detector, &cfg);
+    sim_vehicle_t v;
+    sim_vehicle_init(&v, 47.397742, -122.397456, 10.0, 0.0f, 0.0f);
+    for (int i = 0; i < 150; i++) {
+        core_telemetry_t t = make_telemetry(&v);
+        t.attitude.valid = true;
+        t.attitude.last_update_ms = core_now_ms();
+        if (i % 3 == 0) t.attitude.roll = NAN;
+        if (i % 3 == 1) t.attitude.pitch = INFINITY;
+        if (i % 3 == 2) t.attitude.yaw = NAN;
+        core_nav_result_t r = core_nav_detector_update(&detector, &t, &cfg);
+        assert(isfinite(r.nav_trust));
+        sim_vehicle_step(&v, 20);
+    }
+    double lat, lon, alt;
+    core_nav_kf_set_get_position(&detector.kf_short, &lat, &lon, &alt);
+    assert(isfinite(lat) && isfinite(lon) && isfinite(alt));
+}
+
 int main(void) {
     test_normal_flight();
     test_instant_jump();
@@ -654,5 +727,9 @@ int main(void) {
     test_imu_loss_not_treated_as_attack();
     test_yaw_seed_from_fc_heading_until_armed();
     test_yaw_not_seeded_from_stationary_cog();
+    test_gps_sample_ahead_of_imu_is_fresh();
+    test_bias_calibration_does_not_include_flight_gap();
+    test_unknown_speed_does_not_seed_cog();
+    test_nonfinite_fc_attitude_uses_fallback();
     return 0;
 }
