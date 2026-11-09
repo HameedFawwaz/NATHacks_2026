@@ -23,6 +23,7 @@ const (
 	// Below this median RPM the motors aren't really spinning (armed on the ground,
 	// throttle cut), so their RPMs say nothing about each other.
 	minSpinRPM = 100
+
 	// Core's estimate is metres north (EST_N) and east (EST_E) of the autopilot's
 	// home. Anything beyond this is garbage, not a position.
 	maxEstimateM = 100_000

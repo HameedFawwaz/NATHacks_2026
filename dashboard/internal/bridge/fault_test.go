@@ -172,3 +172,20 @@ func TestHTTPFault(t *testing.T) {
 		t.Error("jump not applied")
 	}
 }
+
+// Fault injection goes through the same signed send and receive path as
+// everything else, so it must work when the link is signed (issue #18).
+func TestFaultOnSignedLink(t *testing.T) {
+	key := testKey(1)
+	b, f, ctx := setupSigned(t, key, &key)
+	f.params = sitlParams()
+	go f.serve(ctx) // only accepts what's signed with key
+	connect(t, b, f)
+
+	if err := b.SetFault(ctx, FaultGPSJump); err != nil {
+		t.Fatalf("jump on a signed link: %v", err)
+	}
+	if f.param("SIM_GPS1_GLTCH_X") != gpsJumpDeg {
+		t.Error("jump not applied")
+	}
+}

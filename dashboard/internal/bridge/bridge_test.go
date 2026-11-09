@@ -457,7 +457,6 @@ type fakeVehicle struct {
 	silent            bool
 	loseFirstFinalAck bool // installs the mission but loses the ack, as a real link can
 	received          chan []mavlink.Frame
-	signer            *mavlink.Signer    // nil: sends unsigned and accepts anything
 	commands          chan mavlink.Frame // every COMMAND_LONG received, for command-sequence tests
 
 	// Parameters the vehicle has, echoed back on PARAM_SET like ArduPilot does.
@@ -465,6 +464,7 @@ type fakeVehicle struct {
 	// SIM_* parameters.
 	paramMu sync.Mutex
 	params  map[string]float32
+	signer  *mavlink.Signer // nil: sends unsigned and accepts anything
 }
 
 // param reads one of the vehicle's parameters.
