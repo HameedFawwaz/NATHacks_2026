@@ -432,6 +432,58 @@ static void test_operator_rebaseline(void) {
     CHECK(r.detector.nav_trust > 0.99f);
 }
 
+static bool backup_step(rig_t *r, core_nav_backup_recovery_t *recovery, core_gps_raw_t *last_gps,
+                        double offset, bool permitted, bool bad_velocity) {
+    core_telemetry_t t = make_telemetry(&r->v, r->tick % 10 == 0, offset);
+    if (t.gps_raw.valid) *last_gps = t.gps_raw;
+    else t.gps_raw = *last_gps;
+    t.global_position.vx = (int16_t)lrintf(r->v.vn * 100);
+    t.global_position.vy = (int16_t)lrintf(r->v.ve * 100) + (bad_velocity ? 200 : 0);
+    t.heartbeat.valid = true;
+    t.heartbeat.last_update_ms = r->v.t_ms;
+    core_nav_detector_update(&r->detector, &t, &r->nav_cfg);
+    float trust_before = r->detector.nav_trust;
+    bool recovered = core_nav_detector_recover_from_backup(&r->detector, recovery, &t, r->v.t_ms, permitted);
+    CHECK(r->detector.nav_trust == trust_before);
+    r->v.t_ms += 20;
+    r->v.north_m += r->v.vn * 0.02;
+    r->v.east_m += r->v.ve * 0.02;
+    ++r->tick;
+    return recovered;
+}
+
+static void test_backup_recovery(void) {
+    for (int rate = 0; rate < 2; ++rate) {
+        rig_t r;
+        core_nav_backup_recovery_t rec = {0};
+        core_gps_raw_t gps = {0};
+        rig_init(&r, 40, 25, 2, 1);
+        for (int i = 0; i < 500; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+        for (int i = 0; i < 4000; ++i) {
+            CHECK(!backup_step(&r, &rec, &gps, (i + 1) * (rate ? 3.0 : 1.5) * .02, true, false));
+            if (i > 1500) CHECK(r.detector.nav_trust < 0.1f);
+        }
+        r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000;
+        for (int i = 0; i < 600; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, false, false));
+        CHECK(r.detector.nav_trust < 0.1f);
+        for (int i = 0; i < 600; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, true));
+        for (int i = 0; i < 350; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+        /* A single missing backup or non-finite IMU sample cancels the full
+         * window, rather than permitting a partial-window reacquisition. */
+        core_telemetry_t invalid = make_telemetry(&r.v, false, 0);
+        invalid.gps_raw = gps;
+        invalid.heartbeat.valid = true;
+        invalid.heartbeat.last_update_ms = r.v.t_ms;
+        invalid.imu.xacc_mps2 = NAN;
+        CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &invalid, r.v.t_ms, true));
+        CHECK(rec.start_ms == 0);
+        bool recovered = false;
+        for (int i = 0; i < 1500; ++i) recovered |= backup_step(&r, &rec, &gps, 0, true, false);
+        CHECK(recovered);
+        CHECK(r.detector.nav_trust > .99f);
+    }
+}
+
 int main(void) {
     test_projection_matches_dashboard_inverse();
     test_nothing_before_ready();
@@ -443,6 +495,7 @@ int main(void) {
     test_invalid_values_withheld();
     test_slow_spoof_not_followed();
     test_operator_rebaseline();
+    test_backup_recovery();
     printf("test_nav_estimate: all passed\n");
     return 0;
 }

@@ -94,6 +94,66 @@ bool core_nav_detector_operator_rebaseline(core_nav_detector_t *detector, const 
     return true;
 }
 
+bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_nav_backup_recovery_t *recovery,
+                                           const core_telemetry_t *telemetry, uint64_t now_ms, bool permitted) {
+    if (!recovery) return false;
+    if (!detector || !telemetry || !permitted) {
+        memset(recovery, 0, sizeof(*recovery));
+        return false;
+    }
+    const core_gps_raw_t *gps = &telemetry->gps_raw;
+    const core_global_position_t *pos = &telemetry->global_position;
+    const core_imu_t *imu = &telemetry->imu;
+    const core_nav_result_t *s = &detector->cached_scores;
+    bool good = telemetry->heartbeat.valid && rebaseline_fresh(now_ms, telemetry->heartbeat.last_update_ms, 2000) &&
+        imu->valid && rebaseline_fresh(now_ms, imu->last_update_ms, 500) &&
+        isfinite(imu->xacc_mps2) && isfinite(imu->yacc_mps2) && isfinite(imu->zacc_mps2) &&
+        isfinite(imu->xgyro_rps) && isfinite(imu->ygyro_rps) && isfinite(imu->zgyro_rps) &&
+        gps->valid && gps->fix_type >= 3 && rebaseline_fresh(now_ms, gps->last_update_ms, 800) &&
+        gps->time_usec && gps->eph != UINT16_MAX && gps->eph <= 200 && gps->vel_cms != UINT16_MAX &&
+        (gps->vel_cms < 30 || gps->cog_cdeg < 36000) &&
+        (gps->lat != 0 || gps->lon != 0) && gps->lat >= -850000000 && gps->lat <= 850000000 &&
+        gps->lon >= -1800000000 && gps->lon <= 1800000000 && pos->valid &&
+        rebaseline_fresh(now_ms, pos->last_update_ms, 500) &&
+        pos->lat >= -850000000 && pos->lat <= 850000000 && pos->lon >= -1800000000 && pos->lon <= 1800000000 &&
+        detector->have_prev_gps && detector->prev_gps_raw.last_update_ms == gps->last_update_ms &&
+        detector->have_cached_scores && s->score_jump >= 1.0f && s->score_time >= 1.0f &&
+        s->score_eph >= 1.0f && s->score_ekf >= 1.0f;
+    if (good) {
+        float speed = gps->vel_cms / 100.0f;
+        float cog = gps->cog_cdeg < 36000 ? cog_cdeg_to_rad(gps->cog_cdeg) : 0.0f;
+        float vn = speed * cosf(cog), ve = speed * sinf(cog);
+        good = distance_m(gps->lat / 1e7, gps->lon / 1e7, pos->lat / 1e7, pos->lon / 1e7) <= 3.0f &&
+               hypotf(vn - pos->vx / 100.0f, ve - pos->vy / 100.0f) <= 1.0f;
+    }
+    if (!good || (recovery->last_gps_ms && gps->last_update_ms < recovery->last_gps_ms) ||
+        (recovery->last_gps_ms && gps->last_update_ms != recovery->last_gps_ms &&
+         (gps->last_update_ms - recovery->last_gps_ms >= 800 || gps->time_usec <= recovery->last_gps_time_usec))) {
+        recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
+        return false;
+    }
+    if (recovery->consumed) {
+        if (s->score_dr >= 1.0f && s->score_drift >= 1.0f && detector->nav_trust >= 0.99f)
+            recovery->consumed = false;
+        return false;
+    }
+    if (!recovery->start_ms) recovery->start_ms = now_ms;
+    bool new_fix = gps->last_update_ms != recovery->last_gps_ms;
+    if (new_fix) {
+        recovery->last_gps_ms = gps->last_update_ms;
+        recovery->last_gps_time_usec = gps->time_usec;
+    }
+    if (new_fix && now_ms >= recovery->start_ms && now_ms - recovery->start_ms >= 8000 &&
+        (s->score_dr < 1.0f || s->score_drift < 1.0f)) {
+        core_nav_kf_set_reanchor(&detector->kf_short, gps);
+        core_nav_kf_set_reanchor(&detector->kf_long, gps);
+        recovery->consumed = true;
+        recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
+        return true;
+    }
+    return false;
+}
+
 core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
                                             const core_telemetry_t *telemetry,
                                             const core_nav_config_t *cfg) {

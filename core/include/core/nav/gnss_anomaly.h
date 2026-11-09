@@ -87,6 +87,26 @@ bool core_nav_detector_operator_rebaseline(core_nav_detector_t *detector,
                                             const core_nav_config_t *cfg,
                                             uint64_t now_ms, bool operator_confirmed);
 
+/* Zero-initialize once. Call after detector_update on every loop, with now_ms
+ * on the telemetry clock. Permission must be true ONLY while the deployment
+ * explicitly opts in to a known GPS-free backup AND the FC has acknowledged
+ * selecting it without failover failure. Source-set number is not proof of
+ * independence. False permission or missing/stale evidence cancels the
+ * candidate. Returns true only on an actual reanchor; never sets trust/scores.
+ * GPS/backup agreement cannot detect a common-mode or sufficiently small
+ * spoof, and relies on backup position AND velocity remaining independent. */
+typedef struct {
+    uint64_t start_ms;
+    uint64_t last_gps_ms;
+    uint64_t last_gps_time_usec;
+    bool consumed;
+} core_nav_backup_recovery_t;
+
+bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector,
+                                           core_nav_backup_recovery_t *recovery,
+                                           const core_telemetry_t *telemetry,
+                                           uint64_t now_ms, bool permitted);
+
 /* Call on every telemetry poll tick (not just when GPS updates - the IMU/baro
  * driven filters, GPS/IMU staleness tracking, and the published trust slew
  * all need to run in between GPS fixes too). Internally only re-evaluates
