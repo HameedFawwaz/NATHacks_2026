@@ -10,6 +10,25 @@ import run_gnss_e2e_scenarios as e2e
 
 
 class ReportingTests(unittest.TestCase):
+    def test_estimate_scoring_uses_only_fresh_simulator_velocity(self):
+        sitl = object.__new__(e2e.Sitl)
+        sitl.status = {"est_n": 1.0, "est_n_at": 10.0, "home": (10.0, 20.0),
+                       "sim_truth": (9.9, 10.0, 20.0, 10.0, 0.0),
+                       "gps_pos": None, "est_samples": [], "est_rejects": []}
+        with patch.object(e2e.time, "monotonic", return_value=10.0):
+            sitl._note_estimate(0.0)
+        sample = sitl.status["est_samples"][-1]
+        self.assertAlmostEqual(sample["error_m"], 0.0)
+        self.assertAlmostEqual(sample["truth_age_s"], 0.1)
+        sitl.status.update(est_n=1.0, est_n_at=11.0)
+        with patch.object(e2e.time, "monotonic", return_value=11.0):
+            sitl._note_estimate(0.0)
+        self.assertNotIn("error_m", sitl.status["est_samples"][-1])
+        summary = e2e.summarize_estimate(sitl.status["est_samples"], [])
+        self.assertEqual(summary["pairs"], 2)
+        self.assertEqual(summary["scored_pairs"], 1)
+        self.assertEqual(summary["truth_age_max_s"], 0.1)
+
     def test_control_false_alarm_fails_and_keeps_results(self):
         result = {"label": "control (unspoofed)", "behaviors_entered": ["GNSS_FAILOVER"],
                   "lowest_nav_trust": 0.1}

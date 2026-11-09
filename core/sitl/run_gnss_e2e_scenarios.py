@@ -68,6 +68,8 @@ CRUISE_SQUARE_M = 120.0
 # one published pair must arrive.
 MAX_ESTIMATE_M = 100_000
 EST_PAIR_S = 0.15
+# Simulator truth older than this isn't used to score an estimate.
+TRUTH_MAX_AGE_S = 0.2
 # "imu_gap": how long SITL is frozen, past core's 500 ms IMU freshness limit
 # but short of the 3 s staleness checks this script and the dashboard apply.
 IMU_GAP_AT_S = 10.0
@@ -245,9 +247,10 @@ class Sitl:
         self.mav.mav.request_data_stream_send(
             self.mav.target_system, self.mav.target_component, mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
         )
-        # Truth at 20 Hz so core's estimate is compared against near-simultaneous
-        # truth, and home, which the estimate is relative to, at 1 Hz.
-        for msg_id, rate_hz in ((mavutil.mavlink.MAVLINK_MSG_ID_SIMSTATE, 20),
+        # Simulator truth with its own velocity (SIM_STATE) at 20 Hz, to score
+        # core's estimate against, and home, which that estimate is relative
+        # to, at 1 Hz.
+        for msg_id, rate_hz in ((mavutil.mavlink.MAVLINK_MSG_ID_SIM_STATE, 20),
                                 (mavutil.mavlink.MAVLINK_MSG_ID_HOME_POSITION, 1)):
             self.command(mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, msg_id, 1e6 / rate_hz)
         self.status = {
@@ -263,7 +266,7 @@ class Sitl:
             "behavior_log": [],  # (monotonic time, behavior) for each change
             "home": None,         # autopilot HOME_POSITION (lat, lon)
             "gps_pos": None,      # GPS_RAW_INT, spoofed or not
-            "vel_ne": (0.0, 0.0),  # EKF velocity, to bring truth up to the estimate's arrival time
+            "sim_truth": None,    # SIM_STATE: (monotonic time, lat, lon, vn, ve), physics state, never EKF
             "est_n": None,
             "est_n_at": 0.0,
             "est_at": 0.0,        # when the last complete EST_N/EST_E pair arrived
@@ -315,8 +318,9 @@ class Sitl:
             self.status["armed"] = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
         elif kind == "GLOBAL_POSITION_INT":
             self.status["rel_alt"] = msg.relative_alt / 1000
-            self.status["vel_ne"] = (msg.vx / 100, msg.vy / 100)
             self.status["heading_deg"] = msg.hdg / 100 if msg.hdg != 65535 else self.status["heading_deg"]
+        elif kind == "SIM_STATE" and (msg.lat_int or msg.lon_int):
+            self.status["sim_truth"] = (time.monotonic(), msg.lat_int / 1e7, msg.lon_int / 1e7, msg.vn, msg.ve)
         elif kind == "SIMSTATE":
             self.status["true_pos"] = (msg.lat / 1e7, msg.lng / 1e7)
             self.status["truth_at"] = time.monotonic()
@@ -353,13 +357,17 @@ class Sitl:
             s["est_rejects"].append(sample)  # NaN fails the comparison too
             return
         s["est_at"] = now
-        if s["true_pos"] is not None:
-            # SIMSTATE has no velocity; carry truth forward on the EKF's (truth-
-            # tracking in SITL, at worst spoofed) velocity for at most 0.2 s.
-            lag = min(max(now - s["truth_at"], 0.0), 0.2)
-            true_e, true_n = to_local(s["home"], s["true_pos"])
-            true_n += s["vel_ne"][0] * lag
-            true_e += s["vel_ne"][1] * lag
+        truth = s["sim_truth"]
+        if truth is not None and now - truth[0] <= TRUTH_MAX_AGE_S:
+            # Truth comes only from the simulator's physics state (SIM_STATE),
+            # never from the EKF, which a spoof can drag: position plus the
+            # simulator's own velocity times the sample's age at arrival.
+            # The estimate's own link latency is not removed.
+            age = max(now - truth[0], 0.0)
+            true_e, true_n = to_local(s["home"], (truth[1], truth[2]))
+            true_n += truth[3] * age
+            true_e += truth[4] * age
+            sample["truth_age_s"] = age
             sample["error_m"] = math.hypot(est_n - true_n, est_e - true_e)
             if s["gps_pos"] is not None:
                 gps_e, gps_n = to_local(s["home"], s["gps_pos"])
@@ -532,6 +540,8 @@ def run_window(sitl, duration_s, step_fn, label):
         f"detected at: {detected}, behaviors: {result['behaviors_entered'] or 'none'}"
     )
     est = result["core_estimate"]
+    if est["scored_pairs"] == 0:
+        raise ScenarioFailed("no estimate pairs could be scored against fresh SIM_STATE truth")
     print(f"  core estimate: {est['pairs']} pairs, error vs truth median {est.get('error_median_m')} m, "
           f"p95 {est.get('error_p95_m')} m, max {est.get('error_max_m')} m; "
           f"GPS-estimate gap at end {est.get('final_gps_est_m')} m; longest silence {est.get('longest_gap_s')} s")
@@ -547,10 +557,14 @@ def summarize_estimate(samples, rejects, began=None):
     """Accuracy and continuity of core's EST_N/EST_E pairs over one window."""
     out = {"pairs": len(samples), "rejected_pairs": len(rejects)}
     errors = [s["error_m"] for s in samples if "error_m" in s]
+    out["scored_pairs"] = len(errors)
     if errors:
+        ages = [s["truth_age_s"] for s in samples if "truth_age_s" in s]
         out.update(error_median_m=round(statistics.median(errors), 2),
                    error_p95_m=round(_percentile(errors, 0.95), 2),
-                   error_max_m=round(max(errors), 2))
+                   error_max_m=round(max(errors), 2),
+                   truth_age_median_s=round(statistics.median(ages), 3),
+                   truth_age_max_s=round(max(ages), 3))
     times = [s["t"] for s in samples]
     if times:
         edges = ([began] if began is not None else []) + times
@@ -564,8 +578,10 @@ def summarize_estimate(samples, rejects, began=None):
 
 
 def dashboard_estimate(snapshot, true_pos):
-    """What the dashboard actually drew: its estimate's distance from truth,
-    and the drift line (reported GNSS to estimate) it shows the operator."""
+    """The estimate the dashboard bridge selected and delivered in its
+    telemetry API: its distance from truth, and the reported-GNSS-to-estimate
+    distance the drift line is drawn from. Read from the API only; no browser
+    rendering is checked."""
     out = {}
     if snapshot.get("HasEstimate") and true_pos is not None:
         est = (snapshot["Estimated"]["lat"], snapshot["Estimated"]["lon"])

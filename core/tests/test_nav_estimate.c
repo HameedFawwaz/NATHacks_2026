@@ -207,6 +207,10 @@ static void test_nothing_before_ready(void) {
           CORE_NAV_EST_INVALID);
     CHECK(core_nav_estimator_update(&r.estimator, &r.detector, NULL, &r.nav_cfg, &r.est_cfg, r.v.t_ms).status ==
           CORE_NAV_EST_INVALID);
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, NULL, &r.est_cfg, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
+    CHECK(core_nav_estimator_update(&r.estimator, &r.detector, &t, &r.nav_cfg, NULL, r.v.t_ms).status ==
+          CORE_NAV_EST_INVALID);
 }
 
 /* The KF's origin is its last GPS anchor; the output must be relative to home,

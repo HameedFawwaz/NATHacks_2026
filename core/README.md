@@ -106,25 +106,18 @@ slower than the drift check's ~1.25 m/s limit is absorbed at each re-anchor), an
 default the IMU is rotated by the flight controller's `ATTITUDE`, which EKF3 slowly
 corrects with GPS velocity. Altitude is not published.
 
-Measured in ArduCopter SITL (`b720755`, Apple Silicon) with
-`sitl/run_gnss_e2e_scenarios.py`, which scores each received pair against `SIMSTATE`
-truth relative to `HOME_POSITION`, and reads what the live dashboard drew:
+The SITL harness requests `SIM_STATE` at 20 Hz and scores received estimate pairs
+against its simulator physics position and velocity, never the GPS-influenced EKF.
+It carries the latest simulator position forward using simulator velocity only when
+its arrival age is at most 200 ms, reports the median and maximum arrival age, and
+does not score older samples. Arrival age does not measure source-to-receiver
+latency; constant-velocity extrapolation and separate telemetry links also introduce
+uncertainty, particularly during maneuvers. Earlier reported position-error numbers
+used EKF velocity and should not be treated as independent truth.
 
-| Scenario (60 s) | Pairs | Error vs truth, median / p95 / max | Dashboard |
-|---|---:|---|---|
-| Hover | 300 | 0.23 / 0.82 / 1.51 m | `core` 100% of samples |
-| Cruise square at 10 m/s | 297 | 1.68 / 2.42 / 2.85 m (earlier run: 3.06 / 6.12 / 7.79 m) | `core` 100% |
-| Fast ramp, 4.5 m/s | 67 | 1.24 / 3.08 / 3.31 m | drift line grew to 68 m, then `ekf` |
-| Slow ramp, 1.5 m/s | 98 | 4.36 / 7.78 / 7.80 m | drift line grew to 37 m, then `ekf` |
-| Random route | 58 | 1.88 / 4.53 / 4.93 m | drift line up to 49 m, then `ekf` |
-
-Each spoof run withdrew the estimate 15 s after its last trusted anchor (the slow ramp
-was detected at 16.2 s and drawn until 23 s), after which the dashboard fell back to
-its labelled EKF estimate. Before the 15 s cap, one slow-ramp run let the estimate
-dead-reckon for the whole window: error versus truth stayed under ~5 m for 15 s from
-the anchor, passed 10 m at about 19 s, and reached 157 m by 55 s. In every run core
-reported only `no_home` for its first ~22 s and published nothing until home was
-known. In the `imu_gap` scenario (SITL frozen for 2 s mid-hover), core logged
+The dashboard observations are the estimate selected and delivered by the live
+bridge's telemetry API, not evidence of browser rendering. In an earlier `imu_gap`
+scenario (SITL frozen for 2 s mid-hover), core logged
 `imu_stale` then `await_reanchor` and published nothing new until its filter
 re-anchored, 1.25 s after the freeze ended. The two pairs sent in the first 0.5 s of
 the freeze arrived in a burst when SITL resumed. `tests/test_nav_estimate.c` covers
