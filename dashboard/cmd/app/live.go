@@ -21,6 +21,7 @@ type liveState struct {
 	starting       bool // a start-flight request is in flight
 	injecting      bool // a fault-injection request is in flight
 	recovering     bool // an automatic-recovery setting request is in flight
+	recoveryHTTP   bool // HTTP must finish before another setting request starts
 	recoveryTarget bool
 	homeSynced     bool
 }
@@ -79,7 +80,7 @@ func (a *app) startStream() {
 		a.live.lastNowMs = u.Snapshot.NowMs
 		a.showEvents(u.Events)
 		a.setSnapshot(u.Snapshot)
-		if a.live.recovering && u.Snapshot.RecoveryAtMs != 0 && u.Snapshot.RecoveryEnabled == a.live.recoveryTarget {
+		if a.live.recovering && !a.live.recoveryHTTP && a.recoveryFresh() && u.Snapshot.RecoveryEnabled == a.live.recoveryTarget {
 			a.live.recovering = false
 			a.renderRecovery()
 			a.showRecoveryStatus("", false)
@@ -212,8 +213,11 @@ func (a *app) injectFault(fault string) {
 // resulting state; a successful HTTP response is not treated as confirmation.
 func (a *app) setRecovery(enabled bool) {
 	a.live.recovering = true
+	a.live.recoveryHTTP = true
 	a.live.recoveryTarget = enabled
+	a.showRecoveryStatus("Waiting for core confirmation…", false)
 	a.renderRecovery()
+	defer func() { a.live.recoveryHTTP = false }()
 
 	data, _ := json.Marshal(map[string]bool{"enabled": enabled})
 	resp, err := await(js.Global().Call("fetch", "api/recovery", map[string]any{
@@ -240,5 +244,13 @@ func (a *app) setRecovery(enabled bool) {
 		a.renderRecovery()
 		return
 	}
-	a.showRecoveryStatus("Request accepted; waiting for telemetry confirmation.", false)
+	// A confirming SSE event can arrive before the HTTP response. It must not
+	// leave the control stuck waiting, nor allow a second concurrent request.
+	if a.recoveryFresh() && a.snap.RecoveryEnabled == enabled {
+		a.live.recovering = false
+		a.showRecoveryStatus("", false)
+		a.renderRecovery()
+	} else {
+		a.showRecoveryStatus("Request accepted; waiting for telemetry confirmation.", false)
+	}
 }

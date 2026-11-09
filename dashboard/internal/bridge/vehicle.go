@@ -325,7 +325,7 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 	s.HasFlightData = s.Connected && globalFresh
 	s.HasHeading = s.HasFlightData && v.headingKnown
 
-	// Prefer core's estimate, which doesn't depend on GPS. Fall back to the EKF only
+	// Prefer core's GPS-anchored dead reckoning. Fall back to the EKF only
 	// when core isn't publishing one, and say which is in use.
 	switch est, ok := v.coreEstimate(nowMs); {
 	case s.Connected && ok:

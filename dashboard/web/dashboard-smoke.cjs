@@ -47,7 +47,7 @@ function chromePath() {
 
 function reading(value, now) { return { Value: value, AtMs: now }; }
 
-function snapshot(state, recoveryEnabled, recoveryFresh) {
+function snapshot(state, recoveryEnabled, recoveryFresh, recoveryControllable) {
   const now = Date.now();
   const connected = state !== "no-data";
   const link = state === "critical" ? 0.2 : state === "caution" ? 0.65 : 1;
@@ -57,9 +57,9 @@ function snapshot(state, recoveryEnabled, recoveryFresh) {
   return {
     NowMs: now,
     Connected: connected,
-    Armed: false,
+    Armed: state === "nav-critical",
     Mode: "STANDBY",
-    Behavior: "NOMINAL",
+    Behavior: state === "nav-critical" ? "GNSS_FAILOVER" : "NOMINAL",
     RecoveryEnabled: recoveryEnabled,
     RecoveryAtMs: connected ? (recoveryFresh ? now : now - 60000) : 0,
     RecoveryControllable: recoveryControllable,
@@ -76,7 +76,7 @@ function snapshot(state, recoveryEnabled, recoveryFresh) {
     HasGPS: connected,
     Satellites: connected ? 14 : 0,
     Overall: reading(connected ? Math.min(link, state === "critical" ? 0.2 : 1) : 0, now),
-    Nav: reading(connected ? 1 : 0, now),
+    Nav: reading(connected && state !== "nav-critical" ? 1 : 0, now),
     Link: reading(link, now),
     IMU: reading(connected ? 0.98 : 0, now),
     Motors: reading(connected ? 0.96 : 0, now),
@@ -91,17 +91,24 @@ function fixtureServer() {
   let recoveryFresh = true;
   let recoveryControllable = true;
   let recoveryPending = null;
+  let holdReply = false, recoveryResponse = null, failRecovery = false;
   const streams = new Set();
   const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".wasm": "application/wasm", ".mp3": "audio/mpeg", ".svg": "image/svg+xml", ".md": "text/plain; charset=utf-8" };
-  const send = res => res.write(`data: ${JSON.stringify({ Snapshot: snapshot(state, recoveryEnabled, recoveryFresh), Events: [] })}\n\n`);
+  const send = res => res.write(`data: ${JSON.stringify({ Snapshot: snapshot(state, recoveryEnabled, recoveryFresh, recoveryControllable), Events: [] })}\n\n`);
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, "http://127.0.0.1").pathname;
     if (req.method === "POST" && pathname === "/api/recovery") {
       let body = "";
       req.on("data", chunk => { body += chunk; });
       req.on("end", () => {
+        if (failRecovery) {
+          failRecovery = false;
+          res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ error: "Synthetic core confirmation failed" }));
+          return;
+        }
         recoveryPending = JSON.parse(body).enabled;
-        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ enabled: recoveryPending }));
+        if (holdReply) recoveryResponse = res;
+        else res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ enabled: recoveryPending }));
       });
       return;
     }
@@ -131,6 +138,12 @@ function fixtureServer() {
     setRecovery(enabled, fresh = true, controllable = true) { recoveryEnabled = enabled; recoveryFresh = fresh; recoveryControllable = controllable; for (const stream of streams) send(stream); },
     confirmRecovery() { recoveryEnabled = recoveryPending; recoveryPending = null; recoveryFresh = true; for (const stream of streams) send(stream); },
     recoveryPending() { return recoveryPending; },
+    holdRecoveryReply(value) { holdReply = value; },
+    releaseRecoveryReply() {
+      recoveryResponse.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ enabled: recoveryEnabled }));
+      recoveryResponse = null; holdReply = false;
+    },
+    failNextRecovery() { failRecovery = true; },
     close() { clearInterval(ticker); for (const stream of streams) stream.end(); server.close(); },
   })));
 }
@@ -285,6 +298,7 @@ async function main() {
         critical: "Critical: Link",
         "no-data": "No contact with the drone",
         drift: "All systems healthy",
+        "nav-critical": "Critical: GNSS",
       }[name];
       await waitFor(() => cdp.evaluate(`document.querySelector('#summary-title')?.textContent === ${JSON.stringify(expectedTitle)}`), `${name} summary`);
       const check = await cdp.evaluate(`(() => {
@@ -344,6 +358,27 @@ async function main() {
     await waitFor(() => cdp.evaluate(`document.querySelector('#recovery-state')?.textContent === 'Automatic recovery enabled' && document.querySelector('#recovery-toggle').disabled && document.querySelector('#recovery-capability').textContent.includes('Controls unavailable on this core')`), "reported but uncontrollable recovery");
     fixture.setRecovery(true, true, true);
     await waitFor(() => cdp.evaluate(`!document.querySelector('#recovery-toggle').disabled`), "recovery control capability restored");
+    fixture.holdRecoveryReply(true);
+    await cdp.evaluate(`document.querySelector('#recovery-toggle').click()`);
+    await waitFor(() => fixture.recoveryPending() === false, "held HTTP recovery request");
+    fixture.confirmRecovery();
+    await waitFor(() => cdp.evaluate(`document.querySelector('#recovery-state').textContent === 'Automatic recovery disabled' && document.querySelector('#recovery-toggle').disabled`), "SSE before HTTP keeps request busy");
+    fixture.releaseRecoveryReply();
+    await waitFor(() => cdp.evaluate(`!document.querySelector('#recovery-toggle').disabled && document.querySelector('#recovery-status').hidden`), "early SSE confirmation completes cleanly after HTTP");
+    fixture.failNextRecovery();
+    await cdp.evaluate(`document.querySelector('#recovery-toggle').click()`);
+    await waitFor(() => cdp.evaluate(`document.querySelector('#recovery-status').textContent.includes('Synthetic core confirmation failed') && !document.querySelector('#recovery-toggle').disabled`), "failed request enables retry");
+    if (await cdp.evaluate(`document.querySelector('#recovery-state').textContent`) !== "Automatic recovery disabled") throw new Error("HTTP error changed actual recovery state");
+    await cdp.evaluate(`document.querySelector('#recovery-toggle').click()`);
+    await waitFor(() => fixture.recoveryPending() === true, "successful retry request");
+    fixture.confirmRecovery();
+    await waitFor(() => cdp.evaluate(`!document.querySelector('#recovery-toggle').disabled && document.querySelector('#recovery-status').hidden`), "retry clears previous error");
+    fixture.setRecovery(false, true, true);
+    result = await state("nav-critical");
+    if (result.title !== "Critical: GNSS" || !await cdp.evaluate(`document.querySelector('#recovery-behavior').textContent.includes('Last recovery state')`)) throw new Error("Disabled recovery hid an attack or claimed active commands");
+    await save("recovery-disabled-critical");
+    fixture.setRecovery(true, true, true);
+    result = await state("healthy");
     console.log("PASS recovery: enabled/disabled, unknown/stale disabled controls, and no optimistic update before SSE confirmation.");
     await save("healthy");
     console.log("PASS healthy: all subsystem cards report Healthy.");

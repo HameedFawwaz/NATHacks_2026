@@ -52,8 +52,10 @@ is not sufficient unless a GPS-free backup is configured and confirmed active.
 call it every loop after the detector update, passing permission only when a
 deployment explicitly configured the backup to exclude GPS from horizontal
 position **and velocity**, its selection was acknowledged, and failover has not
-failed. A source-set number alone is not proof. No existing caller enables this
-helper by default. The helper requires eight uninterrupted seconds of GPS and
+failed. A source-set number alone is not proof. `core_main --gps-free-backup`
+explicitly opts in; the local SITL launcher supplies it with the GPS-free
+optical-flow configuration in `autonomy_failover.parm`. Automatic recovery must
+also be enabled. The helper requires eight uninterrupted seconds of GPS and
 backup horizontal position within 3 m and velocity within 1 m/s, fresh FC
 heartbeat, position/velocity, GPS and finite IMU, advancing GPS time and
 passing jump, timestamp, HDOP and EKF checks. Missing/stale evidence or loss

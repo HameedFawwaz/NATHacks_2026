@@ -94,9 +94,12 @@ static void alert_new_flags(core_mavlink_conn_t *conn, uint32_t prev_flags, uint
 int main(int argc, char **argv) {
     uint16_t port = 14551;
     bool allow_recovery_control = false;
+    bool gps_free_backup = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--allow-recovery-control") == 0) {
             allow_recovery_control = true;
+        } else if (strcmp(argv[i], "--gps-free-backup") == 0) {
+            gps_free_backup = true;
         } else if (argv[i][0] != '-') {
             port = (uint16_t)atoi(argv[i]);
         } else {
@@ -142,6 +145,7 @@ int main(int argc, char **argv) {
     core_nav_estimate_config_default(&estimate_cfg);
     core_nav_estimator_t estimator;
     core_nav_estimator_init(&estimator);
+    core_nav_backup_recovery_t backup_recovery = {0};
 
     core_trust_score_t score;
     core_trust_score_init(&score);
@@ -155,7 +159,7 @@ int main(int argc, char **argv) {
     core_autonomy_init(&autonomy, &autonomy_cfg, autonomy_log);
 
     printf("drone survivability core - GNSS spoofing and lost-link detection + autonomy\n");
-    printf("listening for MAVLink on udp 0.0.0.0:%u\n", port);
+    printf("listening for MAVLink on udp %s:%u\n", conn_cfg.transport.udp.bind_addr, port);
     printf("point ArduPilot SITL (optionally via core/sitl/gnss_spoof_proxy) at this port\n");
 
     uint64_t last_own_heartbeat_sent_ms = 0;
@@ -231,6 +235,12 @@ int main(int argc, char **argv) {
         }
 
         core_nav_result_t result = core_nav_detector_update(&detector, &telemetry, &nav_cfg);
+        bool backup_confirmed = gps_free_backup && autonomy.enabled && !autonomy.failover_failed &&
+                                autonomy.active_source_set == autonomy_cfg.fallback_source_set &&
+                                autonomy.wanted_source_set == autonomy_cfg.fallback_source_set;
+        if (core_nav_detector_recover_from_backup(&detector, &backup_recovery, &telemetry, now, backup_confirmed)) {
+            core_mavlink_send_statustext(conn, CORE_MAV_SEVERITY_NOTICE, "GNSS recovery: backup agreement verified");
+        }
         core_trust_score_set_component(&score, CORE_TRUST_SOURCE_NAV, result.nav_trust);
         core_nav_estimate_t estimate =
             core_nav_estimator_update(&estimator, &detector, &telemetry, &nav_cfg, &estimate_cfg, now);

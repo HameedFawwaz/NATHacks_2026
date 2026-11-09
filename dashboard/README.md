@@ -25,6 +25,44 @@ which one you're looking at.
 
 ## Live mode
 
+### Automatic recovery controls
+
+The Fly tab shows **Automatic recovery enabled/disabled**, confirmed by core's
+live telemetry. The button changes core's automatic command gate, not just the
+display: detection and alerts stay on while disabled. Disabling does **not**
+undo a navigation-source switch, RTL, hold or landing already commanded. To
+compare protected/unprotected flights, disable before injecting a threat on a
+fresh flight. Missing/stale core status or capability makes the button unavailable.
+
+**All clear stops fault injection; it does not force health to 100%.** In the
+local optical-flow SITL setup, honest GPS can be reacquired after sustained
+agreement with the confirmed GPS-free backup, followed by normal trust slew and
+autonomy's recovery hold. This took about 7 s after a jump and 15 s after a drift
+in the isolated acceptance run; timing depends on telemetry and agreement.
+If the backup has drifted or cannot independently validate GPS, critical status
+can correctly persist. See `core/README.md` for the bounds and limitations.
+
+The local SITL launcher opts into recovery controls. Other `core_main` deployments
+do not accept them unless explicitly started with `--allow-recovery-control`,
+which also binds core's UDP socket to loopback. The loopback, same-origin JSON
+endpoint `POST /api/recovery` waits for a nonce-correlated core acknowledgement;
+it does not optimistically change status. Wire telemetry names are `RECOV_EN`,
+`RECOV_CTL`, `RECOV_ACK` and `AUTO_STATE`. These local demo controls are not a
+replacement for authenticated hardware command authorization.
+
+Repeatable flight regression (pymavlink environment, built core and bridge):
+
+```sh
+go build -o ../core/build/recovery-dashboard-serve ./cmd/serve
+cd ..
+/path/to/venv/bin/python core/sitl/run_recovery_e2e_scenarios.py \
+  --ardupilot /path/to/ardupilot --log-dir core/build/recovery-e2e
+```
+
+It runs a fresh isolated instance, checks disabled detection/no response,
+enabled failover, and honest-GPS recovery after jump and drift attacks. It never
+connects to a physical drone or the user's running instance.
+
 For the full local ArduPilot simulator + real detectors + live dashboard, run
 `./scripts/sitl` from the repository root. See the root README for flight commands.
 `make live` by itself starts only the dashboard bridge, not ArduPilot.

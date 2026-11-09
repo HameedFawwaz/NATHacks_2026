@@ -147,7 +147,11 @@ func (a *app) renderRecovery() {
 	}
 	behavior := byID("recovery-behavior")
 	if a.snap.Connected && a.snap.Armed && a.snap.Behavior != "" {
-		setText(behavior, model.BehaviorText(a.snap.Behavior))
+		if a.recoveryFresh() && !a.snap.RecoveryEnabled {
+			setText(behavior, "Automatic responses disabled. Last recovery state: "+a.snap.Behavior+".")
+		} else {
+			setText(behavior, model.BehaviorText(a.snap.Behavior))
+		}
 		behavior.Set("hidden", false)
 	} else {
 		behavior.Set("hidden", true)
@@ -313,6 +317,11 @@ func (a *app) renderSummary(subsystems []model.Subsystem) {
 	text := "On the ground, ready to fly."
 	if a.snap.Armed {
 		text = model.BehaviorText(a.snap.Behavior)
+		if a.recoveryFresh() && !a.snap.RecoveryEnabled {
+			text = "Detection is on; automatic flight responses are disabled. Current mode: " + a.snap.Mode + "."
+		} else if a.live != nil && !a.recoveryFresh() {
+			text = "Automatic recovery status unavailable. Check the current flight mode."
+		}
 	}
 	if !a.snap.Connected {
 		worst = model.LevelNoData
