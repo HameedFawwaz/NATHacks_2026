@@ -6,6 +6,7 @@ package bridge
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/HameedFawwaz/NATHacks_2026/dashboard/internal/mavlink"
@@ -18,6 +19,10 @@ const (
 
 	// Prefix of core's behavior transition messages: "AUTONOMY <behavior>: <reason>".
 	autonomyPrefix = "AUTONOMY "
+
+	// Below this median RPM the motors aren't really spinning (armed on the ground,
+	// throttle cut), so their RPMs say nothing about each other.
+	minSpinRPM = 100
 
 	// Core's estimate is metres north (EST_N) and east (EST_E) of the autopilot's
 	// home. Anything beyond this is garbage, not a position.
@@ -38,12 +43,16 @@ type vehicleState struct {
 	identified    bool
 	sysID, compID uint8
 	lastHeartbeat int64
+	heartbeatSeq  uint64
+	customMode    uint32
 	wasConnected  bool
 	snap          model.Snapshot
 	gpsAt         int64 // when GPS_RAW_INT last arrived
 	globalAt      int64 // when GLOBAL_POSITION_INT last arrived
 	satsKnown     bool
 	headingKnown  bool
+	escReporting  [4]bool // ESC slots that have ever reported, so a motor stopping still counts
+	fault         Fault   // injected from this dashboard, "" until one is; see fault.go
 
 	// The EKF's position, kept apart from core's estimate so snapshot can pick
 	// whichever is current.
@@ -106,6 +115,8 @@ func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) 
 	case mavlink.MsgGlobalPositionInt:
 		v.globalAt = nowMs
 		v.applyGlobalPosition(mavlink.DecodeGlobalPositionInt(f.Payload))
+	case mavlink.MsgESCTelemetry1To4:
+		v.applyESCTelemetry(mavlink.DecodeESCTelemetry(f.Payload), nowMs)
 	case mavlink.MsgHomePosition:
 		lat, lon := mavlink.DecodeHomePosition(f.Payload)
 		v.homeKnown = lat != 0 || lon != 0
@@ -116,6 +127,8 @@ func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) 
 
 func (v *vehicleState) applyHeartbeat(hb mavlink.Heartbeat, nowMs int64) {
 	v.lastHeartbeat = nowMs
+	v.heartbeatSeq++
+	v.customMode = hb.CustomMode
 	v.snap.Armed = hb.BaseMode&mavlink.ModeFlagArmed != 0
 	v.snap.Mode = fmt.Sprintf("Mode %d", hb.CustomMode)
 	if name, ok := copterModes[hb.CustomMode]; ok && hb.Autopilot == mavlink.AutopilotArduPilot {
@@ -173,8 +186,9 @@ func (v *vehicleState) applyStatusText(p []byte, nowMs int64) {
 }
 
 // applySysStatus reads battery charge and IMU health. Health is yes or no, so the
-// IMU score is only ever 0 or 1. There is deliberately no motor score: ArduPilot
-// always sets the MOTOR_OUTPUTS health bit, which says nothing about the motors.
+// IMU score is only ever 0 or 1. Motors don't come from here: ArduPilot always
+// sets the MOTOR_OUTPUTS health bit, which says nothing about the motors. See
+// applyESCTelemetry instead.
 func (v *vehicleState) applySysStatus(s mavlink.SysStatus, nowMs int64) {
 	health := func(mask uint32) (model.Reading, bool) {
 		if s.SensorsPresent&mask != mask {
@@ -192,6 +206,34 @@ func (v *vehicleState) applySysStatus(s mavlink.SysStatus, nowMs int64) {
 	if s.BatteryRemaining != mavlink.UnknownBattery {
 		v.snap.Battery = model.Reading{Value: float64(s.BatteryRemaining) / 100, AtMs: nowMs}
 	}
+}
+
+// applyESCTelemetry scores the motors from their ESCs' RPM: the slowest motor's
+// RPM as a fraction of the median. A motor that has stopped while the others spin
+// scores 0. While disarmed or not spinning there is nothing to compare, so ESCs
+// that are reporting at all score 1. Only motors 1-4 are read, which covers a quad.
+func (v *vehicleState) applyESCTelemetry(t mavlink.ESCTelemetry, nowMs int64) {
+	var rpms []float64
+	for i := range 4 {
+		if t.Voltage[i] != 0 || t.Count[i] != 0 || t.RPM[i] != 0 {
+			v.escReporting[i] = true
+		}
+		if v.escReporting[i] {
+			rpms = append(rpms, float64(t.RPM[i]))
+		}
+	}
+	if len(rpms) == 0 {
+		return // no ESC telemetry on this vehicle
+	}
+
+	score := 1.0
+	slices.Sort(rpms)
+	n := len(rpms)
+	median := (rpms[(n-1)/2] + rpms[n/2]) / 2
+	if v.snap.Armed && median >= minSpinRPM {
+		score = min(rpms[0]/median, 1)
+	}
+	v.snap.Motors = model.Reading{Value: score, AtMs: nowMs}
 }
 
 func (v *vehicleState) applyGPS(g mavlink.GPSRawInt) {
@@ -248,6 +290,11 @@ func (v *vehicleState) update(nowMs int64) {
 		} else {
 			v.addEvent("Lost contact with the drone.", nowMs)
 			v.snap.Behavior = ""
+			// Silence may be a network outage, not a restart: an injected GPS
+			// offset can still be active. Never claim it was cleared without proof.
+			if v.fault != "" {
+				v.fault = FaultUnknown
+			}
 		}
 		v.wasConnected = connected
 	}
@@ -261,6 +308,7 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 	s := v.snap
 	s.NowMs = nowMs
 	s.Connected = v.connected(nowMs)
+	s.Fault = string(v.fault)
 
 	gpsFresh := v.gpsAt != 0 && nowMs-v.gpsAt <= model.StaleAfterMs
 	globalFresh := v.globalAt != 0 && nowMs-v.globalAt <= model.StaleAfterMs

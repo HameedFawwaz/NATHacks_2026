@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,6 +264,63 @@ func TestSensorHealthAndBattery(t *testing.T) {
 	}
 }
 
+func escTelemetry(voltage uint16, rpm [4]uint16, present [4]bool) []byte {
+	p := make([]byte, 44)
+	for i := range 4 {
+		if !present[i] {
+			continue
+		}
+		p[2*i], p[2*i+1] = byte(voltage), byte(voltage>>8)
+		p[24+2*i], p[24+2*i+1] = byte(rpm[i]), byte(rpm[i]>>8)
+		p[32+2*i] = 1
+	}
+	return p
+}
+
+func TestMotorsFromESCTelemetry(t *testing.T) {
+	all := [4]bool{true, true, true, true}
+	esc := func(v *vehicleState, rpm [4]uint16, present [4]bool, at int64) model.Reading {
+		t.Helper()
+		v.apply(frame(1, 1, mavlink.MsgESCTelemetry1To4, escTelemetry(1680, rpm, present)), at)
+		return v.snapshot(at).Motors
+	}
+
+	// Disarmed and idle: reporting ESCs are healthy.
+	disarmed := &vehicleState{}
+	disarmed.apply(frame(1, 1, mavlink.MsgHeartbeat, heartbeatPayload(2, 3, 0, 0)), 1000)
+	if r := esc(disarmed, [4]uint16{}, all, 1100); r != (model.Reading{Value: 1, AtMs: 1100}) {
+		t.Fatalf("disarmed: %+v", r)
+	}
+
+	v := identified(t) // armed
+	if r := esc(v, [4]uint16{8000, 8200, 7900, 8100}, all, 1100); r.Value < 0.95 || r.AtMs != 1100 {
+		t.Fatalf("even spin: %+v", r)
+	}
+	if r := esc(v, [4]uint16{8000, 4000, 8000, 8000}, all, 1200); r.Value != 0.5 {
+		t.Fatalf("weak motor: %+v", r)
+	}
+	// A motor that stops dead also stops reporting RPM, but it has reported before.
+	if r := esc(v, [4]uint16{9000, 0, 9000, 9000}, all, 1300); r.Value != 0 {
+		t.Fatalf("stopped motor: %+v", r)
+	}
+	// Armed but not spinning yet: nothing to compare.
+	if r := esc(v, [4]uint16{0, 0, 0, 0}, all, 1400); r.Value != 1 {
+		t.Fatalf("armed, not spinning: %+v", r)
+	}
+
+	// Empty slots are absent motors, not stopped ones.
+	tri := identified(t)
+	if r := esc(tri, [4]uint16{8000, 8000, 8000, 0}, [4]bool{true, true, true, false}, 1100); r.Value != 1 {
+		t.Fatalf("unused slot counted as a motor: %+v", r)
+	}
+
+	// No ESC telemetry at all means no data.
+	none := identified(t)
+	if r := esc(none, [4]uint16{}, [4]bool{}, 1100); r.AtMs != 0 {
+		t.Fatalf("all-empty block reported motors: %+v", r)
+	}
+}
+
 func TestTelemetryExpiresWhileHeartbeatsContinue(t *testing.T) {
 	v := identified(t)
 	v.apply(mavlink.Parse(mustGolden(t, "fd1e000002010118000015cd5b070000000094feebea12cfe85840e908007900c80052032823030e0da3"))[0], 1000)
@@ -399,7 +457,21 @@ type fakeVehicle struct {
 	silent            bool
 	loseFirstFinalAck bool // installs the mission but loses the ack, as a real link can
 	received          chan []mavlink.Frame
-	signer            *mavlink.Signer // nil: sends unsigned and accepts anything
+	commands          chan mavlink.Frame // every COMMAND_LONG received, for command-sequence tests
+
+	// Parameters the vehicle has, echoed back on PARAM_SET like ArduPilot does.
+	// Names it doesn't have are ignored, so nil plays a real autopilot with no
+	// SIM_* parameters.
+	paramMu sync.Mutex
+	params  map[string]float32
+	signer  *mavlink.Signer // nil: sends unsigned and accepts anything
+}
+
+// param reads one of the vehicle's parameters.
+func (f *fakeVehicle) param(name string) float32 {
+	f.paramMu.Lock()
+	defer f.paramMu.Unlock()
+	return f.params[name]
 }
 
 func (f *fakeVehicle) encode(msgID uint32, payload []byte) []byte {
@@ -423,7 +495,11 @@ func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return &fakeVehicle{t: t, conn: conn, bridge: b.Addr().(*net.UDPAddr), received: make(chan []mavlink.Frame, 1)}
+	return &fakeVehicle{
+		t: t, conn: conn, bridge: b.Addr().(*net.UDPAddr),
+		received: make(chan []mavlink.Frame, 1),
+		commands: make(chan mavlink.Frame, 10),
+	}
 }
 
 func (f *fakeVehicle) send(msgID uint32, payload []byte) {
@@ -488,9 +564,74 @@ func (f *fakeVehicle) serve(ctx context.Context) {
 					continue
 				}
 				f.request(len(items))
+			case mavlink.MsgCommandLong:
+				select {
+				case f.commands <- fr:
+				default:
+				}
+			case mavlink.MsgParamSet:
+				name := strings.TrimRight(string(fr.Payload[6:22]), "\x00")
+				value := math.Float32frombits(binary.LittleEndian.Uint32(fr.Payload[0:]))
+				f.paramMu.Lock()
+				_, ok := f.params[name]
+				if ok {
+					f.params[name] = value
+				}
+				f.paramMu.Unlock()
+				if ok {
+					reply := make([]byte, 25)
+					binary.LittleEndian.PutUint32(reply[0:], math.Float32bits(value))
+					copy(reply[8:24], name)
+					reply[24] = mavlink.ParamTypeReal32
+					f.send(mavlink.MsgParamValue, reply)
+				}
 			}
 		}
 	}
+}
+
+// decodeCommand reads the command field of a COMMAND_LONG payload.
+func decodeCommand(fr mavlink.Frame) uint16 {
+	return uint16(fr.Payload[28]) | uint16(fr.Payload[29])<<8
+}
+
+// nextCommand waits for the vehicle to receive a COMMAND_LONG.
+func (f *fakeVehicle) nextCommand(t *testing.T) mavlink.Frame {
+	t.Helper()
+	select {
+	case fr := <-f.commands:
+		return fr
+	case <-time.After(2 * time.Second):
+		t.Fatal("vehicle never received the expected command")
+		return mavlink.Frame{}
+	}
+}
+
+func (f *fakeVehicle) ack(command uint16, result uint8) {
+	p := make([]byte, 10)
+	p[0], p[1] = byte(command), byte(command>>8)
+	p[2] = result
+	p[8], p[9] = ownSysID, ownCompID
+	f.send(mavlink.MsgCommandAck, p)
+}
+
+func (f *fakeVehicle) acceptAndConfirm(fr mavlink.Frame) {
+	cmd := decodeCommand(fr)
+	f.ack(cmd, mavlink.ResultAccepted)
+	var mode uint32
+	var base uint8
+	switch cmd {
+	case mavlink.CmdDoSetMode:
+		mode = uint32(math.Float32frombits(binary.LittleEndian.Uint32(fr.Payload[4:])))
+		if mode == copterModeAuto {
+			base = mavlink.ModeFlagArmed
+		}
+	case mavlink.CmdComponentArmDisarm:
+		mode, base = copterModeGuided, mavlink.ModeFlagArmed
+	default:
+		return
+	}
+	f.send(mavlink.MsgHeartbeat, heartbeatPayload(2, mavlink.AutopilotArduPilot, base, mode))
 }
 
 func (f *fakeVehicle) request(seq int) {
@@ -724,6 +865,87 @@ func TestArmingDuringUploadStopsIt(t *testing.T) {
 	}
 }
 
+func TestStartFlightSequence(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- b.StartFlight(ctx) }()
+
+	wantOrder := []uint16{mavlink.CmdDoSetMode, mavlink.CmdComponentArmDisarm, mavlink.CmdDoSetMode, mavlink.CmdMissionStart}
+	for _, want := range wantOrder {
+		fr := f.nextCommand(t)
+		if got := decodeCommand(fr); got != want {
+			t.Fatalf("command = %d, want %d", got, want)
+		}
+		f.acceptAndConfirm(fr)
+	}
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("StartFlight: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no result")
+	}
+}
+
+func TestStartFlightRefusedWithoutVehicleOrWhileArmed(t *testing.T) {
+	b, f, ctx := setup(t)
+	if err := b.StartFlight(ctx); err != ErrNoVehicle {
+		t.Fatalf("no vehicle: %v", err)
+	}
+	f.armed = true
+	connect(t, b, f)
+	if err := b.StartFlight(ctx); err != ErrAlreadyArmed {
+		t.Fatalf("armed: %v", err)
+	}
+}
+
+func TestStartFlightReportsRejection(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- b.StartFlight(ctx) }()
+
+	fr := f.nextCommand(t)
+	f.ack(decodeCommand(fr), mavlink.ResultDenied)
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "denied") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no result")
+	}
+}
+
+func TestStartFlightBusy(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
+
+	go b.StartFlight(ctx)
+	f.nextCommand(t) // wait for the sequence to actually start
+	if err := b.StartFlight(ctx); err != ErrBusy {
+		t.Fatalf("busy: %v", err)
+	}
+}
+
 func TestHostAllowlist(t *testing.T) {
 	cases := map[string]bool{
 		"127.0.0.1:8080":    true,
@@ -790,6 +1012,54 @@ func TestHTTPMissionRefusedWhileArmed(t *testing.T) {
 
 	body, _ := json.Marshal(model.DefaultPlan())
 	resp, err := http.Post(srv.URL+"/api/mission", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPStart(t *testing.T) {
+	b, f, ctx := setup(t)
+	go f.serve(ctx)
+	connect(t, b, f)
+	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(b.Handler(""))
+	defer srv.Close()
+
+	go func() {
+		for i := 0; i < len(startFlightSteps); i++ {
+			select {
+			case fr := <-f.commands:
+				f.acceptAndConfirm(fr)
+			case <-time.After(2 * time.Second):
+				return
+			}
+		}
+	}()
+
+	resp, err := http.Post(srv.URL+"/api/start", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPStartRefusedWhileArmed(t *testing.T) {
+	b, f, _ := setup(t)
+	f.armed = true
+	connect(t, b, f)
+	srv := httptest.NewServer(b.Handler(""))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/start", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

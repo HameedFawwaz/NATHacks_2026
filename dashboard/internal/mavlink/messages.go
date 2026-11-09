@@ -14,7 +14,8 @@ const (
 	TypeGCS               = 6
 	TypeOnboardController = 18
 
-	ModeFlagArmed = 128
+	ModeFlagArmed             = 128
+	ModeFlagCustomModeEnabled = 1
 
 	SensorGyro  = 1 << 0
 	SensorAccel = 1 << 1
@@ -25,7 +26,10 @@ const (
 	CmdNavRTL      = 20
 	CmdNavTakeoff  = 22
 
-	CmdRequestMessage = 512
+	CmdDoSetMode          = 176
+	CmdComponentArmDisarm = 400
+	CmdMissionStart       = 300
+	CmdRequestMessage     = 512
 
 	FrameGlobal            = 0
 	FrameGlobalRelativeAlt = 3
@@ -35,6 +39,16 @@ const (
 	MissionCancelled   = 14
 
 	DataStreamAll = 0
+
+	ParamTypeReal32 = 9
+
+	// MAV_RESULT values, returned in COMMAND_ACK.
+	ResultAccepted            = 0
+	ResultTemporarilyRejected = 1
+	ResultDenied              = 2
+	ResultUnsupported         = 3
+	ResultFailed              = 4
+	ResultInProgress          = 5
 )
 
 // Field values meaning "unknown".
@@ -103,6 +117,24 @@ func DecodeGlobalPositionInt(p []byte) GlobalPositionInt {
 	}
 }
 
+// ESCTelemetry is ESC_TELEMETRY_1_TO_4: one block of four ESCs. A slot with no
+// ESC behind it is all zeros.
+type ESCTelemetry struct {
+	Voltage [4]uint16 // centivolts
+	RPM     [4]uint16
+	Count   [4]uint16 // telemetry packets received from each ESC, wrapping
+}
+
+func DecodeESCTelemetry(p []byte) ESCTelemetry {
+	var t ESCTelemetry
+	for i := range 4 {
+		t.Voltage[i] = u16(p[2*i:])
+		t.RPM[i] = u16(p[24+2*i:])
+		t.Count[i] = u16(p[32+2*i:])
+	}
+	return t
+}
+
 // DecodeHomePosition returns the autopilot's home position in degrees.
 func DecodeHomePosition(p []byte) (lat, lon float64) {
 	return float64(i32(p[0:])) / degE7, float64(i32(p[4:])) / degE7
@@ -126,11 +158,31 @@ func DecodeMissionAck(p []byte) (targetSys, targetComp, result, missionType uint
 	return p[0], p[1], p[2], p[3]
 }
 
+func DecodeCommandAck(p []byte) (command uint16, result, targetSys, targetComp uint8) {
+	return u16(p), p[2], p[8], p[9]
+}
+
 func cString(b []byte) string {
 	if i := bytes.IndexByte(b, 0); i >= 0 {
 		b = b[:i]
 	}
 	return string(b)
+}
+
+// DecodeParamValue reads a PARAM_VALUE, the autopilot's reply to PARAM_SET.
+func DecodeParamValue(p []byte) (name string, value float32) {
+	return cString(p[8:24]), f32(p[0:])
+}
+
+// PackParamSet returns the payload of a PARAM_SET for a float parameter. The
+// name is truncated to MAVLink's 16 characters.
+func PackParamSet(targetSys, targetComp uint8, name string, value float32) []byte {
+	p := make([]byte, 23)
+	binary.LittleEndian.PutUint32(p[0:], math.Float32bits(value))
+	p[4], p[5] = targetSys, targetComp
+	copy(p[6:22], name)
+	p[22] = ParamTypeReal32
+	return p
 }
 
 // PackGCSHeartbeat returns the payload of a ground station's HEARTBEAT.
@@ -169,6 +221,17 @@ func PackMissionCount(targetSys, targetComp uint8, count uint16) []byte {
 func PackMissionAck(targetSys, targetComp, result uint8) []byte {
 	p := make([]byte, 8)
 	p[0], p[1], p[2], p[3] = targetSys, targetComp, result, MissionTypeMission
+	return p
+}
+
+// PackCommandLong returns the payload of a COMMAND_LONG using only param1 and
+// param2; every command this package sends needs no more than that.
+func PackCommandLong(targetSys, targetComp uint8, command uint16, param1, param2 float32) []byte {
+	p := make([]byte, 33)
+	binary.LittleEndian.PutUint32(p[0:], math.Float32bits(param1))
+	binary.LittleEndian.PutUint32(p[4:], math.Float32bits(param2))
+	binary.LittleEndian.PutUint16(p[28:], command)
+	p[30], p[31] = targetSys, targetComp
 	return p
 }
 

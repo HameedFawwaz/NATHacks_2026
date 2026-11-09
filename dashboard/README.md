@@ -35,10 +35,43 @@ arducopter ... --serial2=udpclient:127.0.0.1:14552
 The Plan tab's button becomes "Upload to drone". It refuses while the drone is armed,
 and a plan with a leg over 5 km, including the return home, which usually means it was
 made for somewhere else.
-The dashboard doesn't arm or fly the vehicle: start the mission from your ground
-control, e.g. in MAVProxy: `mode guided`, `arm throttle`, `mode auto`,
+The Fly tab's **Start flight** arms the vehicle and starts the uploaded mission
+(GUIDED → arm → AUTO → MISSION_START). A mission must have been successfully uploaded
+on this bridge connection; after lost contact, upload again. Starting and uploading
+are mutually exclusive. Mode/arming commands need an accepted ACK and a confirming
+heartbeat before advancing. Normal autopilot prearm checks are never bypassed.
+You can also start from MAVProxy: `mode guided`, `arm throttle`, `mode auto`,
 `long MISSION_START`. The Fly tab shows the last plan uploaded from the page, or the
-plan being edited if there hasn't been one.
+plan being edited if there hasn't been one. Only a loopback client may call
+`POST /api/start` or `POST /api/fault`; viewing telemetry remotely does not grant
+permission to arm the vehicle or inject faults. These endpoints have no authentication;
+do not expose them through an unauthenticated local reverse proxy.
+
+### Threat simulator (SITL only)
+
+In live mode the Fly tab's threat simulator injects real faults into ArduPilot
+SITL by setting its own `SIM_*` parameters, so core's detectors react to a
+genuinely faulty vehicle rather than to numbers the dashboard made up:
+
+| Button | What SITL does |
+|---|---|
+| GPS jump | `SIM_GPS1_GLTCH_X` 0.001: the fix jumps ~110 m north |
+| GPS drift | the bridge walks `SIM_GPS1_GLTCH_X` north at 3 m/s, up to 1 km |
+| GPS jam | `SIM_GPS1_JAM` 1: SITL's jamming model degrades the fix and satellites |
+| Motor fault | `SIM_ENGINE_FAIL` 1, `SIM_ENGINE_MUL` 0.5: motor 1 gives half its thrust |
+| All clear | puts every one of those back to its default |
+
+Each button replaces whichever fault was active. The bridge waits for the autopilot to
+echo every parameter back, and sends older ArduPilot releases' names
+(`SIM_GPS_GLITCH_X`, `SIM_GPS_JAM`) alongside the current ones. A real autopilot has
+no `SIM_*` parameters, so injection fails there and changes nothing. There's no link
+jam button: core has no link detector yet (`core/link/` is still empty), so nothing
+would react to one.
+
+If an injection is unconfirmed, the snapshot reports `unknown`: some parameters may
+have changed even though the operation failed. The state also becomes unknown after
+lost contact, since a network outage does not prove SITL restarted or cleared a fault.
+Any drift loop stops on loss. Use All clear and wait for confirmation after reconnecting.
 
 The API has no authentication, and neither does MAVLink itself until #4 is done. It
 only answers to the dashboard's own address and localhost, which stops other websites
@@ -52,7 +85,7 @@ open the dashboard from another machine, use `-addr 0.0.0.0:8080 -public-host <i
 | Position estimate | core's `EST_N` and `EST_E` (metres north and east of home) with the autopilot's `HOME_POSITION`; falls back to `GLOBAL_POSITION_INT` |
 | Altitude, speed, heading | `GLOBAL_POSITION_INT` |
 | Battery, IMU | `SYS_STATUS`; IMU health is yes or no, so that score is 0% or 100% |
-| Motors | Nothing yet, so it reads "No data". ArduPilot always sets the `MOTOR_OUTPUTS` health bit, so `SYS_STATUS` can't show a failed motor; this needs ESC telemetry |
+| Motors | `ESC_TELEMETRY_1_TO_4`: slowest reporting motor's RPM divided by the median while armed and spinning. This is an imbalance heuristic, not proof of motor health; stopped/idle motors cannot be assessed this way. Without ESC telemetry it reads "No data" |
 | GNSS, link and hardware scores | `TRUST_NAV`, `TRUST_LNK`, `TRUST_HW` from core |
 | Autonomy behavior | core's `AUTONOMY <behavior>: <reason>` `STATUSTEXT` |
 | Events | every `STATUSTEXT` |
@@ -60,8 +93,9 @@ open the dashboard from another machine, use `-addr 0.0.0.0:8080 -public-host <i
 Things to know when reading the live view:
 
 - **The drift line compares GPS with core's own estimate** when core is publishing one
-  (`EST_N`/`EST_E`, #16). It doesn't use GPS, so a slow spoof the autopilot's EKF accepts
-  still shows as drift. The dashboard asks the autopilot for `HOME_POSITION` to place it.
+  (`EST_N`/`EST_E`, #16). Core dead-reckons position/velocity but by default uses the
+  flight controller's attitude to rotate IMU data; it is not wholly GPS-independent
+  (see `core/README.md`). The dashboard asks the autopilot for `HOME_POSITION` to place it.
   If core isn't publishing, or the estimate goes stale, it falls back to the EKF, which
   fuses GPS and so can follow a slow spoof. The drift label and map legend say which one
   is in use ("Drift vs core" or "Drift vs EKF").

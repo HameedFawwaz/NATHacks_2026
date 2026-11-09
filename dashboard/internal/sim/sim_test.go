@@ -38,6 +38,8 @@ func level(s *Sim, name string) model.Level {
 func startedSim(t *testing.T) *Sim {
 	t.Helper()
 	s := New(model.DefaultPlan())
+	// Scenario assertions need a repeatable route, not a different random flight on each run.
+	s.rng = rand.New(rand.NewPCG(0, 1))
 	s.Start()
 	if !run(s, 20, func() bool { return s.Snapshot().AltM >= model.DefaultAltM }) {
 		t.Fatal("never reached cruise altitude")

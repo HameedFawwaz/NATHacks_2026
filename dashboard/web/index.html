@@ -89,6 +89,11 @@
         <button id="flight-reset" class="btn">Reset</button>
       </div>
 
+      <div class="actions" id="live-controls" hidden>
+        <button id="live-start" class="btn btn-primary">Start flight</button>
+      </div>
+      <p id="live-status" class="plan-status" role="status" hidden></p>
+
       <h2>01 <span>System health</span></h2>
       <div id="health" class="health"></div>
 
@@ -101,6 +106,19 @@
           <button class="btn" data-scenario="2">Link jam</button>
           <button class="btn" data-scenario="3">Motor fault</button>
         </div>
+      </div>
+
+      <div id="live-demo" hidden>
+        <h2>02 <span>Threat simulator</span><small>SITL ONLY</small></h2>
+        <p class="section-description">Inject a real fault into the simulated drone. Core's detectors see what the autopilot sees.</p>
+        <div id="live-faults" class="scenarios">
+          <button class="btn" data-fault="none">All clear</button>
+          <button class="btn" data-fault="gps_jump" title="GPS position jumps about 110 m north in one fix">GPS jump</button>
+          <button class="btn" data-fault="gps_drift" title="GPS position walks north at 3 m/s, like a patient spoofer">GPS drift</button>
+          <button class="btn" data-fault="gps_jam" title="SITL's GPS jamming model: the fix and satellite count degrade">GPS jam</button>
+          <button class="btn" data-fault="motor" title="Motor 1 delivers half the thrust it's commanded">Motor fault</button>
+        </div>
+        <p id="fault-status" class="plan-status" role="status" hidden></p>
       </div>
 
       <h2>03 <span>Event stream</span></h2>

@@ -11,6 +11,8 @@ import (
 const (
 	MsgHeartbeat         = 0
 	MsgSysStatus         = 1
+	MsgParamValue        = 22
+	MsgParamSet          = 23
 	MsgGPSRawInt         = 24
 	MsgGlobalPositionInt = 33
 	MsgMissionRequest    = 40
@@ -18,11 +20,13 @@ const (
 	MsgMissionAck        = 47
 	MsgMissionRequestInt = 51
 	MsgRequestDataStream = 66
-	MsgCommandLong       = 76
 	MsgMissionItemInt    = 73
+	MsgCommandLong       = 76
+	MsgCommandAck        = 77
 	MsgHomePosition      = 242
 	MsgNamedValueFloat   = 251
 	MsgStatusText        = 253
+	MsgESCTelemetry1To4  = 11030 // ardupilotmega dialect
 )
 
 const (
@@ -44,6 +48,8 @@ var messageInfo = map[uint32]struct {
 }{
 	MsgHeartbeat:         {50, 9},
 	MsgSysStatus:         {124, 43},
+	MsgParamValue:        {220, 25},
+	MsgParamSet:          {168, 23},
 	MsgGPSRawInt:         {24, 52},
 	MsgGlobalPositionInt: {104, 28},
 	MsgMissionRequest:    {230, 5},
@@ -53,9 +59,11 @@ var messageInfo = map[uint32]struct {
 	MsgRequestDataStream: {148, 6},
 	MsgMissionItemInt:    {38, 38},
 	MsgCommandLong:       {152, 33},
+	MsgCommandAck:        {143, 10},
 	MsgHomePosition:      {104, 60},
 	MsgNamedValueFloat:   {170, 18},
 	MsgStatusText:        {83, 54},
+	MsgESCTelemetry1To4:  {144, 44},
 }
 
 // Frame is one received message. Payload is always the message's full length,
