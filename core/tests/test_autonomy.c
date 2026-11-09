@@ -36,6 +36,7 @@ typedef struct {
     core_telemetry_t telemetry;
     uint64_t now;
     FILE *log;
+    uint64_t vehicle_heard_ms; /* if set, overrides the vehicle heartbeat's real-time stamp */
     /* What the fake vehicle received on the most recent tick. */
     int mode_commands, source_commands;
     uint32_t last_mode;
@@ -121,6 +122,9 @@ static void vehicle_drain(harness_t *h) {
 static void tick(harness_t *h, uint64_t advance_ms) {
     h->now += advance_ms;
     core_mavlink_conn_get_telemetry(h->conn, &h->telemetry);
+    if (h->vehicle_heard_ms) {
+        h->telemetry.heartbeat.last_update_ms = h->vehicle_heard_ms;
+    }
     core_autonomy_tick(&h->autonomy, h->conn, &h->score, &h->telemetry, h->now);
     vehicle_drain(h);
 }
@@ -314,38 +318,90 @@ static void test_stale_producer_is_untrusted(harness_t *h) {
     assert(h->autonomy.behavior == CORE_AUTONOMY_GNSS_FAILOVER);
 }
 
+/* Stamps the vehicle as heard at the test clock's now, for the tests about
+ * its heartbeat going stale. Others leave this 0 and the clock far behind the
+ * real-time stamps, so the vehicle never looks stale to them. */
+static void heard(harness_t *h) { h->vehicle_heard_ms = h->now; }
+
+/* Reports nav and link as fresh as of the test clock. */
+static void producers(harness_t *h, float nav, float link) {
+    core_trust_score_set_component(&h->score, CORE_TRUST_SOURCE_NAV, nav);
+    core_trust_score_set_component(&h->score, CORE_TRUST_SOURCE_LINK, link);
+    h->score.nav_update_ms = h->now;
+    h->score.link_update_ms = h->now;
+}
+
 /* When the autopilot's own heartbeat stops reaching us, its armed state and mode
  * are unknown and the link monitor can't judge anything, so a stale input then
  * is our blindness, not an attack. Acting on it would brake or RTL the vehicle
- * once the companion link returned, with the operator in control all along. */
+ * once the companion link returned, with the operator in control all along. In
+ * SITL, before this, an 8 s cut went LINK_HOLD then SAFE_LAND. */
 static void test_stale_vehicle_heartbeat_freezes_decisions(harness_t *h) {
     reset(h, MODE_GUIDED, true);
-    uint64_t hb_ms = h->telemetry.heartbeat.last_update_ms;
-    h->now = hb_ms;
-    h->score.link_update_ms = h->now;
+    h->now = 100000;
+    heard(h);
+    producers(h, 1.0f, 1.0f);
     tick(h, 20);
     assert(h->autonomy.behavior == CORE_AUTONOMY_NOMINAL);
 
-    /* The autopilot falls silent, and with it every producer it feeds. */
+    /* The autopilot falls silent, and with it every producer it feeds: link
+     * unreported, nav starved of GPS. */
     tick(h, 3500);
+    producers(h, 0.0f, 1.0f);
+    h->score.link_update_ms = h->now - 3500;
     tick(h, 30000);
     assert(h->autonomy.behavior == CORE_AUTONOMY_NOMINAL && "no verdict from stale vehicle state");
-    assert(h->mode_commands == 0);
+    assert(h->mode_commands == 0 && h->source_commands == 0);
 
-    /* It comes back, and the link is reported fresh again in the same tick. */
-    vehicle_heartbeat(h, MODE_GUIDED, true);
-    h->now = h->telemetry.heartbeat.last_update_ms;
-    h->score.link_update_ms = h->now;
-    tick(h, 20);
+    /* It comes back. Nav, starved through the outage, still reads 0 for a tick
+     * or two; in SITL that alone switched the EKF off GPS for 6.5 s. */
+    for (int i = 0; i < 50; i++) { /* 1 s */
+        h->now += 20;
+        heard(h);
+        producers(h, 0.0f, 1.0f);
+        tick(h, 0);
+    }
+    assert(h->autonomy.behavior == CORE_AUTONOMY_NOMINAL && "producers get a stale period to catch up");
+    for (int i = 0; i < 110; i++) { /* 2.2 s more, nav caught up */
+        h->now += 20;
+        heard(h);
+        producers(h, 1.0f, 1.0f);
+        tick(h, 0);
+    }
     assert(h->autonomy.behavior == CORE_AUTONOMY_NOMINAL);
-    assert(h->mode_commands == 0);
+    assert(h->mode_commands == 0 && h->source_commands == 0);
 
-    /* Real link loss after that is still acted on. */
-    report(h, CORE_TRUST_SOURCE_LINK, 0.0f);
-    h->score.link_update_ms = h->now;
+    /* Real link loss after that is acted on at once. */
+    heard(h);
+    producers(h, 1.0f, 0.0f);
     tick(h, 20);
     assert(h->autonomy.behavior == CORE_AUTONOMY_LINK_HOLD);
     assert(h->mode_commands == 1 && h->last_mode == MODE_BRAKE);
+    h->vehicle_heard_ms = 0;
+}
+
+/* An attack already under way when the autopilot comes back is acted on once
+ * the settling period is over: it delays, never cancels. */
+static void test_untrusted_after_resume_is_acted_on(harness_t *h) {
+    reset(h, MODE_GUIDED, true);
+    h->now = 100000;
+    heard(h);
+    producers(h, 1.0f, 1.0f);
+    tick(h, 20);
+    tick(h, 3500); /* stale */
+    bool acted = false;
+    uint64_t back = h->now;
+    for (int i = 0; i < 250 && !acted; i++) { /* 5 s with the link lost */
+        h->now += 20;
+        heard(h);
+        producers(h, 1.0f, 0.0f);
+        tick(h, 0);
+        acted = h->autonomy.behavior == CORE_AUTONOMY_LINK_HOLD;
+    }
+    assert(acted);
+    assert(h->now - back >= 3000 && h->now - back <= 3100 && "acted on as soon as the settling period ended");
+    assert(h->mode_commands == 1 && h->last_mode == MODE_BRAKE);
+    h->vehicle_heard_ms = 0;
 }
 
 static void test_disarmed_commands_no_mode(harness_t *h) {
@@ -431,6 +487,7 @@ int main(void) {
     test_crypto_does_not_select_behavior(&h);
     test_stale_producer_is_untrusted(&h);
     test_stale_vehicle_heartbeat_freezes_decisions(&h);
+    test_untrusted_after_resume_is_acted_on(&h);
     test_disarmed_commands_no_mode(&h);
     test_gcs_heartbeat_is_not_the_vehicle(&h);
     test_transition_log(&h);
