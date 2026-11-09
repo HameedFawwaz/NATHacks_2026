@@ -290,4 +290,12 @@ func TestLoadKeyFile(t *testing.T) {
 	if _, err := LoadKeyFile(empty); err == nil {
 		t.Error("loaded an empty key file")
 	}
+	// A valid-looking prefix must not hide junk beyond the read buffer.
+	oversized := filepath.Join(dir, "oversized.key")
+	if err := os.WriteFile(oversized, []byte(strings.Repeat("ab", KeyLen)+strings.Repeat(" ", 64)+"not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadKeyFile(oversized); err == nil {
+		t.Error("loaded a malformed key file after silently truncating it")
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -112,13 +113,16 @@ func LoadKeyFile(path string) ([KeyLen]byte, error) {
 	if st, err := f.Stat(); err == nil && st.Mode().Perm()&0o077 != 0 {
 		log.Printf("signing key file %s is accessible by group/others; run chmod 600", path)
 	}
-	buf := make([]byte, 2*KeyLen+64) // room for whitespace, but not for an arbitrary file
-	n, err := f.Read(buf)
-	if err != nil && n == 0 {
+	const maxKeyFileBytes = 2*KeyLen + 64 // room for whitespace, not an arbitrary file
+	buf, err := io.ReadAll(io.LimitReader(f, maxKeyFileBytes+1))
+	defer clear(buf)
+	if err != nil {
 		return key, fmt.Errorf("cannot read signing key file: %w", err)
 	}
-	key, err = ParseKey(string(buf[:n]))
-	clear(buf)
+	if len(buf) > maxKeyFileBytes {
+		return key, fmt.Errorf("signing key file %s is too large (maximum %d bytes)", path, maxKeyFileBytes)
+	}
+	key, err = ParseKey(string(buf))
 	if err != nil {
 		return key, fmt.Errorf("signing key file %s: %w", path, err)
 	}
