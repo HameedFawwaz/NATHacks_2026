@@ -149,7 +149,7 @@ func (b *Bridge) SetFault(ctx context.Context, f Fault) error {
 	case !b.vehicle.connected(b.nowMs()) || b.peer == nil:
 		b.mu.Unlock()
 		return ErrNoVehicle
-	case b.params != nil:
+	case b.params != nil || b.recovery != nil:
 		b.mu.Unlock()
 		return ErrBusy
 	}

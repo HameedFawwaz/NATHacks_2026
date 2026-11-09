@@ -43,16 +43,18 @@ type Bridge struct {
 	conn  *net.UDPConn
 	start time.Time
 
-	mu           sync.Mutex
-	vehicle      vehicleState
-	peer         *net.UDPAddr // where the autopilot's heartbeats come from
-	seq          uint8
-	upload       *upload
-	missionReady bool // a mission uploaded and acknowledged during this connection
-	command      *command
-	params       *paramWait         // a fault being injected; see fault.go
-	stopDrift    context.CancelFunc // ends a drifting GPS fault, nil if none is running
-	signer       *mavlink.Signer    // nil: the link is unsigned
+	mu            sync.Mutex
+	vehicle       vehicleState
+	peer          *net.UDPAddr // where the autopilot's heartbeats come from
+	seq           uint8
+	upload        *upload
+	missionReady  bool // a mission uploaded and acknowledged during this connection
+	command       *command
+	params        *paramWait         // a fault being injected; see fault.go
+	stopDrift     context.CancelFunc // ends a drifting GPS fault, nil if none is running
+	recovery      *recoveryWait
+	recoveryNonce uint16
+	signer        *mavlink.Signer // nil: the link is unsigned
 }
 
 // signingLinkID identifies the dashboard's link in its signatures.
@@ -128,6 +130,7 @@ func (b *Bridge) handle(data []byte, from *net.UDPAddr) {
 			b.handleCommand(f)
 			b.handleParam(f)
 		}
+		b.handleRecoveryLocked(f)
 	}
 	b.updateLocked(now)
 }
@@ -266,7 +269,7 @@ func (b *Bridge) transfer(ctx context.Context, items []mavlink.MissionItem) erro
 	case b.vehicle.snap.Armed:
 		b.mu.Unlock()
 		return ErrArmed
-	case b.upload != nil || b.command != nil:
+	case b.upload != nil || b.command != nil || b.recovery != nil:
 		b.mu.Unlock()
 		return ErrBusy
 	}
@@ -374,7 +377,7 @@ func (b *Bridge) StartFlight(ctx context.Context) error {
 	case b.vehicle.snap.Armed:
 		b.mu.Unlock()
 		return ErrAlreadyArmed
-	case b.command != nil || b.upload != nil:
+	case b.command != nil || b.upload != nil || b.recovery != nil:
 		b.mu.Unlock()
 		return ErrBusy
 	case !b.missionReady:

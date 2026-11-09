@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -55,6 +56,7 @@ func (b *Bridge) Handler(options HandlerOptions) http.Handler {
 	})
 	mux.HandleFunc("POST /api/start", b.serveStart)
 	mux.HandleFunc("POST /api/fault", b.serveFault)
+	mux.HandleFunc("POST /api/recovery", b.serveRecovery)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowedHost(r.Host, options.AllowedHosts) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
@@ -192,6 +194,41 @@ func (b *Bridge) serveStart(w http.ResponseWriter, r *http.Request) {
 func localControl(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	return err == nil && net.ParseIP(host).IsLoopback()
+}
+
+func (b *Bridge) serveRecovery(w http.ResponseWriter, r *http.Request) {
+	fail := func(status int, message string) { writeJSON(w, status, map[string]string{"error": message}) }
+	if !localControl(r) || !sameOrigin(r) {
+		fail(http.StatusForbidden, "recovery control requires a same-origin loopback client")
+		return
+	}
+	if media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); media != "application/json" {
+		fail(http.StatusUnsupportedMediaType, "expected application/json")
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || req.Enabled == nil {
+		fail(http.StatusBadRequest, "expected an enabled boolean")
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		fail(http.StatusBadRequest, "expected one JSON object")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	switch err := b.SetRecovery(ctx, *req.Enabled); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": *req.Enabled})
+	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrBusy), errors.Is(err, ErrRecoveryUnavailable):
+		fail(http.StatusConflict, err.Error())
+	default:
+		fail(http.StatusBadGateway, err.Error())
+	}
 }
 
 // FaultRequest is the body of POST /api/fault.

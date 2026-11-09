@@ -49,6 +49,9 @@ typedef struct {
     /* The operator's ground station, tracked in telemetry.gcs_heartbeat. 0 means
      * 255, ArduPilot's default SYSID_MYGCS. */
     uint8_t operator_gcs_sysid;
+    /* Explicit opt-in for local demo controls. Never enables them implicitly
+     * just because an unsigned packet claims a dashboard identity. */
+    bool allow_recovery_control;
 } core_mavlink_conn_config_t;
 
 typedef enum {

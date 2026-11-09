@@ -4,6 +4,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* MAV_CMD_USER_1, targeted to this companion (not the autopilot). param1 is
+ * 0/1, param2 a client nonce 1..65535. RECOV_ACK packs nonce*2 + enabled. */
+#define CORE_MAV_CMD_RECOVERY_CONTROL 31000
+
+typedef struct {
+    bool enabled;
+    uint16_t nonce;
+    uint32_t count;
+} core_recovery_control_t;
+
 /*
  * Plain-C telemetry snapshots decoded from MAVLink messages. No vendored
  * MAVLink type appears anywhere in this file - consumers never need to touch
@@ -160,6 +170,7 @@ typedef struct {
     core_link_security_t link_security;
 
     core_home_position_t home_position;
+    core_recovery_control_t recovery_control;
 } core_telemetry_t;
 
 #endif /* CORE_MAVLINK_TELEMETRY_H */

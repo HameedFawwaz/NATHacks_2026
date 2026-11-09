@@ -27,6 +27,7 @@ core_autonomy_config_t core_autonomy_default_config(void) {
 void core_autonomy_init(core_autonomy_t *ctx, const core_autonomy_config_t *cfg, FILE *log) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->cfg = *cfg;
+    ctx->enabled = true;
     ctx->log = log;
     ctx->behavior = CORE_AUTONOMY_NOMINAL;
     ctx->active_source_set = cfg->primary_source_set;
@@ -46,6 +47,24 @@ const char *core_autonomy_behavior_name(core_autonomy_behavior_t behavior) {
     case CORE_AUTONOMY_SAFE_LAND: return "SAFE_LAND";
     }
     return "UNKNOWN";
+}
+
+void core_autonomy_set_enabled(core_autonomy_t *ctx, bool enabled, uint64_t now_ms) {
+    if (!ctx || ctx->enabled == enabled) return;
+    if (!enabled) {
+        ctx->disabled_since_ms = now_ms;
+    } else {
+        if (now_ms >= ctx->disabled_since_ms) {
+            ctx->behavior_since_ms += now_ms - ctx->disabled_since_ms;
+        }
+        ctx->source_requested_ms = now_ms;
+        ctx->last_source_send_ms = 0;
+        ctx->mode_pending = false; /* don't replay an old, weaker mode request */
+        ctx->nav_recovering_since_ms = 0;
+        ctx->link_recovering_since_ms = 0;
+        ctx->hardware_recovering_since_ms = 0;
+    }
+    ctx->enabled = enabled;
 }
 
 /* Drops immediately on a low or stale score; recovers only after trusted_at has held for recovery_hold_ms. */
@@ -228,6 +247,8 @@ void core_autonomy_tick(core_autonomy_t *ctx, core_mavlink_conn_t *conn, core_tr
     if (score->crypto_trust < overall) overall = score->crypto_trust;
     if (score->hardware_trust < overall) overall = score->hardware_trust;
     core_trust_score_set_component(score, CORE_TRUST_SOURCE_AUTONOMY, overall);
+
+    if (!ctx->enabled) return;
 
     if (!telemetry->heartbeat.valid) {
         return;

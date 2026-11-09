@@ -61,6 +61,8 @@ typedef struct {
 
 typedef struct {
     core_autonomy_config_t cfg;
+    bool enabled; /* detectors still run while automatic commands are disabled */
+    uint64_t disabled_since_ms;
     FILE *log; /* transition log, NULL = STATUSTEXT and stderr only */
 
     core_autonomy_behavior_t behavior;
@@ -95,6 +97,10 @@ core_autonomy_config_t core_autonomy_default_config(void);
  * written here, so pass a newly opened file.
  */
 void core_autonomy_init(core_autonomy_t *ctx, const core_autonomy_config_t *cfg, FILE *log);
+
+/* Pauses new automatic commands, not the aircraft's existing mode/source.
+ * Hold/retry timers do not expire merely because responses were disabled. */
+void core_autonomy_set_enabled(core_autonomy_t *ctx, bool enabled, uint64_t now_ms);
 
 /*
  * Runs one decision step: updates overall_trust in score, then sends whatever

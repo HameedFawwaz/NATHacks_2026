@@ -167,6 +167,34 @@ static void test_nominal_commands_nothing(harness_t *h) {
     assert(h->score.overall_trust == 1.0f);
 }
 
+static void test_recovery_toggle_gates_commands_not_detection(harness_t *h) {
+    reset(h, MODE_GUIDED, true);
+    assert(h->autonomy.enabled);
+    core_autonomy_set_enabled(&h->autonomy, false, h->now);
+    report(h, CORE_TRUST_SOURCE_NAV, 0.0f);
+    tick(h, 20);
+    assert(!h->autonomy.enabled);
+    assert(h->mode_commands == 0 && h->source_commands == 0);
+    assert(h->score.overall_trust == 0.0f && "disabled responses must not hide the attack");
+    tick(h, 60000);
+    assert(h->mode_commands == 0 && h->source_commands == 0);
+    core_autonomy_set_enabled(&h->autonomy, true, h->now);
+    tick(h, 20);
+    assert(h->autonomy.behavior == CORE_AUTONOMY_GNSS_FAILOVER);
+    assert(h->source_commands == 1 && h->last_source == 2);
+
+    reset(h, MODE_GUIDED, true);
+    report(h, CORE_TRUST_SOURCE_LINK, 0.0f);
+    tick(h, 20);
+    assert(h->autonomy.behavior == CORE_AUTONOMY_LINK_HOLD);
+    core_autonomy_set_enabled(&h->autonomy, false, h->now);
+    tick(h, 60000);
+    core_autonomy_set_enabled(&h->autonomy, true, h->now);
+    tick(h, 20);
+    assert(h->autonomy.behavior == CORE_AUTONOMY_LINK_HOLD && "disabled time is not a return timeout");
+    assert(h->mode_commands == 0 && "do not replay an old pending hold after enabling");
+}
+
 static void test_gnss_failover_and_recovery(harness_t *h) {
     reset(h, MODE_GUIDED, true);
 
@@ -485,6 +513,7 @@ int main(void) {
     assert(h.conn);
 
     test_nominal_commands_nothing(&h);
+    test_recovery_toggle_gates_commands_not_detection(&h);
     test_gnss_failover_and_recovery(&h);
     test_failover_rejected_lands(&h);
     test_failover_unacknowledged_lands(&h);

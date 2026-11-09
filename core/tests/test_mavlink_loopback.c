@@ -9,6 +9,7 @@
  */
 #include <arpa/inet.h>
 #include <assert.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
@@ -121,6 +122,46 @@ static bool two_operator_heartbeats(const core_telemetry_t *t) { return t->gcs_h
 static bool rc_rssi_200(const core_telemetry_t *t) { return t->rc_status.valid && t->rc_status.rssi == 200; }
 static bool home_valid(const core_telemetry_t *t) { return t->home_position.valid; }
 static bool home_shifted(const core_telemetry_t *t) { return t->home_position.lat == 473978420; }
+
+static void recovery_command(int fd, const struct sockaddr_in *addr, uint8_t sys, uint8_t comp,
+                             uint8_t target_comp, float enabled, float nonce) {
+    mavlink_message_t msg;
+    mavlink_msg_command_long_pack(sys, comp, &msg, 1, target_comp, CORE_MAV_CMD_RECOVERY_CONTROL,
+                                  0, enabled, nonce, 0, 0, 0, 0, 0);
+    send_packed(fd, addr, &msg);
+}
+
+static void test_recovery_control_is_opt_in_and_targeted(bool allow) {
+    struct sockaddr_in addr;
+    int fd = open_fake_vehicle_socket(&addr);
+    core_mavlink_conn_config_t cfg = {0};
+    strcpy(cfg.transport.udp.bind_addr, "127.0.0.1");
+    cfg.transport.udp.bind_port = ntohs(addr.sin_port);
+    cfg.system_id = 1;
+    cfg.component_id = 191;
+    cfg.allow_recovery_control = allow;
+    core_mavlink_conn_t *conn = core_mavlink_conn_open(&cfg);
+    assert(conn);
+    recovery_command(fd, &addr, 255, 190, 191, 0, 1);
+    recovery_command(fd, &addr, 254, 1, 191, 0, 1);
+    recovery_command(fd, &addr, 254, 190, 1, 0, 1);
+    recovery_command(fd, &addr, 254, 190, 191, NAN, 1);
+    recovery_command(fd, &addr, 254, 190, 191, 0, NAN);
+    recovery_command(fd, &addr, 254, 190, 191, 0, 1.5f);
+    recovery_command(fd, &addr, 254, 190, 191, 0, 0);
+    for (int i = 0; i < 20; i++) { core_mavlink_conn_poll(conn); usleep(1000); }
+    core_telemetry_t t;
+    core_mavlink_conn_get_telemetry(conn, &t);
+    assert(t.recovery_control.count == 0);
+    recovery_command(fd, &addr, 254, 190, 191, 0, 41);
+    recovery_command(fd, &addr, 254, 190, 191, 1, 42);
+    for (int i = 0; i < 20; i++) { core_mavlink_conn_poll(conn); usleep(1000); }
+    core_mavlink_conn_get_telemetry(conn, &t);
+    assert(t.recovery_control.count == (allow ? 2u : 0u));
+    if (allow) assert(t.recovery_control.enabled && t.recovery_control.nonce == 42);
+    core_mavlink_conn_close(conn);
+    close(fd);
+}
 
 /* After a heartbeat timeout the connection reopens, and the first frame back
  * may well not be a heartbeat. That frame must not find the timeout already
@@ -298,6 +339,8 @@ int main(void) {
     close(fake_fd);
 
     test_reconnect_waits_for_a_fresh_heartbeat();
+    test_recovery_control_is_opt_in_and_targeted(false);
+    test_recovery_control_is_opt_in_and_targeted(true);
 
     printf("test_mavlink_loopback: all assertions passed\n");
     return 0;

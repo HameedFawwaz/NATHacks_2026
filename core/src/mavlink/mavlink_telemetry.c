@@ -1,11 +1,25 @@
 #include "mavlink_internal.h"
 
+#include <math.h>
+
 #include "core/common/time.h"
 
 void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, const mavlink_message_t *msg) {
     uint64_t now = core_now_ms();
 
     switch (msg->msgid) {
+    case MAVLINK_MSG_ID_COMMAND_LONG: {
+        if (!conn->cfg.allow_recovery_control || msg->sysid != 254 || msg->compid != 190) break;
+        mavlink_command_long_t cmd;
+        mavlink_msg_command_long_decode(msg, &cmd);
+        if (cmd.command != CORE_MAV_CMD_RECOVERY_CONTROL || cmd.target_system != conn->cfg.system_id ||
+            cmd.target_component != conn->cfg.component_id || (cmd.param1 != 0.0f && cmd.param1 != 1.0f) ||
+            !isfinite(cmd.param2) || cmd.param2 < 1.0f || cmd.param2 > 65535.0f || floorf(cmd.param2) != cmd.param2) break;
+        conn->telemetry.recovery_control.enabled = cmd.param1 == 1.0f;
+        conn->telemetry.recovery_control.nonce = (uint16_t)cmd.param2;
+        conn->telemetry.recovery_control.count++;
+        break;
+    }
     case MAVLINK_MSG_ID_HEARTBEAT: {
         mavlink_heartbeat_t hb;
         mavlink_msg_heartbeat_decode(msg, &hb);

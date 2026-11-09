@@ -56,16 +56,18 @@ type vehicleState struct {
 
 	// The EKF's position, kept apart from core's estimate so snapshot can pick
 	// whichever is current.
-	ekf          model.LatLon
-	ekfKnown     bool
-	home         model.LatLon
-	homeKnown    bool
-	estN         float64 // core's estimate, metres north of home
-	estE         float64 // and east
-	estNAt       int64   // when each last arrived; 0 means never
-	estEAt       int64
-	events       []model.Event
-	nextEventSeq int
+	ekf               model.LatLon
+	ekfKnown          bool
+	home              model.LatLon
+	homeKnown         bool
+	estN              float64 // core's estimate, metres north of home
+	estE              float64 // and east
+	estNAt            int64   // when each last arrived; 0 means never
+	estEAt            int64
+	events            []model.Event
+	nextEventSeq      int
+	recoveryControlAt int64
+	recoveryAck       uint32
 }
 
 // isVehicle tells the autopilot apart from ground stations and companion
@@ -98,6 +100,9 @@ func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) 
 	// Core publishes these from a companion computer, under another component ID.
 	switch f.MsgID {
 	case mavlink.MsgNamedValueFloat:
+		if f.CompID == recoveryCompID {
+			v.applyRecoveryValue(f.Payload, nowMs)
+		}
 		v.applyNamedValue(f.Payload, nowMs)
 	case mavlink.MsgStatusText:
 		v.applyStatusText(f.Payload, nowMs)
@@ -309,6 +314,9 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 	s.NowMs = nowMs
 	s.Connected = v.connected(nowMs)
 	s.Fault = string(v.fault)
+	s.RecoveryControllable = s.RecoveryControllable && s.Connected &&
+		v.recoveryControlAt != 0 && nowMs-v.recoveryControlAt <= model.StaleAfterMs &&
+		s.RecoveryAtMs != 0 && nowMs-s.RecoveryAtMs <= model.StaleAfterMs
 
 	gpsFresh := v.gpsAt != 0 && nowMs-v.gpsAt <= model.StaleAfterMs
 	globalFresh := v.globalAt != 0 && nowMs-v.globalAt <= model.StaleAfterMs

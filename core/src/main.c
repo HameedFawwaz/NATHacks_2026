@@ -93,8 +93,16 @@ static void alert_new_flags(core_mavlink_conn_t *conn, uint32_t prev_flags, uint
 
 int main(int argc, char **argv) {
     uint16_t port = 14551;
-    if (argc > 1) {
-        port = (uint16_t)atoi(argv[1]);
+    bool allow_recovery_control = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--allow-recovery-control") == 0) {
+            allow_recovery_control = true;
+        } else if (argv[i][0] != '-') {
+            port = (uint16_t)atoi(argv[i]);
+        } else {
+            fprintf(stderr, "unknown option: %s\n", argv[i]);
+            return 1;
+        }
     }
 
     signal(SIGINT, handle_sigint);
@@ -102,13 +110,15 @@ int main(int argc, char **argv) {
     core_mavlink_conn_config_t conn_cfg;
     memset(&conn_cfg, 0, sizeof(conn_cfg));
     conn_cfg.type = CORE_MAVLINK_TRANSPORT_UDP;
-    strncpy(conn_cfg.transport.udp.bind_addr, "0.0.0.0", sizeof(conn_cfg.transport.udp.bind_addr) - 1);
+    strncpy(conn_cfg.transport.udp.bind_addr, allow_recovery_control ? "127.0.0.1" : "0.0.0.0",
+            sizeof(conn_cfg.transport.udp.bind_addr) - 1);
     conn_cfg.transport.udp.bind_port = port;
     conn_cfg.transport.udp.remote_port = 0; /* learn peer from first inbound packet */
     conn_cfg.system_id = 1;
     conn_cfg.component_id = 191; /* MAV_COMP_ID_ONBOARD_COMPUTER */
     conn_cfg.reconnect_interval_ms = 1000;
     conn_cfg.heartbeat_timeout_ms = 5000;
+    conn_cfg.allow_recovery_control = allow_recovery_control;
 
     core_mavlink_conn_t *conn = core_mavlink_conn_open(&conn_cfg);
     if (!conn) {
@@ -153,6 +163,8 @@ int main(int argc, char **argv) {
     uint64_t last_print_ms = 0;
     uint64_t last_rate_request_ms = 0;
     uint32_t prev_flags = 0;
+    uint32_t recovery_request_count = 0;
+    uint32_t recovery_ack = 0;
 
     /* A GCS or MAVProxy sitting between us and the flight controller often
      * already asks for a baseline set of streams, but core_main must not
@@ -209,6 +221,14 @@ int main(int argc, char **argv) {
 
         core_telemetry_t telemetry;
         core_mavlink_conn_get_telemetry(conn, &telemetry);
+        if (telemetry.recovery_control.count != recovery_request_count) {
+            recovery_request_count = telemetry.recovery_control.count;
+            core_autonomy_set_enabled(&autonomy, telemetry.recovery_control.enabled, now);
+            recovery_ack = (uint32_t)telemetry.recovery_control.nonce * 2u + (autonomy.enabled ? 1u : 0u);
+            core_mavlink_send_statustext(conn, CORE_MAV_SEVERITY_NOTICE,
+                                        autonomy.enabled ? "Recovery enabled; detection stays on" :
+                                                           "Recovery disabled; detection stays on");
+        }
 
         core_nav_result_t result = core_nav_detector_update(&detector, &telemetry, &nav_cfg);
         core_trust_score_set_component(&score, CORE_TRUST_SOURCE_NAV, result.nav_trust);
@@ -243,6 +263,10 @@ int main(int argc, char **argv) {
 
         if (now - last_publish_ms >= 200) {
             core_mavlink_publish_trust_score(conn, &score);
+            core_mavlink_send_named_value_float(conn, "RECOV_EN", autonomy.enabled ? 1.0f : 0.0f);
+            core_mavlink_send_named_value_float(conn, "RECOV_CTL", allow_recovery_control ? 1.0f : 0.0f);
+            core_mavlink_send_named_value_float(conn, "AUTO_STATE", (float)autonomy.behavior);
+            if (recovery_ack != 0) core_mavlink_send_named_value_float(conn, "RECOV_ACK", (float)recovery_ack);
             if (link.state != CORE_LINK_UNKNOWN) {
                 core_mavlink_send_named_value_float(conn, "LNK_STATE", (float)link.state);
                 core_mavlink_send_named_value_float(conn, "LNK_LOSS", link.loss);
