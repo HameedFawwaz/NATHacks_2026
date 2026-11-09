@@ -23,6 +23,7 @@ const (
 	MsgCommandAck        = 77
 	MsgNamedValueFloat   = 251
 	MsgStatusText        = 253
+	MsgESCTelemetry1To4  = 11030 // ardupilotmega dialect
 )
 
 const (
@@ -56,6 +57,7 @@ var messageInfo = map[uint32]struct {
 	MsgCommandAck:        {143, 10},
 	MsgNamedValueFloat:   {170, 18},
 	MsgStatusText:        {83, 54},
+	MsgESCTelemetry1To4:  {144, 44},
 }
 
 // Frame is one received message. Payload is always the message's full length,

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Runs the whole stack for manual testing: ArduCopter SITL (+ MAVProxy fanning
-# telemetry out to two links), core (the real GNSS detector + autonomy), and
-# the dashboard in live mode.
+# Runs the whole stack for manual testing: ArduCopter SITL, core (the real GNSS
+# detector + autonomy, on SITL's SERIAL1), and the dashboard in live mode (fed,
+# with a console, by MAVProxy).
 #
 # THIS SCRIPT IS THE CANONICAL "HOW DO I RUN EVERYTHING" REFERENCE. If you
 # change how core or the dashboard are built or run - binary names, flags,
@@ -75,7 +75,7 @@ cleanup() {
   # Fallback net, in case anything detached from the group above (sim_vehicle.py
   # forks arducopter/MAVProxy/an xterm, and not all of them necessarily stay in it).
   pkill -f "arducopter.*-I${INSTANCE}( |$)" 2>/dev/null || true
-  pkill -f "mavproxy\.py.*${CORE_PORT}.*${DASH_PORT}.*${CONSOLE_PORT}" 2>/dev/null || true
+  pkill -f "mavproxy\.py.*${DASH_PORT}.*${CONSOLE_PORT}" 2>/dev/null || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -88,11 +88,26 @@ cmake --build "$REPO_ROOT/core/build" -j"$(nproc)" >/dev/null
 echo "building dashboard..."
 ( cd "$REPO_ROOT/dashboard" && make build >/dev/null )
 
-# --- SITL + MAVProxy: one link each for core, the dashboard, and this script's
-# own console, so none of the three can collide over who owns a UDP port. ---
+# --- core: the real GNSS detector + autonomy. Started first so its port is bound
+# before SITL's SERIAL1 starts sending to it. ---
+echo "starting core_main on port $CORE_PORT..."
+( cd "$RUN_DIR" && exec "$REPO_ROOT/core/build/core_main" "$CORE_PORT" ) > "$RUN_DIR/core_main.log" 2>&1 &
+CORE_PID=$!
+sleep 1
+
+# --- SITL + MAVProxy. core gets SITL's SERIAL1 to itself, like a companion
+# computer wired to a flight controller's telemetry port. It must not sit behind
+# a MAVProxy --out: MAVProxy forwards what an --out sends only to the autopilot,
+# and the autopilot never routes a message back out the link it came in on, so
+# core's trust scores and autonomy STATUSTEXTs would never reach the dashboard.
+# On its own serial port, ArduPilot forwards them to MAVProxy, which fans them out
+# to every --out below. --no-extra-ports stops sim_vehicle.py adding its own
+# 127.0.0.1:14550 output, which doubled every message to a dashboard on that port.
+# The dashboard and this script's console each get a MAVProxy --out, so neither
+# can collide with the other over a UDP port. ---
 echo "starting SITL (instance $INSTANCE)..."
-( cd "$RUN_DIR" && exec setsid sim_vehicle.py -v ArduCopter -I"$INSTANCE" --no-rebuild \
-    --out "udp:127.0.0.1:$CORE_PORT" \
+( cd "$RUN_DIR" && exec setsid sim_vehicle.py -v ArduCopter -I"$INSTANCE" --no-rebuild --no-extra-ports \
+    -A "--serial1=udpclient:127.0.0.1:$CORE_PORT" \
     --out "udp:127.0.0.1:$DASH_PORT" \
     --out "udp:127.0.0.1:$CONSOLE_PORT" \
     -m "--daemon" ) \
@@ -108,11 +123,6 @@ until grep -q "AP: ArduPilot Ready" "$RUN_DIR/sitl.log" 2>/dev/null; do
   fi
   sleep 1
 done
-
-# --- core: the real GNSS detector + autonomy ---
-echo "starting core_main on port $CORE_PORT..."
-( cd "$RUN_DIR" && exec "$REPO_ROOT/core/build/core_main" "$CORE_PORT" ) > "$RUN_DIR/core_main.log" 2>&1 &
-CORE_PID=$!
 
 # --- dashboard, live mode ---
 echo "starting dashboard on $WEB_ADDR, live mode..."

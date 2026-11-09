@@ -168,6 +168,63 @@ func TestSensorHealthAndBattery(t *testing.T) {
 	}
 }
 
+func escTelemetry(voltage uint16, rpm [4]uint16, present [4]bool) []byte {
+	p := make([]byte, 44)
+	for i := range 4 {
+		if !present[i] {
+			continue
+		}
+		p[2*i], p[2*i+1] = byte(voltage), byte(voltage>>8)
+		p[24+2*i], p[24+2*i+1] = byte(rpm[i]), byte(rpm[i]>>8)
+		p[32+2*i] = 1
+	}
+	return p
+}
+
+func TestMotorsFromESCTelemetry(t *testing.T) {
+	all := [4]bool{true, true, true, true}
+	esc := func(v *vehicleState, rpm [4]uint16, present [4]bool, at int64) model.Reading {
+		t.Helper()
+		v.apply(frame(1, 1, mavlink.MsgESCTelemetry1To4, escTelemetry(1680, rpm, present)), at)
+		return v.snapshot(at).Motors
+	}
+
+	// Disarmed and idle: reporting ESCs are healthy.
+	disarmed := &vehicleState{}
+	disarmed.apply(frame(1, 1, mavlink.MsgHeartbeat, heartbeatPayload(2, 3, 0, 0)), 1000)
+	if r := esc(disarmed, [4]uint16{}, all, 1100); r != (model.Reading{Value: 1, AtMs: 1100}) {
+		t.Fatalf("disarmed: %+v", r)
+	}
+
+	v := identified(t) // armed
+	if r := esc(v, [4]uint16{8000, 8200, 7900, 8100}, all, 1100); r.Value < 0.95 || r.AtMs != 1100 {
+		t.Fatalf("even spin: %+v", r)
+	}
+	if r := esc(v, [4]uint16{8000, 4000, 8000, 8000}, all, 1200); r.Value != 0.5 {
+		t.Fatalf("weak motor: %+v", r)
+	}
+	// A motor that stops dead also stops reporting RPM, but it has reported before.
+	if r := esc(v, [4]uint16{9000, 0, 9000, 9000}, all, 1300); r.Value != 0 {
+		t.Fatalf("stopped motor: %+v", r)
+	}
+	// Armed but not spinning yet: nothing to compare.
+	if r := esc(v, [4]uint16{0, 0, 0, 0}, all, 1400); r.Value != 1 {
+		t.Fatalf("armed, not spinning: %+v", r)
+	}
+
+	// Empty slots are absent motors, not stopped ones.
+	tri := identified(t)
+	if r := esc(tri, [4]uint16{8000, 8000, 8000, 0}, [4]bool{true, true, true, false}, 1100); r.Value != 1 {
+		t.Fatalf("unused slot counted as a motor: %+v", r)
+	}
+
+	// No ESC telemetry at all means no data.
+	none := identified(t)
+	if r := esc(none, [4]uint16{}, [4]bool{}, 1100); r.AtMs != 0 {
+		t.Fatalf("all-empty block reported motors: %+v", r)
+	}
+}
+
 func TestTelemetryExpiresWhileHeartbeatsContinue(t *testing.T) {
 	v := identified(t)
 	v.apply(mavlink.Parse(mustGolden(t, "fd1e000002010118000015cd5b070000000094feebea12cfe85840e908007900c80052032823030e0da3"))[0], 1000)

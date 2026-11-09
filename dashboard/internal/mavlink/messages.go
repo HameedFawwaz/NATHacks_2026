@@ -114,6 +114,24 @@ func DecodeGlobalPositionInt(p []byte) GlobalPositionInt {
 	}
 }
 
+// ESCTelemetry is ESC_TELEMETRY_1_TO_4: one block of four ESCs. A slot with no
+// ESC behind it is all zeros.
+type ESCTelemetry struct {
+	Voltage [4]uint16 // centivolts
+	RPM     [4]uint16
+	Count   [4]uint16 // telemetry packets received from each ESC, wrapping
+}
+
+func DecodeESCTelemetry(p []byte) ESCTelemetry {
+	var t ESCTelemetry
+	for i := range 4 {
+		t.Voltage[i] = u16(p[2*i:])
+		t.RPM[i] = u16(p[24+2*i:])
+		t.Count[i] = u16(p[32+2*i:])
+	}
+	return t
+}
+
 func DecodeNamedValueFloat(p []byte) (name string, value float64) {
 	return cString(p[8:18]), float64(f32(p[4:]))
 }
