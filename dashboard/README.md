@@ -40,6 +40,27 @@ control, e.g. in MAVProxy: `mode guided`, `arm throttle`, `mode auto`,
 `long MISSION_START`. The Fly tab shows the last plan uploaded from the page, or the
 plan being edited if there hasn't been one.
 
+### Threat simulator (SITL only)
+
+In live mode the Fly tab's threat simulator injects real faults into ArduPilot
+SITL by setting its own `SIM_*` parameters, so core's detectors react to a
+genuinely faulty vehicle rather than to numbers the dashboard made up:
+
+| Button | What SITL does |
+|---|---|
+| GPS jump | `SIM_GPS1_GLTCH_X` 0.001: the fix jumps ~110 m north |
+| GPS drift | the bridge walks `SIM_GPS1_GLTCH_X` north at 3 m/s, up to 1 km |
+| GPS jam | `SIM_GPS1_JAM` 1: SITL's jamming model degrades the fix and satellites |
+| Motor fault | `SIM_ENGINE_FAIL` 1, `SIM_ENGINE_MUL` 0.5: motor 1 gives half its thrust |
+| All clear | puts every one of those back to its default |
+
+Each button replaces whichever fault was active. The bridge waits for the autopilot to
+echo every parameter back, and sends older ArduPilot releases' names
+(`SIM_GPS_GLITCH_X`, `SIM_GPS_JAM`) alongside the current ones. A real autopilot has
+no `SIM_*` parameters, so injection fails there and changes nothing. There's no link
+jam button: core has no link detector yet (`core/link/` is still empty), so nothing
+would react to one.
+
 The API has no authentication, and neither does MAVLink itself until #4 is done. It
 only answers to the dashboard's own address and localhost, which stops other websites
 reaching it through the browser, but keep both on localhost or a trusted network. To

@@ -43,6 +43,7 @@ type Snapshot struct {
 	Armed     bool
 	Mode      string
 	Behavior  string // empty until the drone has reported one
+	Fault     string // live mode: the fault injected into SITL from the dashboard, "" if none has been
 
 	// Each Has field is false until the data arrives and again once it goes stale,
 	// even while heartbeats continue.

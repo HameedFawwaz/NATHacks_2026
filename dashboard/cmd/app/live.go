@@ -19,6 +19,7 @@ type liveState struct {
 	uploaded    bool    // a plan has been sent to the drone from this page
 	uploading   bool
 	starting    bool // a start-flight request is in flight
+	injecting   bool // a fault-injection request is in flight
 	homeSynced  bool
 }
 
@@ -165,4 +166,37 @@ func (a *app) startFlight() {
 	}
 
 	a.showLiveStatus("Flight started.", false)
+}
+
+// injectFault asks the bridge to inject a fault into SITL. It runs as a goroutine.
+func (a *app) injectFault(fault string) {
+	a.live.injecting = true
+	a.showFaultStatus("", false)
+	a.renderFaults()
+	defer func() {
+		a.live.injecting = false
+		a.renderFaults()
+	}()
+
+	data, _ := json.Marshal(map[string]string{"fault": fault})
+	resp, err := await(js.Global().Call("fetch", "api/fault", map[string]any{
+		"method":  "POST",
+		"headers": map[string]any{"Content-Type": "application/json"},
+		"body":    string(data),
+	}))
+	if err != nil {
+		a.showFaultStatus("Couldn't reach the bridge: "+err.Error(), true)
+		return
+	}
+	body, err := await(resp.Call("json"))
+	if err != nil {
+		a.showFaultStatus("The bridge sent an unreadable reply.", true)
+		return
+	}
+	if !resp.Get("ok").Bool() {
+		a.showFaultStatus(body.Get("error").String(), true)
+		return
+	}
+	// The telemetry stream confirms it too, but not for up to 200 ms.
+	a.snap.Fault = fault
 }

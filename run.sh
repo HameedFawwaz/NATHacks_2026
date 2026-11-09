@@ -12,9 +12,12 @@
 # Usage: ./run.sh [--instance N] [--core-port PORT] [--dash-port PORT]
 #                  [--console-port PORT] [--web-addr HOST:PORT]
 #
-# Once everything is up, this drops you at MAVProxy's interactive console
-# (a separate link from core's and the dashboard's, so it can't collide with
-# either). From there you can fly manually and inject a GPS spoof, e.g.:
+# Once everything is up, the dashboard's Fly tab can start a flight and inject
+# faults (GPS jump, drift and jamming, a motor fault) through its threat
+# simulator - see dashboard/README.md. This also drops you at MAVProxy's
+# interactive console (a separate link from core's and the dashboard's, so it
+# can't collide with either). From there you can fly manually and inject a GPS
+# spoof by hand, e.g.:
 #
 #   param set SIM_GPS_GLITCH_X 0.001      # instant ~110 m jump
 #
@@ -44,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     --dash-port) DASH_PORT="$2"; shift 2 ;;
     --console-port) CONSOLE_PORT="$2"; shift 2 ;;
     --web-addr) WEB_ADDR="$2"; shift 2 ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done

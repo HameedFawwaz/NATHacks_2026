@@ -3,12 +3,14 @@ package bridge
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -362,6 +364,19 @@ type fakeVehicle struct {
 	loseFirstFinalAck bool // installs the mission but loses the ack, as a real link can
 	received          chan []mavlink.Frame
 	commands          chan mavlink.Frame // every COMMAND_LONG received, for command-sequence tests
+
+	// Parameters the vehicle has, echoed back on PARAM_SET like ArduPilot does.
+	// Names it doesn't have are ignored, so nil plays a real autopilot with no
+	// SIM_* parameters.
+	paramMu sync.Mutex
+	params  map[string]float32
+}
+
+// param reads one of the vehicle's parameters.
+func (f *fakeVehicle) param(name string) float32 {
+	f.paramMu.Lock()
+	defer f.paramMu.Unlock()
+	return f.params[name]
 }
 
 func startFake(t *testing.T, ctx context.Context, b *Bridge) *fakeVehicle {
@@ -444,6 +459,22 @@ func (f *fakeVehicle) serve(ctx context.Context) {
 				select {
 				case f.commands <- fr:
 				default:
+				}
+			case mavlink.MsgParamSet:
+				name := strings.TrimRight(string(fr.Payload[6:22]), "\x00")
+				value := math.Float32frombits(binary.LittleEndian.Uint32(fr.Payload[0:]))
+				f.paramMu.Lock()
+				_, ok := f.params[name]
+				if ok {
+					f.params[name] = value
+				}
+				f.paramMu.Unlock()
+				if ok {
+					reply := make([]byte, 25)
+					binary.LittleEndian.PutUint32(reply[0:], math.Float32bits(value))
+					copy(reply[8:24], name)
+					reply[24] = mavlink.ParamTypeReal32
+					f.send(mavlink.MsgParamValue, reply)
 				}
 			}
 		}

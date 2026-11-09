@@ -39,6 +39,8 @@ const (
 
 	DataStreamAll = 0
 
+	ParamTypeReal32 = 9
+
 	// MAV_RESULT values, returned in COMMAND_ACK.
 	ResultAccepted            = 0
 	ResultTemporarilyRejected = 1
@@ -159,6 +161,22 @@ func cString(b []byte) string {
 		b = b[:i]
 	}
 	return string(b)
+}
+
+// DecodeParamValue reads a PARAM_VALUE, the autopilot's reply to PARAM_SET.
+func DecodeParamValue(p []byte) (name string, value float32) {
+	return cString(p[8:24]), f32(p[0:])
+}
+
+// PackParamSet returns the payload of a PARAM_SET for a float parameter. The
+// name is truncated to MAVLink's 16 characters.
+func PackParamSet(targetSys, targetComp uint8, name string, value float32) []byte {
+	p := make([]byte, 23)
+	binary.LittleEndian.PutUint32(p[0:], math.Float32bits(value))
+	p[4], p[5] = targetSys, targetComp
+	copy(p[6:22], name)
+	p[22] = ParamTypeReal32
+	return p
 }
 
 // PackGCSHeartbeat returns the payload of a ground station's HEARTBEAT.

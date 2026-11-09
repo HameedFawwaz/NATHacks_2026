@@ -42,12 +42,14 @@ type Bridge struct {
 	conn  *net.UDPConn
 	start time.Time
 
-	mu      sync.Mutex
-	vehicle vehicleState
-	peer    *net.UDPAddr // where the autopilot's heartbeats come from
-	seq     uint8
-	upload  *upload
-	command *command
+	mu        sync.Mutex
+	vehicle   vehicleState
+	peer      *net.UDPAddr // where the autopilot's heartbeats come from
+	seq       uint8
+	upload    *upload
+	command   *command
+	params    *paramWait         // a fault being injected; see fault.go
+	stopDrift context.CancelFunc // ends a drifting GPS fault, nil if none is running
 }
 
 // Listen opens the UDP socket a vehicle or MAVProxy sends telemetry to.
@@ -102,6 +104,7 @@ func (b *Bridge) handle(data []byte, from *net.UDPAddr) {
 			}
 			b.handleMission(f)
 			b.handleCommand(f)
+			b.handleParam(f)
 		}
 	}
 	b.vehicle.update(now)

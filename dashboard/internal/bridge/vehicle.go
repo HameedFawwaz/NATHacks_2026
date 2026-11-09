@@ -46,6 +46,7 @@ type vehicleState struct {
 	satsKnown     bool
 	headingKnown  bool
 	escReporting  [4]bool // ESC slots that have ever reported, so a motor stopping still counts
+	fault         Fault   // injected from this dashboard, "" until one is; see fault.go
 	events        []model.Event
 	nextEventSeq  int
 }
@@ -243,6 +244,7 @@ func (v *vehicleState) update(nowMs int64) {
 		} else {
 			v.addEvent("Lost contact with the drone.", nowMs)
 			v.snap.Behavior = ""
+			v.fault = "" // a SITL that restarted has its parameters back at their defaults
 		}
 		v.wasConnected = connected
 	}
@@ -256,6 +258,7 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 	s := v.snap
 	s.NowMs = nowMs
 	s.Connected = v.connected(nowMs)
+	s.Fault = string(v.fault)
 
 	gpsFresh := v.gpsAt != 0 && nowMs-v.gpsAt <= model.StaleAfterMs
 	globalFresh := v.globalAt != 0 && nowMs-v.globalAt <= model.StaleAfterMs

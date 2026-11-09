@@ -18,10 +18,18 @@ func (a *app) bindFly() {
 		byID("sim-controls").Set("hidden", true)
 		byID("sim-demo").Set("hidden", true)
 		byID("live-controls").Set("hidden", false)
+		byID("live-demo").Set("hidden", false)
 		onClick(byID("live-start"), func(js.Value) {
 			if !a.live.starting {
 				go a.startFlight()
 			}
+		})
+		onClick(byID("live-faults"), func(e js.Value) {
+			value := e.Get("target").Call("closest", "button[data-fault]")
+			if value.IsNull() || a.live.injecting || !a.snap.Connected {
+				return
+			}
+			go a.injectFault(value.Call("getAttribute", "data-fault").String())
 		})
 		return
 	}
@@ -72,6 +80,7 @@ func (a *app) renderFly() {
 
 	if a.live != nil {
 		a.renderFlyAction()
+		a.renderFaults()
 	}
 
 	if a.sim == nil {
@@ -102,6 +111,35 @@ func (a *app) renderFlyAction() {
 	}
 	button.Set("disabled", hint != "")
 	button.Set("title", hint)
+}
+
+// renderFaults marks the fault the bridge says is injected, which is also right
+// for a page opened after the fault was set from another one.
+func (a *app) renderFaults() {
+	active := a.snap.Fault
+	if active == "" {
+		active = "none" // nothing injected from here, so SITL is at its defaults
+	}
+	hint := ""
+	switch {
+	case a.live.injecting:
+		hint = "Injecting…"
+	case !a.snap.Connected:
+		hint = "No drone connected."
+	}
+	buttons := byID("live-faults").Call("querySelectorAll", "button")
+	for i := 0; i < buttons.Length(); i++ {
+		b := buttons.Index(i)
+		setClass(b, "active", a.snap.Connected && b.Call("getAttribute", "data-fault").String() == active)
+		b.Set("disabled", hint != "")
+	}
+}
+
+func (a *app) showFaultStatus(text string, isError bool) {
+	status := byID("fault-status")
+	setText(status, text)
+	status.Set("hidden", text == "")
+	setClass(status, "error", isError)
 }
 
 func (a *app) showLiveStatus(text string, isError bool) {

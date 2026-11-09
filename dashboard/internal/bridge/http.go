@@ -38,6 +38,7 @@ func (b *Bridge) Handler(allowedHosts ...string) http.Handler {
 	mux.HandleFunc("GET /api/telemetry", b.serveTelemetry)
 	mux.HandleFunc("POST /api/mission", b.serveMission)
 	mux.HandleFunc("POST /api/start", b.serveStart)
+	mux.HandleFunc("POST /api/fault", b.serveFault)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowedHost(r.Host, allowedHosts) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
@@ -160,6 +161,45 @@ func (b *Bridge) serveStart(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]bool{"started": true})
 	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrAlreadyArmed), errors.Is(err, ErrBusy):
+		fail(http.StatusConflict, err.Error())
+	default:
+		fail(http.StatusBadGateway, err.Error())
+	}
+}
+
+// FaultRequest is the body of POST /api/fault.
+type FaultRequest struct {
+	Fault Fault `json:"fault"`
+}
+
+func (b *Bridge) serveFault(w http.ResponseWriter, r *http.Request) {
+	fail := func(status int, message string) {
+		writeJSON(w, status, map[string]string{"error": message})
+	}
+	if !sameOrigin(r) {
+		fail(http.StatusForbidden, "cross-origin request refused")
+		return
+	}
+	if media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); media != "application/json" {
+		fail(http.StatusUnsupportedMediaType, "expected application/json")
+		return
+	}
+	var req FaultRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
+		fail(http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	if !slices.Contains(Faults, req.Fault) {
+		fail(http.StatusBadRequest, fmt.Sprintf("unknown fault %q", req.Fault))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), uploadTimeout)
+	defer cancel()
+	switch err := b.SetFault(ctx, req.Fault); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, FaultRequest{Fault: req.Fault})
+	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrBusy):
 		fail(http.StatusConflict, err.Error())
 	default:
 		fail(http.StatusBadGateway, err.Error())

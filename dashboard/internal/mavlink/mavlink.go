@@ -11,6 +11,8 @@ import (
 const (
 	MsgHeartbeat         = 0
 	MsgSysStatus         = 1
+	MsgParamValue        = 22
+	MsgParamSet          = 23
 	MsgGPSRawInt         = 24
 	MsgGlobalPositionInt = 33
 	MsgMissionRequest    = 40
@@ -45,6 +47,8 @@ var messageInfo = map[uint32]struct {
 }{
 	MsgHeartbeat:         {50, 9},
 	MsgSysStatus:         {124, 43},
+	MsgParamValue:        {220, 25},
+	MsgParamSet:          {168, 23},
 	MsgGPSRawInt:         {24, 52},
 	MsgGlobalPositionInt: {104, 28},
 	MsgMissionRequest:    {230, 5},
