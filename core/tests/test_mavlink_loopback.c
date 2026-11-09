@@ -110,6 +110,63 @@ static bool gps_valid(const core_telemetry_t *t) { return t->gps_raw.valid; }
 static bool two_operator_heartbeats(const core_telemetry_t *t) { return t->gcs_heartbeat.count >= 2; }
 static bool rc_rssi_200(const core_telemetry_t *t) { return t->rc_status.valid && t->rc_status.rssi == 200; }
 
+/* After a heartbeat timeout the connection reopens, and the first frame back
+ * may well not be a heartbeat. That frame must not find the timeout already
+ * expired from before the outage: the connection used to drop again on the
+ * spot, closing the socket on the heartbeat that followed, and flap like that
+ * for about 10 s after every outage in SITL. */
+static void test_reconnect_waits_for_a_fresh_heartbeat(void) {
+    struct sockaddr_in conn_addr;
+    int fake_fd = open_fake_vehicle_socket(&conn_addr);
+
+    core_mavlink_conn_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.type = CORE_MAVLINK_TRANSPORT_UDP;
+    strncpy(cfg.transport.udp.bind_addr, "127.0.0.1", sizeof(cfg.transport.udp.bind_addr) - 1);
+    cfg.transport.udp.bind_port = ntohs(conn_addr.sin_port);
+    cfg.system_id = 1;
+    cfg.component_id = MAV_COMP_ID_ONBOARD_COMPUTER;
+    cfg.reconnect_interval_ms = 50;
+    cfg.heartbeat_timeout_ms = 300;
+
+    core_mavlink_conn_t *conn = core_mavlink_conn_open(&cfg);
+    assert(conn != NULL);
+    core_telemetry_t telemetry;
+    send_fake_heartbeat(fake_fd, &conn_addr);
+    assert(poll_until(conn, &telemetry, 2000, heartbeat_valid));
+    assert(core_mavlink_conn_get_state(conn) == CORE_MAVLINK_CONN_CONNECTED);
+
+    usleep(400000); /* the vehicle falls silent past the timeout */
+    core_mavlink_conn_poll(conn);
+    assert(core_mavlink_conn_get_state(conn) == CORE_MAVLINK_CONN_DISCONNECTED);
+    usleep(60000);
+    core_mavlink_conn_poll(conn); /* reopens */
+    assert(core_mavlink_conn_get_state(conn) == CORE_MAVLINK_CONN_CONNECTING);
+
+    send_fake_gps(fake_fd, &conn_addr); /* back, but a heartbeat isn't first */
+    assert(poll_until(conn, &telemetry, 2000, gps_valid));
+    assert(core_mavlink_conn_get_state(conn) == CORE_MAVLINK_CONN_CONNECTED &&
+           "a frame after an outage must not hit the outage's own timeout");
+
+    uint64_t before = telemetry.heartbeat.last_update_ms;
+    usleep(2000);
+    send_fake_heartbeat(fake_fd, &conn_addr);
+    for (int i = 0; i < 2000 && telemetry.heartbeat.last_update_ms == before; i++) {
+        core_mavlink_conn_poll(conn);
+        core_mavlink_conn_get_telemetry(conn, &telemetry);
+        usleep(1000);
+    }
+    assert(telemetry.heartbeat.last_update_ms != before && "the heartbeat that follows is received");
+    assert(core_mavlink_conn_get_state(conn) == CORE_MAVLINK_CONN_CONNECTED);
+
+    usleep(400000); /* and silence after reconnecting still times out */
+    core_mavlink_conn_poll(conn);
+    assert(core_mavlink_conn_get_state(conn) == CORE_MAVLINK_CONN_DISCONNECTED);
+
+    core_mavlink_conn_close(conn);
+    close(fake_fd);
+}
+
 int main(void) {
     struct sockaddr_in conn_addr;
     int fake_fd = open_fake_vehicle_socket(&conn_addr);
@@ -205,6 +262,8 @@ int main(void) {
 
     core_mavlink_conn_close(conn);
     close(fake_fd);
+
+    test_reconnect_waits_for_a_fresh_heartbeat();
 
     printf("test_mavlink_loopback: all assertions passed\n");
     return 0;
