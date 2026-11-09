@@ -55,6 +55,10 @@ func (v *vehicleState) applyRecoveryValue(payload []byte, now int64) {
 		if value >= 0 && value <= 60 {
 			v.snap.RecoveryGPSSeconds = value
 		}
+	case "RECOV_ERR":
+		if value >= 0 && value <= 100000 {
+			v.snap.RecoveryGPSPositionErrorM, v.snap.RecoveryGPSPositionAtMs = value, now
+		}
 	case "RESET_ACK":
 		if value >= 1 && value <= 65535 && math.Trunc(value) == value {
 			v.resetAck = uint16(value)

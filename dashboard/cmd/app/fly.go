@@ -188,6 +188,12 @@ func (a *app) renderRecovery() {
 		if strings.HasPrefix(text, "Revalidating") {
 			text += fmt.Sprintf(" %.1f / 8 s", a.snap.RecoveryGPSSeconds)
 		}
+		positionErrorFresh := a.snap.RecoveryGPSPositionAtMs != 0 &&
+			a.snap.RecoveryGPSPositionAtMs <= a.snap.NowMs &&
+			a.snap.NowMs-a.snap.RecoveryGPSPositionAtMs <= model.StaleAfterMs
+		if text == "GPS and backup position are inconsistent; recovery is waiting." && positionErrorFresh {
+			text += fmt.Sprintf(" Measured GPS/backup difference: %.1f m (maximum 10 m).", a.snap.RecoveryGPSPositionErrorM)
+		}
 		setText(gps, text)
 	}
 }
@@ -354,7 +360,10 @@ func (a *app) renderSummary(subsystems []model.Subsystem) {
 		title = worst.String() + ": " + strings.Join(affected, ", ")
 	}
 
-	text := "On the ground, ready to fly."
+	text := "Disarmed on the ground. Subsystems healthy; pre-arm checks are not verified."
+	if worst != model.LevelHealthy {
+		text = "Disarmed on the ground. " + worst.String() + ": " + strings.Join(affected, ", ") + "."
+	}
 	if a.snap.Armed {
 		text = model.BehaviorText(a.snap.Behavior)
 		if a.recoveryFresh() && !a.snap.RecoveryEnabled {

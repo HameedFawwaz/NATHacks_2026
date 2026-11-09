@@ -44,6 +44,22 @@ func TestRecoveryStatusIdentityFreshnessAndValidation(t *testing.T) {
 	}
 }
 
+func TestRecoveryPositionErrorIdentityAndValidation(t *testing.T) {
+	v := identified(t)
+	v.apply(frame(1, 1, mavlink.MsgNamedValueFloat, namedValue("RECOV_ERR", 13.6)), 1100)
+	v.apply(frame(2, 191, mavlink.MsgNamedValueFloat, namedValue("RECOV_ERR", 13.6)), 1100)
+	for _, value := range []float32{float32(math.NaN()), float32(math.Inf(1)), -1, 100001} {
+		v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("RECOV_ERR", value)), 1100)
+	}
+	if v.snap.RecoveryGPSPositionAtMs != 0 {
+		t.Fatal("invalid or non-core position metric accepted")
+	}
+	v.apply(frame(1, 191, mavlink.MsgNamedValueFloat, namedValue("RECOV_ERR", 13.6)), 1200)
+	if v.snap.RecoveryGPSPositionAtMs != 1200 || math.Abs(v.snap.RecoveryGPSPositionErrorM-13.6) > .001 {
+		t.Fatalf("position error missing: %+v", v.snap)
+	}
+}
+
 func TestRecoveryWaitsForCoreNonceConfirmation(t *testing.T) {
 	b, err := Listen("127.0.0.1:0")
 	if err != nil {

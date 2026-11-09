@@ -52,12 +52,14 @@ type Snapshot struct {
 	Behavior  string // empty until the drone has reported one
 	Fault     string // live mode: the fault injected into SITL from the dashboard, "" if none has been
 
-	RecoveryEnabled      bool  // actual core state, not a browser preference
-	RecoveryAtMs         int64 // zero until core reports; expires like other telemetry
-	RecoveryControllable bool  // core explicitly opted in to local demo controls
-	RecoveryGPSStatus    string
-	RecoveryGPSAtMs      int64
-	RecoveryGPSSeconds   float64
+	RecoveryEnabled           bool  // actual core state, not a browser preference
+	RecoveryAtMs              int64 // zero until core reports; expires like other telemetry
+	RecoveryControllable      bool  // core explicitly opted in to local demo controls
+	RecoveryGPSStatus         string
+	RecoveryGPSAtMs           int64
+	RecoveryGPSSeconds        float64
+	RecoveryGPSPositionErrorM float64
+	RecoveryGPSPositionAtMs   int64
 
 	// Each Has field is false until the data arrives and again once it goes stale,
 	// even while heartbeats continue.

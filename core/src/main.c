@@ -12,6 +12,7 @@
  * a real SITL instance.
  */
 #include <signal.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -188,9 +189,9 @@ int main(int argc, char **argv) {
      * simulated GPS only refreshes at its own native rate (commonly 5Hz in
      * SITL), so requesting it faster just makes the autopilot re-send the
      * same cached fix with an unchanged time_usec to fill the gap - which our
-     * replay/timestamp check correctly (if confusingly, self-inflictedly)
-     * flags as suspicious, since a non-advancing timestamp is
-     * indistinguishable from a genuine stale replay. Only request a rate at
+         * replay/timestamp check flags when it persists. An occasional exact
+         * cached resend is ignored by backup reacquisition, but a sustained
+         * non-advancing stream is still stale/replay evidence. Request a rate at
      * or below what the underlying sensor can actually produce. */
     const uint32_t MSGID_SCALED_PRESSURE = 29;
     const uint32_t MSGID_SCALED_IMU2 = 116;
@@ -268,8 +269,15 @@ int main(int argc, char **argv) {
         bool backup_confirmed = gps_free_backup && autonomy.enabled && !autonomy.failover_failed &&
                                 autonomy.active_source_set == autonomy_cfg.fallback_source_set &&
                                 autonomy.wanted_source_set == autonomy_cfg.fallback_source_set;
+        uint32_t previous_interruptions = backup_recovery.interrupted_windows;
+        uint64_t previous_gps_time = backup_recovery.last_gps_time_usec;
         if (core_nav_detector_recover_from_backup(&detector, &backup_recovery, &telemetry, now, backup_confirmed)) {
             core_mavlink_send_statustext(conn, CORE_MAV_SEVERITY_NOTICE, "GNSS recovery: backup agreement verified");
+        }
+        if (backup_recovery.interrupted_windows > previous_interruptions) {
+            printf("[gps_recovery_blocked] blockers=0x%02x gps_us=%llu->%llu\n",
+                   backup_recovery.last_blockers, (unsigned long long)previous_gps_time,
+                   (unsigned long long)telemetry.gps_raw.time_usec);
         }
         core_trust_score_set_component(&score, CORE_TRUST_SOURCE_NAV, result.nav_trust);
         core_nav_estimate_t estimate =
@@ -309,6 +317,9 @@ int main(int argc, char **argv) {
             core_mavlink_send_named_value_float(conn, "RECOV_CTL", allow_recovery_control ? 1.0f : 0.0f);
             core_mavlink_send_named_value_float(conn, "AUTO_STATE", (float)autonomy.behavior);
             core_mavlink_send_named_value_float(conn, "RECOV_GPS", (float)backup_recovery.status);
+            if (backup_recovery.status >= 2 && backup_recovery.status <= 5 &&
+                isfinite(backup_recovery.position_error_m))
+                core_mavlink_send_named_value_float(conn, "RECOV_ERR", backup_recovery.position_error_m);
             float recovery_seconds = backup_recovery.start_ms && now >= backup_recovery.start_ms ?
                                      (float)(now - backup_recovery.start_ms) / 1000.0f : 0.0f;
             core_mavlink_send_named_value_float(conn, "RECOV_SEC", recovery_seconds);
@@ -326,6 +337,10 @@ int main(int argc, char **argv) {
         if (now - last_print_ms >= 1000) {
             print_status(&result, &link, &autonomy);
             print_estimate(&estimate);
+            printf("[gps_recovery] status=%u window_ms=%llu interruptions=%u blockers=0x%02x position_m=%.2f\n",
+                   backup_recovery.status, (unsigned long long)(backup_recovery.start_ms ? now - backup_recovery.start_ms : 0),
+                   backup_recovery.interrupted_windows, backup_recovery.last_blockers, backup_recovery.position_error_m);
+            fflush(stdout);
             last_print_ms = now;
         }
 

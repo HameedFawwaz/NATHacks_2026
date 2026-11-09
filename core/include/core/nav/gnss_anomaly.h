@@ -100,12 +100,19 @@ typedef struct {
     uint64_t start_ms;
     uint64_t last_gps_ms;
     uint64_t last_gps_time_usec;
+    core_gps_raw_t last_fix; /* last advancing observation, not last packet */
     bool consumed;
     float candidate_north_m, candidate_east_m;
     float position_error_m;
     /* 0: no permission, 1: insufficient data, 2: position disagreement,
      * 3: velocity disagreement, 4: validating, 5: reacquired. */
     uint8_t status;
+    /* Last interruption, retained through the next candidate for diagnostics:
+     * 1 heartbeat, 2 IMU, 4 GPS packet, 8 backup position freshness;
+     * 16 receiver clock/content, 32 advancing-fix gap, 64 quality/agreement,
+     * 128 residual change. Zero means no interruption in this episode. */
+    uint16_t last_blockers;
+    uint32_t interrupted_windows;
 } core_nav_backup_recovery_t;
 
 bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector,

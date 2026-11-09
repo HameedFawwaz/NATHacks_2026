@@ -70,6 +70,22 @@ The earlier 3 m absolute-agreement gate deadlocked after a longer flight left
 about 5.65 m of optical-flow position error. The bounded correction plus residual
 stability check permits reacquisition in that case without following an ongoing
 1.5 or 3 m/s ramp. Tests cover both ramp directions and reject a 20 m backup error.
+An identical cached GPS observation resent in a later MAVLink packet does not
+restart validation or count as a new fix. The last **advancing** observation must
+still be younger than 800 ms, and only a new advancing observation can complete
+validation. Changed content with the same receiver timestamp, backward clocks,
+stale/repeated streams and sensor/agreement failures still cancel the window.
+The stability residual also compensates for the bounded GPS/backup packet-time
+difference using backup velocity; otherwise 5Hz cached GPS versus a newer 10Hz
+backup position creates a speed-dependent sawtooth. The raw 10m absolute gate
+and 1m/s velocity gate remain unchanged. This receipt-time alignment does not
+calibrate sensor latency or authenticate GPS. If a long flight leaves more than
+10m of backup disagreement, automatic reacquisition remains blocked; it is not
+safe to promise that every cleared simulation fault recovers within 60 seconds.
+The `[gps_recovery]` log records interruption count and the last blocker mask
+(documented in `core_nav_backup_recovery_t`) even when a brief failure falls
+between dashboard updates.
+
 These are operational thresholds, not authentication: a stationary spoof within
 the position/velocity bounds, a sufficiently slow ramp, or common-mode corruption
 can pass. Conversely, optical-flow drift, changing altitude, telemetry latency

@@ -63,7 +63,10 @@ that does not acknowledge the required `SIM_*` parameters.
 
 When GPS trust is low, the recovery panel now reports whether it is waiting for
 fresh sensors, backup selection, position/velocity agreement, or the eight-second
-validation window. Bounded optical-flow offset is tolerated only with a stable
+validation window. A fresh position-disagreement report includes the measured
+GPS/backup difference and the unchanged 10m maximum; a stale or unavailable
+measurement is not displayed as zero. A disarmed critical vehicle is no longer
+described as "ready to fly." Bounded optical-flow offset is tolerated only with a stable
 GPS-minus-backup residual; this remains an operational heuristic, not proof
 against every GPS attack. See the core documentation for the exact limits.
 
@@ -84,6 +87,16 @@ connects to a physical drone or the user's running instance.
 mid-flight enabling, clear/recovery, landing, ground reset and normal re-arm checks
 without bypassing prearm safety. It uses isolated instance 23 and ports
 15965/15966/18193. Run it with the same `--ardupilot` and optional `--log-dir` flags.
+
+`core/sitl/run_recovery_auto_scenario.py` exercises two real AUTO flights without
+a reset between them, a second-flight 57-second drift, fault clear, primary-source
+ACK, natural RTL and normal third re-arm/landing. To replay the exact simulated
+route that exposed the cached-GPS validation loop, pass
+`--mission-file core/sitl/fixtures/recovery_auto_route.json` (from the repository
+root), plus `--ardupilot`. The final candidate recovered in about 19 seconds in
+that case. Without `--mission-file`, the script uses a separate 600m-triangle
+stress route; it may legitimately remain blocked when backup error exceeds 10m.
+That stress failure is not waived or turned into a healthy score.
 
 For the full local ArduPilot simulator + real detectors + live dashboard, run
 `./scripts/sitl` from the repository root. See the root README for flight commands.

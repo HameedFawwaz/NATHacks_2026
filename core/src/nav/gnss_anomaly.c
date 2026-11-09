@@ -76,6 +76,13 @@ static bool rebaseline_fresh(uint64_t now, uint64_t stamp, uint32_t max_age) {
     return stamp != 0 && stamp <= now && now - stamp < max_age;
 }
 
+static bool same_gps_observation(const core_gps_raw_t *a, const core_gps_raw_t *b) {
+    return a->time_usec == b->time_usec && a->fix_type == b->fix_type &&
+           a->lat == b->lat && a->lon == b->lon && a->alt_mm == b->alt_mm &&
+           a->eph == b->eph && a->epv == b->epv && a->vel_cms == b->vel_cms &&
+           a->cog_cdeg == b->cog_cdeg && a->satellites_visible == b->satellites_visible;
+}
+
 bool core_nav_detector_operator_rebaseline(core_nav_detector_t *detector, const core_telemetry_t *telemetry,
                                             const core_nav_config_t *cfg, uint64_t now_ms,
                                             bool operator_confirmed) {
@@ -115,6 +122,11 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
     const core_global_position_t *pos = &telemetry->global_position;
     const core_imu_t *imu = &telemetry->imu;
     const core_nav_result_t *s = &detector->cached_scores;
+    uint16_t blockers = 0;
+    if (!telemetry->heartbeat.valid || !rebaseline_fresh(now_ms, telemetry->heartbeat.last_update_ms, 2000)) blockers |= 1u;
+    if (!imu->valid || !rebaseline_fresh(now_ms, imu->last_update_ms, BACKUP_IMU_POSITION_MAX_AGE_MS)) blockers |= 2u;
+    if (!gps->valid || !rebaseline_fresh(now_ms, gps->last_update_ms, BACKUP_GPS_MAX_AGE_MS)) blockers |= 4u;
+    if (!pos->valid || !rebaseline_fresh(now_ms, pos->last_update_ms, BACKUP_IMU_POSITION_MAX_AGE_MS)) blockers |= 8u;
     recovery->status = 1;
     bool good = telemetry->heartbeat.valid && rebaseline_fresh(now_ms, telemetry->heartbeat.last_update_ms, 2000) &&
         imu->valid && rebaseline_fresh(now_ms, imu->last_update_ms, BACKUP_IMU_POSITION_MAX_AGE_MS) &&
@@ -138,6 +150,16 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
         recovery->position_error_m = distance_m(gps->lat / 1e7, gps->lon / 1e7, pos->lat / 1e7, pos->lon / 1e7);
         residual_north = (gps->lat / 1e7 - pos->lat / 1e7) * METERS_PER_DEG_LAT;
         residual_east = (gps->lon / 1e7 - pos->lon / 1e7) * METERS_PER_DEG_LAT * cos(pos->lat / 1e7 * M_PI / 180.0);
+        /* Compare residuals at one stream time. GPS is cached between its
+         * 5Hz fixes while backup position typically updates at 10Hz: subtracting
+         * those directly creates an extra speed*packet-age sawtooth (1.6m at
+         * 8m/s) that can consume nearly the whole 2m stability allowance.
+         * Propagate with independent backup velocity over the bounded receipt
+         * time difference. This is not a latency calibration or a new fix, and
+         * the unadjusted absolute-position and velocity gates stay unchanged. */
+        float stream_dt_s = (float)((double)pos->last_update_ms - (double)gps->last_update_ms) / 1000.0f;
+        residual_north += pos->vx / 100.0f * stream_dt_s;
+        residual_east += pos->vy / 100.0f * stream_dt_s;
         if (s->score_ekf < 1.0f || recovery->position_error_m > BACKUP_POSITION_ERROR_M) {
             recovery->status = 2;
             good = false;
@@ -146,9 +168,18 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
             good = false;
         }
     }
-    if (!good || (recovery->last_gps_ms && gps->last_update_ms < recovery->last_gps_ms) ||
-        (recovery->last_gps_ms && gps->last_update_ms != recovery->last_gps_ms &&
-         (gps->last_update_ms - recovery->last_gps_ms >= BACKUP_GPS_MAX_AGE_MS || gps->time_usec <= recovery->last_gps_time_usec))) {
+    bool cached_fix = recovery->last_gps_ms && same_gps_observation(gps, &recovery->last_fix);
+    bool bad_clock = recovery->last_gps_ms && gps->time_usec <= recovery->last_gps_time_usec && !cached_fix;
+    bool unique_fix_stale = recovery->last_gps_ms &&
+                           !rebaseline_fresh(now_ms, recovery->last_gps_ms, BACKUP_GPS_MAX_AGE_MS);
+    if (!good || bad_clock || unique_fix_stale || (recovery->last_gps_ms && gps->last_update_ms < recovery->last_gps_ms) ||
+         (recovery->last_gps_ms && gps->last_update_ms != recovery->last_gps_ms &&
+          gps->last_update_ms - recovery->last_gps_ms >= BACKUP_GPS_MAX_AGE_MS)) {
+        if (recovery->start_ms) recovery->interrupted_windows++;
+        if (bad_clock) blockers |= 16u;
+        if (unique_fix_stale || (recovery->last_gps_ms && gps->last_update_ms > recovery->last_gps_ms &&
+            gps->last_update_ms - recovery->last_gps_ms >= BACKUP_GPS_MAX_AGE_MS)) blockers |= 32u;
+        recovery->last_blockers = blockers ? blockers : 64u;
         recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
         recovery->consumed = false; /* a new bad episode requires a whole new good window */
         return false;
@@ -165,6 +196,8 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
      * candidate window as well; never slide its reference along with a spoof. */
     if (recovery->start_ms && hypotf(residual_north - recovery->candidate_north_m,
                                     residual_east - recovery->candidate_east_m) > BACKUP_RESIDUAL_CHANGE_M) {
+        recovery->interrupted_windows++;
+        recovery->last_blockers = 128u;
         recovery->start_ms = recovery->last_gps_ms = recovery->last_gps_time_usec = 0;
         recovery->status = 2;
         return false;
@@ -175,10 +208,14 @@ bool core_nav_detector_recover_from_backup(core_nav_detector_t *detector, core_n
         recovery->candidate_east_m = residual_east;
     }
     recovery->status = 4;
-    bool new_fix = gps->last_update_ms != recovery->last_gps_ms;
+    /* A later packet carrying the exact same receiver observation contributes
+     * no new evidence. Keep the unique-fix freshness deadline unchanged; a
+     * frozen/replayed stream still cancels, and can never finish this window. */
+    bool new_fix = !cached_fix;
     if (new_fix) {
         recovery->last_gps_ms = gps->last_update_ms;
         recovery->last_gps_time_usec = gps->time_usec;
+        recovery->last_fix = *gps;
     }
     if (new_fix && now_ms >= recovery->start_ms && now_ms - recovery->start_ms >= BACKUP_RECOVERY_WINDOW_MS &&
         (s->score_dr < 1.0f || s->score_drift < 1.0f)) {

@@ -520,6 +520,130 @@ static void test_backup_recovery_tolerates_bounded_drift_not_a_ramp(void) {
     for (int i = 0; i < 1000; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
 }
 
+/* A receiver can resend one cached fix when its native sampling clock and
+ * the requested MAVLink stream cadence cross. It isn't a new observation,
+ * but also isn't a break in an otherwise fresh, advancing sensor stream. */
+static void test_backup_recovery_cached_fix(void) {
+    rig_t r;
+    core_nav_backup_recovery_t rec = {0};
+    core_gps_raw_t gps = {0};
+    rig_init(&r, 40, 25, 0, 0);
+    for (int i = 0; i < 500; ++i) backup_step(&r, &rec, &gps, 0, false, false);
+    r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000;
+    bool recovered = false;
+    for (int i = 0; i < 1000; ++i) {
+        recovered |= backup_step(&r, &rec, &gps, 0, true, false);
+        if (i % 100 == 50) {
+            uint64_t start = rec.start_ms, unique_arrival = rec.last_gps_ms;
+            core_telemetry_t t = make_telemetry(&r.v, false, 0);
+            t.gps_raw = gps;
+            t.gps_raw.last_update_ms = r.v.t_ms; /* same fix, later packet */
+            gps = t.gps_raw;
+            t.heartbeat.valid = true;
+            t.heartbeat.last_update_ms = r.v.t_ms;
+            core_nav_detector_update(&r.detector, &t, &r.nav_cfg);
+            recovered |= core_nav_detector_recover_from_backup(&r.detector, &rec, &t, r.v.t_ms, true);
+            if (start) {
+                CHECK(rec.start_ms == start);
+                CHECK(rec.last_gps_ms == unique_arrival); /* not evidence */
+            }
+        }
+    }
+    CHECK(recovered);
+    CHECK(r.detector.nav_trust > .99f);
+}
+
+static void test_backup_recovery_rejects_stale_or_changed_cached_fix(void) {
+    rig_t r;
+    core_nav_backup_recovery_t rec = {0};
+    core_gps_raw_t gps = {0};
+    rig_init(&r, 40, 25, 0, 0);
+    for (int i = 0; i < 500; ++i) backup_step(&r, &rec, &gps, 0, false, false);
+    r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000;
+    for (int i = 0; i < 350; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+    CHECK(rec.start_ms != 0);
+    core_telemetry_t t = make_telemetry(&r.v, false, 0);
+    t.gps_raw = gps;
+    t.gps_raw.last_update_ms = r.v.t_ms;
+    t.gps_raw.lat++; /* changed coordinates under an unchanged receiver clock */
+    t.heartbeat.valid = true;
+    t.heartbeat.last_update_ms = r.v.t_ms;
+    core_nav_detector_update(&r.detector, &t, &r.nav_cfg);
+    CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &t, r.v.t_ms, true));
+    CHECK(rec.start_ms == 0 && (rec.last_blockers & 16u));
+
+    memset(&rec, 0, sizeof(rec));
+    for (int i = 0; i < 100; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+    t = make_telemetry(&r.v, false, 0);
+    t.gps_raw = gps;
+    t.gps_raw.last_update_ms = r.v.t_ms;
+    t.gps_raw.time_usec -= 200000; /* backward clock, even unchanged coordinates */
+    t.heartbeat.valid = true;
+    t.heartbeat.last_update_ms = r.v.t_ms;
+    core_nav_detector_update(&r.detector, &t, &r.nav_cfg);
+    CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &t, r.v.t_ms, true));
+    CHECK(rec.start_ms == 0 && (rec.last_blockers & 16u));
+
+    memset(&rec, 0, sizeof(rec));
+    for (int i = 0; i < 350; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+    CHECK(rec.start_ms != 0);
+    uint64_t unique_arrival = rec.last_gps_ms;
+    t = make_telemetry(&r.v, false, 0);
+    t.gps_raw = gps;
+    t.gps_raw.last_update_ms = unique_arrival + 800; /* fresh packet, stale observation */
+    t.imu.last_update_ms = t.global_position.last_update_ms = t.heartbeat.last_update_ms = unique_arrival + 800;
+    t.heartbeat.valid = true;
+    core_nav_detector_update(&r.detector, &t, &r.nav_cfg);
+    CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &t, unique_arrival + 800, true));
+    CHECK(rec.start_ms == 0 && (rec.last_blockers & 32u));
+
+    /* Replayed packets must not complete a window even if they keep arriving.
+     * Fresh IMU and FC position are not a substitute for advancing GPS fixes. */
+    for (int i = 0; i < 600; ++i) {
+        uint64_t now = unique_arrival + 1000 + i * 20;
+        t.gps_raw.last_update_ms = t.imu.last_update_ms = t.global_position.last_update_ms = t.heartbeat.last_update_ms = now;
+        core_nav_detector_update(&r.detector, &t, &r.nav_cfg);
+        CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &t, now, true));
+    }
+}
+
+static void test_backup_recovery_needs_advancing_fix_to_finish(void) {
+    rig_t r;
+    core_nav_backup_recovery_t rec = {0};
+    core_gps_raw_t gps = {0};
+    rig_init(&r, 40, 25, 0, 0);
+    for (int i = 0; i < 500; ++i) backup_step(&r, &rec, &gps, 0, false, false);
+    r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000;
+    for (int i = 0; i < 400; ++i) CHECK(!backup_step(&r, &rec, &gps, 0, true, false));
+    CHECK(r.v.t_ms - rec.start_ms == 8000);
+    core_telemetry_t t = make_telemetry(&r.v, false, 0);
+    t.gps_raw = gps;
+    t.gps_raw.last_update_ms = r.v.t_ms;
+    t.heartbeat.valid = true;
+    t.heartbeat.last_update_ms = r.v.t_ms;
+    core_nav_detector_update(&r.detector, &t, &r.nav_cfg);
+    CHECK(!core_nav_detector_recover_from_backup(&r.detector, &rec, &t, r.v.t_ms, true));
+    CHECK(!rec.consumed);
+    CHECK(backup_step(&r, &rec, &gps, 0, true, false));
+}
+
+/* GPS arrives at 5Hz while backup positions advance between fixes. Arrival
+ * phase must not turn honest travel into a changing GPS/backup offset. */
+static void test_backup_recovery_stream_alignment(void) {
+    rig_t r;
+    core_nav_backup_recovery_t rec = {0};
+    core_gps_raw_t gps = {0};
+    rig_init(&r, 40, 25, 8, 0);
+    for (int i = 0; i < 500; ++i) backup_step(&r, &rec, &gps, 0, false, false);
+    r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000;
+    bool recovered = false;
+    for (int i = 0; i < 600; ++i) {
+        r.backup_bias_m = 6.0f + 0.15f * i * .02f; /* 1.2 m true residual change / 8 s */
+        recovered |= backup_step(&r, &rec, &gps, 0, true, false);
+    }
+    CHECK(recovered);
+}
+
 int main(void) {
     test_projection_matches_dashboard_inverse();
     test_nothing_before_ready();
@@ -533,6 +657,10 @@ int main(void) {
     test_operator_rebaseline();
     test_backup_recovery();
     test_backup_recovery_tolerates_bounded_drift_not_a_ramp();
+    test_backup_recovery_cached_fix();
+    test_backup_recovery_rejects_stale_or_changed_cached_fix();
+    test_backup_recovery_needs_advancing_fix_to_finish();
+    test_backup_recovery_stream_alignment();
     printf("test_nav_estimate: all passed\n");
     return 0;
 }

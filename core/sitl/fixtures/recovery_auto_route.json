@@ -1,0 +1,12 @@
+[
+  {"mavpackettype":"MISSION_ITEM_INT","seq":2,"command":16,"x":-353626768,"y":1491655955,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":3,"command":16,"x":-353623634,"y":1491666185,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":4,"command":16,"x":-353625639,"y":1491674831,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":5,"command":16,"x":-353630501,"y":1491680059,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":6,"command":16,"x":-353637161,"y":1491677488,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":7,"command":16,"x":-353642576,"y":1491670847,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":8,"command":16,"x":-353641724,"y":1491660674,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":9,"command":16,"x":-353638290,"y":1491652790,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":10,"command":16,"x":-353635755,"y":1491652225,"z":20},
+  {"mavpackettype":"MISSION_ITEM_INT","seq":11,"command":16,"x":-353632806,"y":1491652366,"z":20}
+]

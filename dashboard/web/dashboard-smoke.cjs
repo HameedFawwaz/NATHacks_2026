@@ -63,6 +63,10 @@ function snapshot(state, recoveryEnabled, recoveryFresh, recoveryControllable) {
     RecoveryEnabled: recoveryEnabled,
     RecoveryAtMs: connected ? (recoveryFresh ? now : now - 60000) : 0,
     RecoveryControllable: recoveryControllable,
+    RecoveryGPSStatus: state === "nav-critical-ground" ? "GPS and backup position are inconsistent; recovery is waiting." : "",
+    RecoveryGPSAtMs: state === "nav-critical-ground" ? now : 0,
+    RecoveryGPSPositionErrorM: state === "nav-critical-ground" ? 13.6 : 0,
+    RecoveryGPSPositionAtMs: state === "nav-critical-ground" ? now : 0,
     Reported: home,
     HasPosition: connected,
     Estimated: estimate,
@@ -317,7 +321,9 @@ async function main() {
           reason: card.querySelector('.card-reason').textContent,
           className: card.className,
         }));
-        return { title: document.querySelector('#summary-title').textContent, cards,
+        return { title: document.querySelector('#summary-title').textContent,
+          summary: document.querySelector('#summary-text').textContent,
+          armed: document.querySelector('#vehicle-armed').textContent, cards,
           drift: document.querySelector('#i-drift').textContent,
           map: document.querySelector('#map-status').textContent,
           bannerHidden: document.querySelector('#critical-banner').hidden };
@@ -386,7 +392,15 @@ async function main() {
     if (result.title !== "Critical: GNSS" || !await cdp.evaluate(`document.querySelector('#recovery-behavior').textContent.includes('Last recovery state')`)) throw new Error("Disabled recovery hid an attack or claimed active commands");
     if (!await cdp.evaluate(`document.querySelector('#reset-state').disabled`)) throw new Error("Reset was available while armed");
     await save("recovery-disabled-critical");
+    fixture.setRecovery(true, true, true);
     result = await state("nav-critical-ground");
+    if (result.armed !== "Disarmed" || !result.summary.includes("Disarmed on the ground") || !result.summary.includes("Critical: GNSS") || result.summary.includes("ready to fly")) {
+      throw new Error(`Disarmed navigation-critical summary mismatch: ${JSON.stringify(result)}`);
+    }
+    const gpsStatus = await cdp.evaluate(`document.querySelector('#recovery-gps').textContent`);
+    if (!gpsStatus.includes("13.6 m (maximum 10 m)") || gpsStatus.includes("8 s") || gpsStatus.includes("revalidated")) {
+      throw new Error(`Fresh GPS/backup disagreement was not reported accurately: ${gpsStatus}`);
+    }
     await waitFor(() => cdp.evaluate(`!document.querySelector('#reset-state').disabled`), "ground reset available");
     await cdp.evaluate(`document.querySelector('#reset-state').click()`);
     if (fixture.resetCount() !== 0 || !await cdp.evaluate(`document.querySelector('#reset-state').textContent.includes('Confirm reset')`)) throw new Error("Reset skipped confirmation");
