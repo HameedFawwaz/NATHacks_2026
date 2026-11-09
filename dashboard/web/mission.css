@@ -138,7 +138,8 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .scenarios .btn::before { content: '+' / ''; display: inline-block; margin-right: 7px; color: #969fa5; font-family: var(--mono); }
 .scenarios .btn.active { color: #e3f5ff; background: #00a9e81a; border-color: #00a9e84d; }
 .scenarios .btn.active::before { content: '●' / ''; font-size: 7px; color: var(--accent); }
-.scenarios .btn.active:not([data-scenario="0"]) { border-color: #f5b83d55; background: #f5b83d0a; color: var(--caution); }
+.scenarios .btn[data-fault="none"] { grid-column: 1 / -1; }
+.scenarios .btn.active:not([data-scenario="0"]):not([data-fault="none"]) { border-color: #f5b83d55; background: #f5b83d0a; color: var(--caution); }
 .events { flex: none; min-height: 55px; max-height: 180px; padding: 0; }
 .events:empty::after { content: 'Awaiting mission events…'; color: #848c92; font: 9px var(--mono); }
 .events li { padding: 7px 0; border-bottom: 1px solid #ffffff0c; font-size: 10px; line-height: 1.5; }

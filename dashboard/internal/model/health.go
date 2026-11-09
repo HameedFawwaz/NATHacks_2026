@@ -20,6 +20,12 @@ const (
 // drawing a drift line.
 const DriftThresholdM = 10.0
 
+// Where Snapshot.Estimated comes from.
+const (
+	EstimateCore = "core" // core's dead-reckoned estimate; may use FC attitude
+	EstimateEKF  = "ekf"  // the autopilot's EKF, which fuses GPS
+)
+
 // Behaviors reported by the drone, named after core_autonomy_behavior_t.
 const (
 	BehaviorNominal      = "NOMINAL"
@@ -37,12 +43,14 @@ type Reading struct {
 
 // Snapshot is the vehicle's state at one moment.
 type Snapshot struct {
-	NowMs int64
+	MissionReady bool // a mission was uploaded and acknowledged on this live connection
+	NowMs        int64
 
 	Connected bool // the vehicle is being heard
 	Armed     bool
 	Mode      string
 	Behavior  string // empty until the drone has reported one
+	Fault     string // live mode: the fault injected into SITL from the dashboard, "" if none has been
 
 	// Each Has field is false until the data arrives and again once it goes stale,
 	// even while heartbeats continue.
@@ -50,6 +58,7 @@ type Snapshot struct {
 	HasPosition   bool
 	Estimated     LatLon // independent position estimate
 	HasEstimate   bool
+	EstimateFrom  string // EstimateCore or EstimateEKF; empty when HasEstimate is false
 	AltM          float64
 	SpeedMS       float64
 	HeadingDeg    float64
@@ -59,6 +68,8 @@ type Snapshot struct {
 	HasGPS        bool // Satellites is current and known
 
 	Overall, Nav, Link, IMU, Motors, Battery Reading
+
+	Signing LinkSecurity
 
 	// Hardware is core's combined TRUST_HW score. It can trigger a landing, so it
 	// has a row of its own once anything reports it.
@@ -73,6 +84,17 @@ func (s Snapshot) Drift() (meters float64, show bool) {
 	}
 	meters = DistanceM(s.Reported, s.Estimated)
 	return meters, meters >= DriftThresholdM
+}
+
+// LinkSecurity is what the dashboard's own end of a signed link has dropped.
+// The counts only rise when something without the key sends to the dashboard, or
+// replays what it has sent, so a rising count is evidence of an attack on the link.
+// It doesn't include what the drone dropped.
+type LinkSecurity struct {
+	Enabled          bool // the dashboard is signing and verifying
+	RejectedUnsigned uint32
+	RejectedBadSig   uint32
+	RejectedReplay   uint32
 }
 
 // Event is one entry in the operator's event log. Seq increases with each event,

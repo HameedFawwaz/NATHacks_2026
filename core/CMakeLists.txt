@@ -25,11 +25,13 @@ file(GLOB_RECURSE CORE_LIB_SOURCES CONFIGURE_DEPENDS src/*.c)
 list(REMOVE_ITEM CORE_LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c)
 
 add_library(core_lib STATIC ${CORE_LIB_SOURCES})
+target_link_libraries(core_lib PUBLIC m)
 
 add_executable(core_main src/main.c)
 target_link_libraries(core_main PRIVATE core_lib)
 
 add_subdirectory(tools)
+add_subdirectory(sitl)
 
 enable_testing()
 add_subdirectory(tests)

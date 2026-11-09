@@ -53,6 +53,8 @@ func (b *Bridge) Handler(options HandlerOptions) http.Handler {
 		}
 		b.serveMission(w, r)
 	})
+	mux.HandleFunc("POST /api/start", b.serveStart)
+	mux.HandleFunc("POST /api/fault", b.serveFault)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowedHost(r.Host, options.AllowedHosts) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "unexpected Host"})
@@ -154,6 +156,81 @@ func (b *Bridge) serveMission(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]int{"items": len(BuildMission(plan))})
 	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrArmed), errors.Is(err, ErrBusy):
+		fail(http.StatusConflict, err.Error())
+	default:
+		fail(http.StatusBadGateway, err.Error())
+	}
+}
+
+func (b *Bridge) serveStart(w http.ResponseWriter, r *http.Request) {
+	fail := func(status int, message string) {
+		writeJSON(w, status, map[string]string{"error": message})
+	}
+	if !localControl(r) {
+		fail(http.StatusForbidden, "flight control is only allowed from a loopback client")
+		return
+	}
+	if !sameOrigin(r) {
+		fail(http.StatusForbidden, "cross-origin request refused")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), uploadTimeout)
+	defer cancel()
+	switch err := b.StartFlight(ctx); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"started": true})
+	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrAlreadyArmed), errors.Is(err, ErrBusy), errors.Is(err, ErrNoMission):
+		fail(http.StatusConflict, err.Error())
+	default:
+		fail(http.StatusBadGateway, err.Error())
+	}
+}
+
+// Use the actual connection address, never client-supplied proxy headers. These
+// unauthenticated endpoints must not let a LAN client arm a vehicle or inject faults.
+func localControl(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	return err == nil && net.ParseIP(host).IsLoopback()
+}
+
+// FaultRequest is the body of POST /api/fault.
+type FaultRequest struct {
+	Fault Fault `json:"fault"`
+}
+
+func (b *Bridge) serveFault(w http.ResponseWriter, r *http.Request) {
+	fail := func(status int, message string) {
+		writeJSON(w, status, map[string]string{"error": message})
+	}
+	if !localControl(r) {
+		fail(http.StatusForbidden, "fault injection is only allowed from a loopback client")
+		return
+	}
+	if !sameOrigin(r) {
+		fail(http.StatusForbidden, "cross-origin request refused")
+		return
+	}
+	if media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); media != "application/json" {
+		fail(http.StatusUnsupportedMediaType, "expected application/json")
+		return
+	}
+	var req FaultRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
+		fail(http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	if !slices.Contains(Faults, req.Fault) {
+		fail(http.StatusBadRequest, fmt.Sprintf("unknown fault %q", req.Fault))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), uploadTimeout)
+	defer cancel()
+	switch err := b.SetFault(ctx, req.Fault); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, FaultRequest{Fault: req.Fault})
+	case errors.Is(err, ErrNoVehicle), errors.Is(err, ErrBusy):
 		fail(http.StatusConflict, err.Error())
 	default:
 		fail(http.StatusBadGateway, err.Error())
