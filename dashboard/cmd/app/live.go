@@ -12,15 +12,17 @@ import (
 
 // liveState is the connection to the bridge served alongside the page.
 type liveState struct {
-	listen      string // the UDP address the bridge receives MAVLink on
-	streaming   bool   // the telemetry stream is up
-	lastNowMs   int64
-	lastMessage float64 // performance.now() of the newest message
-	uploaded    bool    // a plan has been sent to the drone from this page
-	uploading   bool
-	starting    bool // a start-flight request is in flight
-	injecting   bool // a fault-injection request is in flight
-	homeSynced  bool
+	listen         string // the UDP address the bridge receives MAVLink on
+	streaming      bool   // the telemetry stream is up
+	lastNowMs      int64
+	lastMessage    float64 // performance.now() of the newest message
+	uploaded       bool    // a plan has been sent to the drone from this page
+	uploading      bool
+	starting       bool // a start-flight request is in flight
+	injecting      bool // a fault-injection request is in flight
+	recovering     bool // an automatic-recovery setting request is in flight
+	recoveryTarget bool
+	homeSynced     bool
 }
 
 // await blocks the calling goroutine on a promise, so it must not be called
@@ -77,6 +79,11 @@ func (a *app) startStream() {
 		a.live.lastNowMs = u.Snapshot.NowMs
 		a.showEvents(u.Events)
 		a.setSnapshot(u.Snapshot)
+		if a.live.recovering && u.Snapshot.RecoveryAtMs != 0 && u.Snapshot.RecoveryEnabled == a.live.recoveryTarget {
+			a.live.recovering = false
+			a.renderRecovery()
+			a.showRecoveryStatus("", false)
+		}
 	})
 	// EventSource reconnects by itself. Until then, drop the last values rather
 	// than keep showing them as if they were current.
@@ -199,4 +206,39 @@ func (a *app) injectFault(fault string) {
 	}
 	// The telemetry stream confirms it too, but not for up to 200 ms.
 	a.snap.Fault = fault
+}
+
+// setRecovery sends a setting request but waits for telemetry to confirm the
+// resulting state; a successful HTTP response is not treated as confirmation.
+func (a *app) setRecovery(enabled bool) {
+	a.live.recovering = true
+	a.live.recoveryTarget = enabled
+	a.renderRecovery()
+
+	data, _ := json.Marshal(map[string]bool{"enabled": enabled})
+	resp, err := await(js.Global().Call("fetch", "api/recovery", map[string]any{
+		"method":  "POST",
+		"headers": map[string]any{"Content-Type": "application/json"},
+		"body":    string(data),
+	}))
+	if err != nil {
+		a.live.recovering = false
+		a.showRecoveryStatus("Couldn't reach the bridge: "+err.Error(), true)
+		a.renderRecovery()
+		return
+	}
+	body, err := await(resp.Call("json"))
+	if err != nil {
+		a.live.recovering = false
+		a.showRecoveryStatus("The bridge sent an unreadable reply.", true)
+		a.renderRecovery()
+		return
+	}
+	if !resp.Get("ok").Bool() {
+		a.live.recovering = false
+		a.showRecoveryStatus(body.Get("error").String(), true)
+		a.renderRecovery()
+		return
+	}
+	a.showRecoveryStatus("Request accepted; waiting for telemetry confirmation.", false)
 }
