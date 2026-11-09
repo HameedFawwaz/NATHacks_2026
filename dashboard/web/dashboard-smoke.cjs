@@ -166,7 +166,7 @@ async function main() {
   const out = path.resolve(opts.out || path.join(os.tmpdir(), `dashboard-smoke-${Date.now()}`));
   fs.mkdirSync(out, { recursive: true });
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-smoke-chrome-"));
-  let fixture, chrome, cdp, ws;
+  let fixture, chrome, chromeError, cdp, ws;
   const blockedMutations = [];
   try {
     let targetUrl = opts.url;
@@ -180,8 +180,12 @@ async function main() {
       "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
       "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
     ], { stdio: "ignore" });
+    chrome.on("error", error => { chromeError = error; });
     const activePortFile = path.join(profile, "DevToolsActivePort");
-    await waitFor(() => fs.existsSync(activePortFile), "Chrome DevTools endpoint");
+    await waitFor(() => {
+      if (chromeError) throw chromeError;
+      return fs.existsSync(activePortFile);
+    }, "Chrome DevTools endpoint");
     const port = Number(fs.readFileSync(activePortFile, "utf8").split("\n")[0]);
     const base = `http://127.0.0.1:${port}`;
     let target;
@@ -281,7 +285,8 @@ async function main() {
     console.log("PASS healthy: all subsystem cards report Healthy.");
 
     result = await state("caution");
-    if (result.title !== "Caution: Link" || !result.cards.find(card => card.name === "Link")?.level.includes("Caution")) throw new Error(`Caution fixture mismatch: ${JSON.stringify(result)}`);
+    const caution = result.cards.find(card => card.name === "Link");
+    if (result.title !== "Caution: Link" || !caution?.level.includes("Caution") || caution.score !== "65%" || !caution.reason.trim()) throw new Error(`Caution fixture mismatch: ${JSON.stringify(result)}`);
     await save("caution");
     console.log("PASS caution: Link card shows 65% and a plain-language reason.");
 
@@ -297,6 +302,19 @@ async function main() {
 
     result = await state("drift");
     if (result.drift !== "17 m" || result.map !== "Offline grid · map tiles unavailable") throw new Error(`17 m/offline map fixture mismatch: ${JSON.stringify(result)}`);
+    // Instrument text alone must not pass a regression that stops drawing the
+    // map. Tiles are blocked, so the canvas stays readable and its route/drift
+    // colors can be checked independently of the DOM instruments.
+    await waitFor(() => cdp.evaluate(`(() => {
+      const canvas = document.querySelector('#map');
+      const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      let planned = 0, drift = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if (Math.abs(pixels[i] - 35) < 8 && Math.abs(pixels[i+1] - 186) < 8 && Math.abs(pixels[i+2] - 255) < 8) planned++;
+        if (Math.abs(pixels[i] - 255) < 8 && Math.abs(pixels[i+1] - 92) < 8 && Math.abs(pixels[i+2] - 92) < 8) drift++;
+      }
+      return planned > 100 && drift > 50;
+    })()`), "planned route and drift overlay pixels");
     await save("drift-17m-offline");
     console.log("PASS map: exact 17 m core-estimate disagreement; offline grid and planned route render.");
   } finally {
@@ -305,6 +323,10 @@ async function main() {
     if (chrome && chrome.exitCode === null) {
       chrome.kill("SIGTERM");
       await Promise.race([new Promise(resolve => chrome.once("exit", resolve)), wait(3000)]);
+      if (chrome.exitCode === null && chrome.signalCode === null) {
+        chrome.kill("SIGKILL");
+        await new Promise(resolve => chrome.once("exit", resolve));
+      }
     }
     fs.rmSync(profile, { recursive: true, force: true });
   }
