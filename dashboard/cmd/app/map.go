@@ -451,7 +451,9 @@ func (m *mapView) drawDrift(rx, ry, ex, ey, meters float64) {
 	width := c.Call("measureText", label).Get("width").Float()
 	// Kept on screen: the GPS position can be spoofed far outside the view.
 	x := max(width/2+8, min(m.width-width/2-8, (rx+ex)/2))
-	y := max(60, min(m.height-20, (ry+ey)/2))
+	// Keep the distance badge off the position markers when the disagreement is
+	// near the 10 m threshold, where both markers and the line are close together.
+	y := max(60, min(m.height-20, min(ry, ey)-28))
 	c.Set("fillStyle", colorDrift)
 	c.Call("beginPath")
 	c.Call("roundRect", x-width/2-6, y-10, width+12, 20, 4)
