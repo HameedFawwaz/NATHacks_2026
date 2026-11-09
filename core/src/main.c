@@ -1,7 +1,8 @@
 /*
  * The real integration loop: connects to the flight controller over MAVLink,
- * runs GNSS spoofing detection on the live telemetry stream, and publishes a
- * continuously-updating navigation trust score back over MAVLink.
+ * runs GNSS spoofing detection and lost-link detection on the live telemetry
+ * stream, feeds both trust scores to autonomy, which commands the vehicle's
+ * response, and publishes the scores back over MAVLink.
  *
  * Usage:
  *   core_main [port]      (default port: 14551)
@@ -19,6 +20,7 @@
 #include "core/autonomy/autonomy.h"
 #include "core/common/time.h"
 #include "core/common/trust_score.h"
+#include "core/link/link_monitor.h"
 #include "core/mavlink/mavlink.h"
 #include "core/nav/nav.h"
 
@@ -29,12 +31,31 @@ static void handle_sigint(int signum) {
     g_running = 0;
 }
 
-static void print_status(const core_nav_result_t *result, const core_autonomy_t *autonomy) {
-    printf("[nav_trust=%.3f] jump=%.3f dr=%.3f drift=%.3f ekf=%.3f time=%.3f eph=%.3f health=%.3f flags=0x%02x behavior=%s\n",
+static void print_status(const core_nav_result_t *result, const core_link_result_t *link,
+                         const core_autonomy_t *autonomy) {
+    printf("[nav_trust=%.3f] jump=%.3f dr=%.3f drift=%.3f ekf=%.3f time=%.3f eph=%.3f health=%.3f flags=0x%02x"
+           " | [link %s trust=%.3f] loss=%.2f silent=%ums %s | behavior=%s\n",
            result->nav_trust, result->score_jump, result->score_dr, result->score_drift, result->score_ekf,
            result->score_time, result->score_eph, result->score_health, result->flags,
+           core_link_state_name(link->state), link->link_trust, link->loss, link->silence_ms, link->reason,
            core_autonomy_behavior_name(autonomy->behavior));
     fflush(stdout);
+}
+
+/* One STATUSTEXT per link state change, so operators and the log see it. */
+static void report_link_change(core_mavlink_conn_t *conn, const core_link_result_t *link) {
+    core_mav_severity_t severity = CORE_MAV_SEVERITY_INFO;
+    switch (link->state) {
+    case CORE_LINK_JAMMED:
+    case CORE_LINK_LOST: severity = CORE_MAV_SEVERITY_CRITICAL; break;
+    case CORE_LINK_DEGRADED: severity = CORE_MAV_SEVERITY_WARNING; break;
+    case CORE_LINK_NOMINAL:
+    case CORE_LINK_UNKNOWN: break;
+    }
+    char text[51];
+    snprintf(text, sizeof(text), "LINK %s: %s", core_link_state_name(link->state), link->reason);
+    core_mavlink_send_statustext(conn, severity, text);
+    printf("%s\n", text);
 }
 
 static void alert_new_flags(core_mavlink_conn_t *conn, uint32_t prev_flags, uint32_t flags) {
@@ -90,6 +111,12 @@ int main(int argc, char **argv) {
     core_nav_detector_t detector;
     core_nav_detector_init(&detector, &nav_cfg);
 
+    core_link_config_t link_cfg;
+    core_link_config_default(&link_cfg);
+    core_link_monitor_t link_monitor;
+    core_link_monitor_init(&link_monitor, &link_cfg);
+    core_link_result_t link = {0};
+
     core_trust_score_t score;
     core_trust_score_init(&score);
 
@@ -101,7 +128,7 @@ int main(int argc, char **argv) {
     core_autonomy_t autonomy;
     core_autonomy_init(&autonomy, &autonomy_cfg, autonomy_log);
 
-    printf("drone survivability core - GNSS spoofing detection + autonomy\n");
+    printf("drone survivability core - GNSS spoofing and lost-link detection + autonomy\n");
     printf("listening for MAVLink on udp 0.0.0.0:%u\n", port);
     printf("point ArduPilot SITL (optionally via core/sitl/gnss_spoof_proxy) at this port\n");
 
@@ -134,6 +161,7 @@ int main(int argc, char **argv) {
     const uint32_t MSGID_GPS_RAW_INT = 24;
     const uint32_t MSGID_GLOBAL_POSITION_INT = 33;
     const uint32_t MSGID_ATTITUDE = 30;
+    const uint32_t MSGID_RC_CHANNELS = 65; /* carries the telemetry radio's RSSI, see link_monitor.h */
     bool rates_requested = false;
 
     while (g_running) {
@@ -152,6 +180,8 @@ int main(int argc, char **argv) {
             ok = core_mavlink_request_message_interval(conn, MSGID_GLOBAL_POSITION_INT, 100000) && ok;
             /* 10Hz: the nav detector seeds its yaw from this while disarmed */
             ok = core_mavlink_request_message_interval(conn, MSGID_ATTITUDE, 100000) && ok;
+            /* 2Hz: the link monitor's jamming-vs-loss evidence */
+            ok = core_mavlink_request_message_interval(conn, MSGID_RC_CHANNELS, 500000) && ok;
             rates_requested = ok;
             last_rate_request_ms = rate_now;
         }
@@ -167,8 +197,20 @@ int main(int argc, char **argv) {
         alert_new_flags(conn, prev_flags, result.flags);
         prev_flags = result.flags;
 
-        /* Reads the nav trust just set above (and link/hardware, once those
-         * detectors exist) and drives whatever response is warranted -
+        /* Before autonomy, so it acts on this tick's link verdict. While
+         * UNKNOWN nothing is reported: autonomy ignores a link that has never
+         * been judged, and treats one that stops being judgeable as stale
+         * (untrusted) after its input_stale_ms. */
+        link = core_link_monitor_update(&link_monitor, &telemetry, now);
+        if (link.state != CORE_LINK_UNKNOWN) {
+            core_trust_score_set_component(&score, CORE_TRUST_SOURCE_LINK, link.link_trust);
+        }
+        if (link.state_changed) {
+            report_link_change(conn, &link);
+        }
+
+        /* Reads the nav and link trust just set above (and hardware, once
+         * that detector exists) and drives whatever response is warranted -
          * mode switches, EKF source failover, etc - over this same
          * connection. Updates score->overall_trust as a side effect. */
         core_autonomy_tick(&autonomy, conn, &score, &telemetry, now);
@@ -180,12 +222,16 @@ int main(int argc, char **argv) {
 
         if (now - last_publish_ms >= 200) {
             core_mavlink_publish_trust_score(conn, &score);
+            if (link.state != CORE_LINK_UNKNOWN) {
+                core_mavlink_send_named_value_float(conn, "LNK_STATE", (float)link.state);
+                core_mavlink_send_named_value_float(conn, "LNK_LOSS", link.loss);
+            }
             core_mavlink_publish_link_security(conn, &telemetry.link_security);
             last_publish_ms = now;
         }
 
         if (now - last_print_ms >= 1000) {
-            print_status(&result, &autonomy);
+            print_status(&result, &link, &autonomy);
             last_print_ms = now;
         }
 

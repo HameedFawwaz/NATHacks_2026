@@ -1,0 +1,9 @@
+# For the lost-link scenarios (run_link_scenario.py, link_jam_proxy.py).
+
+# Report the telemetry radio's RSSI in RC_CHANNELS. ArduPilot doesn't forward
+# RADIO_STATUS, so this is the only radio data a companion computer receives.
+RSSI_TYPE 5
+
+# Same reason as autonomy_failover.parm: the dataflash file backend hits a
+# floating-point trap in macOS arm64 SITL builds of Copter-4.5.
+LOG_BACKEND_TYPE 0

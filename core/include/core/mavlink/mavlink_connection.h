@@ -45,6 +45,10 @@ typedef struct {
     bool signing_enabled;
     uint8_t signing_key[32];   /* shared secret, CORE_SIGNING_KEY_LEN bytes */
     uint8_t signing_link_id;   /* identifies this link in the signature; keep unique per link */
+
+    /* The operator's ground station, tracked in telemetry.gcs_heartbeat. 0 means
+     * 255, ArduPilot's default SYSID_MYGCS. */
+    uint8_t operator_gcs_sysid;
 } core_mavlink_conn_config_t;
 
 typedef enum {

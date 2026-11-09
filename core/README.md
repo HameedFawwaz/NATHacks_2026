@@ -34,9 +34,8 @@ ctest --test-dir build --output-on-failure
 
 `mavlink/` and `common/` are implemented (connection handling, telemetry decode, send
 helpers, shared trust-score struct — see `include/core/mavlink/mavlink.h` for the public
-API). `nav/` (GNSS spoofing detection), `autonomy/` (decision layer), and `crypto/`
-(link signing) are also implemented — see below. `link/` (lost-link detection/failover)
-is still empty, scoped to its own issue.
+API). `nav/` (GNSS spoofing detection), `link/` (lost-link detection), `autonomy/` (decision
+layer), and `crypto/` (link signing) are also implemented — see below.
 
 ## GNSS spoofing detection (`nav/`)
 
@@ -151,10 +150,15 @@ or browser-rendering validation is claimed.
 `include/core/autonomy/autonomy.h`. Each transition goes to stderr, to a STATUSTEXT, and
 to a CSV log.
 
-`core_main` now calls the real decision loop using the nav detector's measured trust.
-The link and hardware producers are still separate work. For isolated scenarios,
-`tools/autonomy_runner` reads scores from stdin (`nav 0.1`, `link 0`, `hw 1`,
-`crypto 1`) and runs the same decision loop.
+`core_main` now calls the real decision loop using the nav detector's and the link
+monitor's measured trust (see [End-to-end link scenarios](#end-to-end-link-scenarios)).
+The hardware producer is still separate work. While the vehicle's own heartbeat is more
+than 3 s old, autonomy holds its decisions: armed state and mode are unknown then, every
+producer fed by the autopilot goes quiet with it, and nothing commanded could arrive. After
+the heartbeat returns, autonomy waits another 3 s for producers to catch up; a persistent
+attack is acted on after that delay. For
+isolated scenarios, `tools/autonomy_runner` reads scores from stdin (`nav 0.1`, `link 0`,
+`hw 1`, `crypto 1`) and runs the same decision loop.
 
 `sitl/run_autonomy_scenario.py` runs this end to end against ArduPilot SITL. It flies a
 copter, injects an attack, and checks the vehicle's response:
@@ -173,6 +177,182 @@ Building Copter-4.5 SITL on Apple Silicon needed three workarounds: `setuptools<
 the venv (`dronecan` imports `pkg_resources`, and without it the build hangs instead of
 failing), `CC=/usr/bin/clang CXX=/usr/bin/clang++`, and `LDFLAGS=-Wl,-no_fixup_chains`
 at `./waf configure`.
+
+## Lost-link detection (`link/`)
+
+`link/link_monitor` judges the operator's control link and publishes `link_trust`, which
+autonomy turns into a hold and then a return home. `core_main` runs it every tick. See
+`include/core/link/link_monitor.h` for the states and the full reasoning.
+
+The companion computer isn't on the operator's link, so it measures it indirectly:
+
+- **Operator heartbeats.** ArduPilot forwards the ground station's heartbeats to every
+  other link. The monitor counts the fraction missing over 10 s and how long the link has
+  been silent. The operator is `SYSID_MYGCS`'s default, sysid 255; change
+  `operator_gcs_sysid` in the connection config if yours differs.
+- **Radio data, to tell jamming from a clean loss.** ArduPilot never forwards
+  `RADIO_STATUS`, but with `RSSI_TYPE=5` it puts the telemetry radio's RSSI in
+  `RC_CHANNELS`, which `core_main` requests. Silent while the radio still hears strong RF
+  is read as jamming; silent with the signal gone is a loss. If the radio is wired to the
+  companion computer instead, its `RADIO_STATUS` noise floor is used, which is the
+  stronger signal.
+
+| State | When | `link_trust` |
+|---|---|---|
+| `UNKNOWN` | no operator heard yet, or the autopilot itself is silent | not reported |
+| `NOMINAL` | heartbeats arriving as expected | about 1 |
+| `DEGRADED` | heartbeats missing, weak signal, or interference while connected | below 0.7 |
+| `LOST` | silent for 5 s, no sign of jamming | 0 |
+| `JAMMED` | silent for 5 s while the radio shows interference lasting 2 s | 0 |
+
+Each state change goes out as a `LINK <STATE>: <reason>` STATUSTEXT, and the state and
+loss are published as `LNK_STATE` and `LNK_LOSS` alongside `TRUST_LNK`.
+
+**When autonomy acts.** Autonomy acts when `link_trust` falls below 0.4, which happens
+when the operator can't control the vehicle for more than 5 s: either no heartbeat for 5 s,
+or more than 30% of heartbeats lost over the last 30 s, continuously for 5 s. Short of that,
+trust stays at 0.45 or above, so the link can be `DEGRADED` without autonomy acting.
+
+The 30% rule is judged over 30 s because at 1 Hz ten heartbeats can't measure 30%: 10%
+random loss read as over 30% often enough to act. Even 30 samples can't fully separate a
+link near the threshold from one over it. In simulation, over five minutes of random loss:
+
+| Average loss | Autonomy acts, by the 30% rule (20 runs) |
+|---|---|
+| 10% | never |
+| 20% | 7 of 20 |
+| 25% | 16 of 20 |
+| 35% or more | every run, after about 35 to 50 s |
+
+Random loss also sometimes drops four heartbeats in a row, which is 5 s without contact
+and acts by the silence rule. `loss_act` and `loss_act_after_ms` in
+`core_link_config_default()` are the knobs.
+
+Brief dropouts don't trip it: a full dropout of up to 3 s never acts, the first 3 s of
+silence cost nothing, trust drops at once but climbs back at 0.1/s, and the state only steps back down
+after holding for 3 s. Steady loss doesn't make it bounce either: the link becomes
+`DEGRADED` below 0.7 trust but is only `NOMINAL` again at 0.85 with a clean 30 s record. So
+after an outage, trust (which autonomy acts on) recovers in about 10 s while the label
+stays `DEGRADED` for about 30 s.
+
+Limits:
+
+- **Jamming versus loss is a heuristic.** With RSSI only, the assumption is that a jammed
+  radio still reports strong RF energy. That holds in the SITL scenario because the
+  scenario is built on it; check it against the real radio. Interference must last 2 s
+  to count, because a returning signal shows strong RF a moment before its next heartbeat.
+- **The GCS heartbeat rate is configured, not learned**: `heartbeat_interval_ms`, 1 s by
+  default, which is what MAVProxy, QGroundControl and Mission Planner send. From the
+  companion computer a GCS that slows down looks exactly like one losing heartbeats, and
+  learning the rate kept turning that into wrong verdicts. So a GCS slower than configured
+  reads as loss and must be configured; a faster one still has total loss caught by
+  silence, but partial loss shows less. Partial loss is measured once 10 intervals have
+  passed; silence covers the first 10 s. After an outage long enough to be `LOST`, loss is
+  counted again from the operator's return, so the outage isn't acted on twice.
+- **The noise floor is calibrated, then follows the link slowly.** It starts as the median
+  of 10 samples while heartbeats are arriving, then follows with a time constant of about a
+  minute, so a jammer that ramps up over tens of seconds is caught but one that creeps up
+  over many minutes may not be. Raised noise that costs at most 5% of heartbeats over 30 s,
+  for 60 s, is taken as the new normal and calibrated again. A sample is only learned once
+  a heartbeat has arrived after it, so a link going silent, perhaps jammed, can't feed the
+  baseline.
+- **`RC_CHANNELS.rssi` of 0 is read as "no radio"**, which is what ArduPilot sends with
+  `RSSI_TYPE=5` and no radio reporting. Other `RSSI_TYPE`s report the RC receiver's RSSI
+  instead, which the monitor can't tell apart; use 5.
+- **Forwarding needs an ordinary link.** ArduPilot only forwards heartbeats to active links
+  that aren't marked private (`MAV_OPTIONS`/`SERIALn_OPTIONS`).
+- **No operator ever heard means no verdict.** A drone that takes off without its ground
+  station connected isn't monitored, the same as autonomy's rule for producers that have
+  never reported.
+- **No backup link.** The issue allows switching to one, but the hardware has none, so the
+  response is left to autonomy.
+- **An autopilot outage isn't blamed on the operator.** While the autopilot is silent the
+  link is `UNKNOWN`. When it's back, an operator heard before is judged at once, with its
+  silence timed from the autopilot's return: one still there stays trusted, and one gone
+  is `LOST` 5 s later. Operator heartbeats missed in the 2 s before the autopilot is
+  treated as late still count as loss, so trust dips to about 0.8, still trusted.
+
+### Scripted jamming in SITL
+
+`sitl/link_jam_proxy.py` stands in for the telemetry radio: it relays the operator's link,
+drops packets, and reports `RADIO_STATUS` to the autopilot with chosen RSSI and noise.
+`sitl/run_link_scenario.py` runs it against SITL and `core_main` and checks each case:
+
+```
+python3 sitl/run_link_scenario.py --ardupilot /path/to/ardupilot --core-main build/core_main
+```
+
+It checks that a steady link stays `NOMINAL`, that 2 s dropouts never reach `LOST` or
+untrusted, that 30% loss is `DEGRADED`, that jamming is `JAMMED` and not `LOST`, that a
+clean loss is `LOST` and not `JAMMED`, and that each recovers without bouncing. The vehicle
+stays on the ground. Needs `pymavlink`. `--instance`, `--core-port`, `--proxy-fc-port` and
+`--proxy-gcs-port` move it off instance 0's ports, so it can run beside another simulator.
+
+To try it by hand with MAVProxy as the operator, start the proxy and type a profile
+(`nominal`, `degraded`, `jam`, `lost`) to switch:
+
+```
+python3 sitl/link_jam_proxy.py
+arducopter ... --defaults <copter.parm>,sitl/link_jam.parm \
+  --serial1=udpclient:127.0.0.1:14551 --serial2=udpclient:127.0.0.1:14560
+./build/core_main 14551
+mavproxy.py --master=udpout:127.0.0.1:14562
+```
+
+## End-to-end link scenarios
+
+`sitl/run_link_e2e_scenarios.py` flies ArduCopter SITL with `core_main` (the real link
+monitor, nav detector and autonomy together), the live dashboard bridge, and the operator's
+link through `link_jam_proxy`. Nothing types a trust score: the proxy drops the operator's
+real heartbeats and reports RSSI and noise as a SiK radio would, `core_main` judges the
+link from what ArduPilot forwards, and autonomy commands the vehicle. ArduPilot's own GCS
+failsafe is off (`sitl/link_e2e.parm`), so any hold or return comes from core. Each
+scenario takes off on a fresh SITL, flies 60 m out at 20 m from a separate link (sysid
+200, like a mission), then attacks the operator's link:
+
+| Scenario | Injected | Checked |
+|---|---|---|
+| `jam` | noise up, RSSI high, packets gone over 8 s | `JAMMED` (never `LOST`), `BRAKE`, `RTL` after the 30 s hold, lands at home |
+| `lost` | signal gone over 2 s | `LOST` (never `JAMMED`), then the same hold and return |
+| `dropouts` | 4 × 2 s full dropouts | never `LOST`/`JAMMED`, trust never below 0.4, no autonomy action, still `GUIDED` |
+| `recover` | jamming until autonomy holds, then the link returns | back to `NOMINAL` before the hold runs out, no return, mode left in `BRAKE` for the operator |
+| `companion_outage` | core's own link to the autopilot cut for 8 s, operator fine | no autonomy action at all, still `GUIDED` |
+
+Every scenario also checks that navigation stayed trusted (no `GNSS_FAILOVER` or
+`SAFE_LAND`) and that no ArduPilot failsafe fired; attack scenarios check the
+`autonomy_transitions.csv` rows and that the dashboard showed the measured `TRUST_LNK` and
+the behaviors. `companion_outage` puts `core_main` behind a pausable UDP relay.
+
+```sh
+cmake -S core -B core/build && cmake --build core/build --parallel 4
+(cd dashboard && go build -o ../core/build/dashboard-serve ./cmd/serve)
+/path/to/venv/bin/python core/sitl/run_link_e2e_scenarios.py --ardupilot /path/to/ardupilot \
+  --instance 14 --core-port 15065 --proxy-fc-port 15066 --proxy-gcs-port 15067 \
+  --dashboard-port 15068 --dashboard-http-port 18065 --relay-port 15069 \
+  --log-dir core/build/link-e2e all
+```
+
+It refuses to start on ports already in use. Results, events and transition rows go to
+`results.json`, logs to one directory per scenario.
+
+### Results (2026-11-09, ArduCopter 4.5 SITL, macOS arm64)
+
+Seconds after injection; each line is one run.
+
+| Scenario | Link verdict | `LINK_HOLD` | `BRAKE` confirmed | `LINK_RETURN` | `RTL` confirmed | Landed, from home |
+|---|---|---|---|---|---|---|
+| `jam` | `JAMMED` 7.0 / 8.4 | 7.2 / 8.6 | 7.5 / 8.8 | 37.0 / 38.3 | 37.2 / 38.5 | 86.8 / 88.6 s, 0.0 m |
+| `lost` | `LOST` 6.1 | 6.3 | 6.6 | 35.8 | 36.0 | 85.6 s, 0.0 m |
+
+- In `BRAKE` the vehicle held at 0.02 m/s and moved under 0.1 m before the return; every
+  hold lasted 29.5 to 29.8 s, then `RTL` brought it back 60 m and landed it at home.
+- `dropouts`: `NOMINAL -> DEGRADED -> NOMINAL`, minimum `TRUST_LNK` 0.45, no autonomy
+  transition, still `GUIDED`.
+- `recover`: hold at 11.5 s, link restored at 11.7 s, autonomy `NOMINAL` 13.0 s later
+  (trust climbs at 0.1/s to 0.7, then autonomy's 5 s recovery hold); no return, mode left
+  in `BRAKE`.
+- `companion_outage`: see the final run's `results.json` for the outcome; an earlier run
+  before the reconnect and settling fixes incorrectly entered `GNSS_FAILOVER` on return.
 
 ## Testing against ArduPilot SITL
 

@@ -71,6 +71,11 @@ typedef struct {
 
     bool failover_failed;
 
+    /* The vehicle's heartbeat went stale: decisions are held until it's back,
+     * and then until resume_settle_until_ms. */
+    bool vehicle_stale;
+    uint64_t resume_settle_until_ms;
+
     bool mode_pending;
     uint32_t pending_mode;
     uint64_t last_mode_send_ms;
@@ -95,7 +100,9 @@ void core_autonomy_init(core_autonomy_t *ctx, const core_autonomy_config_t *cfg,
  * Runs one decision step: updates overall_trust in score, then sends whatever
  * commands the current behavior still needs. Non-blocking; call it once per
  * main-loop tick after core_mavlink_conn_poll(). Does nothing until a vehicle
- * heartbeat has been received, because armed state is unknown before that.
+ * heartbeat has been received, because armed state is unknown before that, nor
+ * while that heartbeat is more than input_stale_ms old, nor for input_stale_ms
+ * after it returns, so producers fed by the autopilot can catch up first.
  */
 void core_autonomy_tick(core_autonomy_t *ctx, core_mavlink_conn_t *conn, core_trust_score_t *score,
                         const core_telemetry_t *telemetry, uint64_t now_ms);

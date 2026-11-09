@@ -100,8 +100,19 @@ def main():
 
     print(f"connecting to {args.connect} ...")
     master = mavutil.mavlink_connection(args.connect)
-    master.wait_heartbeat()
+    # Core and other GCS heartbeats are forwarded too. Only select the autopilot.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=1)
+        if hb and hb.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID:
+            master.target_system = hb.get_srcSystem()
+            master.target_component = hb.get_srcComponent()
+            break
+    else:
+        raise RuntimeError("timed out waiting for the SITL autopilot")
     print(f"heartbeat received from system {master.target_system} component {master.target_component}")
+    master.mav.request_data_stream_send(master.target_system, master.target_component,
+                                       mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1)
 
     wait_for_gps_fix(master)
 
