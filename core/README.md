@@ -21,6 +21,7 @@ core/
   tools/              manual dev executables that need something external running,
                       e.g. mavlink_monitor against a live ArduPilot SITL instance
   sitl/               SITL spoof/jam injection scripts and scenario configs
+  firmware/esp32/     ESP-IDF project: core on an ESP32 as the companion computer
 ```
 
 ## Build
@@ -36,6 +37,119 @@ ctest --test-dir build --output-on-failure
 helpers, shared trust-score struct — see `include/core/mavlink/mavlink.h` for the public
 API). `nav/` (GNSS spoofing detection), `link/` (lost-link detection), `autonomy/` (decision
 layer), and `crypto/` (link signing) are also implemented — see below.
+
+## Running core on an ESP32
+
+`firmware/esp32` runs the same loop as `core_main` (`src/app/core_app.c`:
+GNSS spoofing and lost-link detection, autonomy, trust-score publishing) on an
+ESP32, speaking MAVLink over the board's USB serial port instead of UDP. Plugged
+into the laptop, it takes `core_main`'s place as the companion computer: SITL's
+SERIAL1 (the companion telemetry port) is opened on the board's serial device,
+so the board reads the simulated vehicle's telemetry, detects the attack, and
+sends the recovery commands (EKF source failover, hold, return, land) back to
+the simulated autopilot itself. Nothing else on the laptop runs core.
+
+**What this is and isn't:** the detector and autonomy run on real hardware, but
+the vehicle and its sensors are SITL's. The board has no sensors of its own and
+no real flight controller attached; it judges exactly what the simulated
+autopilot reports, as it would on a real drone's telemetry port.
+
+Board: any ESP32 dev board with a USB-UART bridge on UART0 (tested on an
+ESP32-D0WD-V3 DevKit with a CP2102, 40 MHz crystal, 4 MB flash).
+
+### Toolchain (once)
+
+ESP-IDF v6.0.3, with a Python the installer supports (3.10-3.13; not 3.14+):
+
+```sh
+mkdir -p ~/esp && cd ~/esp
+git clone --depth 1 --branch v6.0.3 --recursive --shallow-submodules https://github.com/espressif/esp-idf.git
+cd esp-idf && PATH="$(dirname "$(uv python find 3.12)"):$PATH" ./install.sh esp32
+```
+
+### Build and flash
+
+```sh
+PATH="$(dirname "$(uv python find 3.12)"):$PATH" . ~/esp/esp-idf/export.sh
+idf.py -C core/firmware/esp32 build
+idf.py -C core/firmware/esp32 -p /dev/cu.usbserial-0001 flash   # Linux: /dev/ttyUSB0
+```
+
+Settings (`idf.py -C core/firmware/esp32 menuconfig`, "Drone survivability
+core"): MAVLink baud (default 921600), the `--allow-recovery-control` and
+`--gps-free-backup` equivalents (both on, as `scripts/sitl` runs `core_main`),
+and the status LED GPIO (default 2, the DevKit's blue LED). Re-run
+`idf.py reconfigure` after adding a core source file.
+
+UART0 carries nothing but MAVLink: the ESP-IDF console and logs are off, and
+core's per-second diagnostic lines aren't printed. The board instead announces
+itself with a `core running on ESP32 (companion)` STATUSTEXT once the autopilot
+is heard (and every minute after), and its LED shows the state: off = no
+autopilot, slow blink = connected and nominal, fast blink = autonomy acting.
+There is no filesystem, so `autonomy_transitions.csv` isn't written; autonomy's
+transitions still go out as STATUSTEXT. MAVLink signing isn't provisioned on
+the board.
+
+### Plug in and fly
+
+```sh
+./scripts/sitl --esp32 /dev/cu.usbserial-0001
+```
+
+starts SITL and the dashboard as usual, but with SERIAL1 on the board
+(`--serial1=uart:/dev/cu.usbserial-0001:921600`) and no `core_main`. The
+dashboard reads the board's trust scores and autonomy state through the
+autopilot exactly as it reads `core_main`'s, and its Fly tab's fault injection
+spoofs the GPS the board is watching.
+
+Both end-to-end suites also run against the board (it is reset before each
+scenario, so every flight starts from a fresh detector and autonomy); the
+commands are under the results below.
+
+Results (2026-11-09, ESP32-D0WD-V3 at 921600 baud, ArduCopter SITL instance 1,
+macOS arm64, `all` scenarios, 60 s windows), core running only on the board,
+beside `core_main`'s figures from "Review results" below:
+
+| Scenario | Detected (board / `core_main`) | Behavior | True drift (board / `core_main`) | Lowest nav trust |
+|---|---:|---|---:|---:|
+| Fast ramp (~4.5 m/s) | 4.8 s / ~4.8 s | GNSS_FAILOVER | 2.5 m / 4.1 m | 0.0 |
+| Slow ramp (~1.5 m/s) | 16.4 s / ~16.0 s | GNSS_FAILOVER | 23.4 m / 23.3 m | 0.0 |
+| Random route | 2.1 s / ~1.6 s | GNSS_FAILOVER | 2.9 m / 4.5 m | 0.0 |
+| Honest hover | never | none | 0.0 m | 1.0 |
+| Honest cruise square | never | none | 169.1 m (intended travel) | 1.0 |
+| IMU gap (SITL frozen 2 s) | never | none | 0.0 m | 1.0 |
+
+The dashboard's live bridge saw trust drop to 0 and `GNSS_FAILOVER` on every
+attack, and 1.0 / NOMINAL on every control. The board's published position
+estimate tracked truth to a 0.21-0.23 m median on the hovers, and was withheld
+across the IMU gap (its longest silence, 2.2 s, is the freeze itself).
+
+Link attacks on the board (`run_link_e2e_scenarios.py --instance 1 --esp32
+/dev/cu.usbserial-0001`), seconds after injection, beside `core_main`'s run in
+"End-to-end link scenarios" below:
+
+| Scenario | Link verdict | `LINK_HOLD` | `BRAKE` confirmed | `LINK_RETURN` | `RTL` confirmed | Landed, from home |
+|---|---|---|---|---|---|---|
+| `jam` (board) | `JAMMED` 9.0 | 9.2 | 9.5 | 38.8 | 39.0 | 88.8 s, 0.0 m |
+| `jam` (`core_main`) | `JAMMED` 10.5 | 10.7 | 10.9 | 40.5 | 40.7 | 91.1 s, 0.0 m |
+| `lost` (board) | `LOST` 5.4 | 5.6 | 5.9 | 35.2 | 35.4 | 84.9 s, 0.0 m |
+| `lost` (`core_main`) | `LOST` 5.2 | 5.4 | 5.6 | 35.1 | 35.3 | 85.1 s, 0.0 m |
+
+`dropouts`: `NOMINAL -> DEGRADED -> NOMINAL`, minimum `TRUST_LNK` 0.45, no
+autonomy transition, still `GUIDED`. `recover`: hold, then `NOMINAL` 13.0 s after
+the link returned, no return, mode left in `BRAKE`. In `jam` and `lost` the
+dashboard showed the measured link trust and the board's behaviors; in every
+run ArduPilot's own failsafes never fired. `companion_outage` isn't run on the board: it pauses a UDP
+relay on SERIAL1, which a UART doesn't have.
+
+To repeat both suites on the board:
+
+```sh
+core/sitl/run_gnss_e2e_scenarios.py --ardupilot ../ardupilot-sitl/ardupilot --instance 1 \
+    --esp32 /dev/cu.usbserial-0001 all
+core/sitl/run_link_e2e_scenarios.py --ardupilot ../ardupilot-sitl/ardupilot --instance 1 \
+    --esp32 /dev/cu.usbserial-0001 all
+```
 
 ## GNSS spoofing detection (`nav/`)
 
