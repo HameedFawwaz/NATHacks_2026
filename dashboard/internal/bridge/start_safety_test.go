@@ -128,7 +128,7 @@ func TestNewControlEndpointsRejectRemoteClients(t *testing.T) {
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("X-Forwarded-For", "127.0.0.1")
 			w := httptest.NewRecorder()
-			b.Handler().ServeHTTP(w, r)
+			b.Handler(HandlerOptions{}).ServeHTTP(w, r)
 			if w.Code != http.StatusForbidden {
 				t.Errorf("%s from %s: status %d, want 403", route, remote, w.Code)
 			}

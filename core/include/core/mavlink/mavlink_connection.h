@@ -14,8 +14,8 @@ typedef enum {
 typedef struct {
     char bind_addr[64];    /* local address to listen on, e.g. "0.0.0.0" or "127.0.0.1" */
     uint16_t bind_port;
-    char remote_addr[64];  /* known peer address, or "" to learn it from the first inbound packet */
-    uint16_t remote_port;  /* 0 = learn peer address+port from the first inbound packet (typical for SITL) */
+    char remote_addr[64];  /* known peer address, or "" to learn it from a valid inbound MAVLink frame */
+    uint16_t remote_port;  /* 0 = learn peer address+port from the first valid frame (typical for SITL) */
 } core_mavlink_udp_config_t;
 
 typedef struct {

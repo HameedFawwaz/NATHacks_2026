@@ -429,6 +429,14 @@ Rejections are counted in `core_telemetry_t.link_security`
 so the dashboard and autonomy layer can treat a rising count as an attack
 indicator.
 
+When signing is enabled, core also publishes the rejection counts as MAVLink
+`NAMED_VALUE_FLOAT` messages on the trust-score publication loop (5Hz):
+`SIG_UNSGN` (unsigned frames), `SIG_BADSG` (invalid signatures), and `SIG_REPLY`
+(replayed/stale signed frames). These names fit MAVLink's 10-byte name field.
+The values are floats, so all integer counts are exact only through 2^24
+(16,777,216); above that, adjacent counts may round to the same float. No
+signing counters are published when signing is disabled.
+
 ### Rotation
 
 1. Generate a new key with `signing_keygen` (use `--from-passphrase` for MAVProxy).

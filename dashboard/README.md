@@ -81,6 +81,11 @@ The API has no authentication, and neither does MAVLink itself until #4 is done.
 only answers to the dashboard's own address and localhost, which stops other websites
 reaching it through the browser, but keep both on localhost or a trusted network. To
 open the dashboard from another machine, use `-addr 0.0.0.0:8080 -public-host <its IP>`.
+Remote clients can view telemetry, but mission uploads are localhost-only by default
+(based on the connection's client address, not proxy headers). To permit uploads
+from other machines, also pass `-allow-remote-upload`. This adds no authentication:
+anyone on that network can replace the disarmed vehicle's mission. Enable it only
+on a trusted network. Host and browser Origin checks still apply with this flag.
 
 | Dashboard field | MAVLink source |
 |---|---|

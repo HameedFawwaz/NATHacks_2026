@@ -226,6 +226,7 @@ int main(int argc, char **argv) {
                 core_mavlink_send_named_value_float(conn, "LNK_STATE", (float)link.state);
                 core_mavlink_send_named_value_float(conn, "LNK_LOSS", link.loss);
             }
+            core_mavlink_publish_link_security(conn, &telemetry.link_security);
             last_publish_ms = now;
         }
 
