@@ -30,9 +30,10 @@ static void handle_sigint(int signum) {
 }
 
 static void print_status(const core_nav_result_t *result, const core_autonomy_t *autonomy) {
-    printf("[nav_trust=%.3f] jump=%.2f dr=%.2f drift=%.2f ekf=%.2f time=%.2f eph=%.2f flags=0x%02x behavior=%s\n",
+    printf("[nav_trust=%.3f] jump=%.3f dr=%.3f drift=%.3f ekf=%.3f time=%.3f eph=%.3f health=%.3f flags=0x%02x behavior=%s\n",
            result->nav_trust, result->score_jump, result->score_dr, result->score_drift, result->score_ekf,
-           result->score_time, result->score_eph, result->flags, core_autonomy_behavior_name(autonomy->behavior));
+           result->score_time, result->score_eph, result->score_health, result->flags,
+           core_autonomy_behavior_name(autonomy->behavior));
     fflush(stdout);
 }
 
@@ -110,30 +111,38 @@ int main(int argc, char **argv) {
     uint64_t last_rate_request_ms = 0;
     uint32_t prev_flags = 0;
 
-    /* SITL/MAVProxy's default forwarding rate for SCALED_IMU2 is only a few
-     * Hz - far too coarse for the dead-reckoning filter to integrate
-     * accurately during real maneuvering flight. Re-requested periodically
-     * (not just once) so it survives a reconnect to a flight controller
-     * that reset its stream rates.
+    /* A GCS or MAVProxy sitting between us and the flight controller often
+     * already asks for a baseline set of streams, but core_main must not
+     * depend on one being there: wired directly to a flight controller's own
+     * serial port (the real deployment this is for), nothing else will ever
+     * ask, and the autopilot's own per-link stream rates default to zero, so
+     * silence here means the detector never sees anything at all - not even
+     * GPS or position. Re-requested periodically (not just once) so it
+     * survives a reconnect to a flight controller that reset its stream
+     * rates.
      *
-     * Deliberately NOT boosting GPS_RAW_INT: the underlying simulated GPS
-     * only refreshes at its own native rate (commonly 5Hz in SITL), so
-     * requesting it faster just makes the autopilot re-send the same cached
-     * fix with an unchanged time_usec to fill the gap - which our replay/
-     * timestamp check correctly (if confusingly, self-inflictedly) flags as
-     * suspicious, since a non-advancing timestamp is indistinguishable from
-     * a genuine stale replay. Only request a rate at or below what the
-     * underlying sensor can actually produce. */
+     * Deliberately NOT boosting GPS_RAW_INT past its default: the underlying
+     * simulated GPS only refreshes at its own native rate (commonly 5Hz in
+     * SITL), so requesting it faster just makes the autopilot re-send the
+     * same cached fix with an unchanged time_usec to fill the gap - which our
+     * replay/timestamp check correctly (if confusingly, self-inflictedly)
+     * flags as suspicious, since a non-advancing timestamp is
+     * indistinguishable from a genuine stale replay. Only request a rate at
+     * or below what the underlying sensor can actually produce. */
     const uint32_t MSGID_SCALED_PRESSURE = 29;
     const uint32_t MSGID_SCALED_IMU2 = 116;
+    const uint32_t MSGID_GPS_RAW_INT = 24;
+    const uint32_t MSGID_GLOBAL_POSITION_INT = 33;
 
     while (g_running) {
         core_mavlink_conn_poll(conn);
 
         uint64_t rate_now = core_now_ms();
-        if (rate_now - last_rate_request_ms >= 5000) {
-            core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);      /* 50Hz */
-            core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000); /* 10Hz */
+        if (rate_now - last_rate_request_ms >= 30000) {
+            core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);           /* 50Hz */
+            core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000);      /* 10Hz */
+            core_mavlink_request_message_interval(conn, MSGID_GPS_RAW_INT, 200000);          /* 5Hz: native rate, see above */
+            core_mavlink_request_message_interval(conn, MSGID_GLOBAL_POSITION_INT, 100000);  /* 10Hz: EKF output, not sensor-rate-limited */
             last_rate_request_ms = rate_now;
         }
 
