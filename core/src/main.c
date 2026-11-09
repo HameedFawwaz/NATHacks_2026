@@ -180,6 +180,7 @@ int main(int argc, char **argv) {
 
         if (now - last_publish_ms >= 200) {
             core_mavlink_publish_trust_score(conn, &score);
+            core_mavlink_publish_link_security(conn, &telemetry.link_security);
             last_publish_ms = now;
         }
 

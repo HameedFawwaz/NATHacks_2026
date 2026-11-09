@@ -177,15 +177,41 @@ int core_mavlink_conn_poll(core_mavlink_conn_t *conn) {
             break;
         }
 
-        if (!conn->peer_known) {
-            conn->peer_addr = from_addr;
-            conn->peer_known = true;
-        }
-
         for (ssize_t i = 0; i < n; i++) {
             mavlink_message_t msg;
-            uint8_t got_msg = mavlink_parse_char(conn->chan, buf[i], &msg, &conn->parse_status);
-            core_mavlink_internal_signing_account(conn, got_msg != 0);
+            /* Learn an unconfigured UDP peer only from a whole, validated
+             * MAVLink frame. Track the source across every byte so a frame
+             * split or spliced across datagrams/senders cannot attribute its
+             * authentication to only the final datagram. */
+            uint8_t parse_state = conn->parse_status.parse_state;
+            bool at_frame_start = (parse_state == MAVLINK_PARSE_STATE_UNINIT ||
+                                  parse_state == MAVLINK_PARSE_STATE_IDLE) &&
+                                 (buf[i] == MAVLINK_STX || buf[i] == MAVLINK_STX_MAVLINK1);
+            if (at_frame_start) {
+                conn->pending_peer_addr = from_addr;
+                conn->pending_peer_active = true;
+                conn->pending_peer_consistent = true;
+            } else if (parse_state != MAVLINK_PARSE_STATE_UNINIT &&
+                       parse_state != MAVLINK_PARSE_STATE_IDLE && conn->pending_peer_active &&
+                       (from_addr.sin_addr.s_addr != conn->pending_peer_addr.sin_addr.s_addr ||
+                        from_addr.sin_port != conn->pending_peer_addr.sin_port)) {
+                conn->pending_peer_consistent = false;
+            }
+            /* Use the framing API, not parse_char's error recovery: the latter
+             * reuses a rejected frame's last byte as STX if it is 0xFD. A
+             * replayed signature can legitimately end in 0xFD, seeding a
+             * phantom frame that consumes the next genuine heartbeat. */
+            uint8_t framing = mavlink_frame_char(conn->chan, buf[i], &msg, &conn->parse_status);
+            bool got_msg = framing == MAVLINK_FRAMING_OK;
+            core_mavlink_internal_signing_account(conn, got_msg);
+            if (conn->parse_status.parse_state == MAVLINK_PARSE_STATE_IDLE && conn->pending_peer_active) {
+                if (got_msg && conn->pending_peer_consistent && !conn->peer_known) {
+                    conn->peer_addr = conn->pending_peer_addr;
+                    conn->peer_known = true;
+                }
+                conn->pending_peer_active = false;
+                conn->pending_peer_consistent = false;
+            }
             if (got_msg) {
                 decoded++;
                 conn->last_rx_ms = now;

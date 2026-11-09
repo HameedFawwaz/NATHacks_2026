@@ -18,6 +18,7 @@ func main() {
 	mavlinkAddr := flag.String("mavlink", "", "UDP address to receive MAVLink on, e.g. 127.0.0.1:14552 (empty = simulation only)")
 	signingKey := flag.String("signing-key", "", "file holding the MAVLink 2 signing key, as written by core's signing_keygen (empty = unsigned link)")
 	publicHost := flag.String("public-host", "", "name or IP the dashboard is reached by from other machines, if any")
+	allowRemoteUpload := flag.Bool("allow-remote-upload", false, "allow unauthenticated mission uploads from remote clients (trusted networks only)")
 	flag.Parse()
 
 	mux := http.NewServeMux()
@@ -47,7 +48,10 @@ func main() {
 			log.Printf("MAVLink signing off: frames are neither signed nor verified")
 		}
 		go func() { log.Fatal(b.Run(context.Background())) }()
-		mux.Handle("/api/", b.Handler(*addr, *publicHost))
+		mux.Handle("/api/", b.Handler(bridge.HandlerOptions{
+			AllowedHosts:      []string{*addr, *publicHost},
+			AllowRemoteUpload: *allowRemoteUpload,
+		}))
 		log.Printf("listening for MAVLink on udp %s", b.Addr())
 	}
 

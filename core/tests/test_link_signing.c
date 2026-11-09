@@ -51,6 +51,25 @@ typedef struct {
     mavlink_signing_streams_t rx_streams;
 } peer_t;
 
+static bool recv_and_verify(peer_t *p, uint8_t expected_msgid);
+
+/* Reserve an ephemeral localhost UDP port to avoid collisions with SITL or
+ * unrelated test processes. The core binds the returned port immediately. */
+static uint16_t new_test_port(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(fd >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    assert(inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1);
+    assert(bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    socklen_t len = sizeof(addr);
+    assert(getsockname(fd, (struct sockaddr *)&addr, &len) == 0);
+    uint16_t port = ntohs(addr.sin_port);
+    close(fd);
+    return port;
+}
+
 static void peer_init(peer_t *p, uint16_t conn_port, const uint8_t *tx_key /* NULL = unsigned */,
                       const uint8_t *rx_key /* NULL = no rx verification */) {
     memset(p, 0, sizeof(*p));
@@ -109,6 +128,12 @@ static void send_bytes(peer_t *p, const uint8_t *buf, uint16_t len) {
     assert(s == (ssize_t)len);
 }
 
+static void send_bytes_part(peer_t *p, const uint8_t *buf, size_t offset, size_t len) {
+    ssize_t sent = sendto(p->fd, buf + offset, len, 0,
+                          (struct sockaddr *)&p->conn_addr, sizeof(p->conn_addr));
+    assert(sent == (ssize_t)len);
+}
+
 static void pump(core_mavlink_conn_t *conn, int iters) {
     for (int i = 0; i < iters; i++) {
         core_mavlink_conn_poll(conn);
@@ -159,9 +184,10 @@ static core_link_security_t pump_until_counted(core_mavlink_conn_t *conn, const 
 }
 
 static void test_signed_accepted(void) {
-    core_mavlink_conn_t *conn = open_conn(14561, KEY_A);
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
     peer_t p;
-    peer_init(&p, 14561, KEY_A, NULL);
+    peer_init(&p, port, KEY_A, NULL);
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
@@ -182,9 +208,10 @@ static void test_signed_accepted(void) {
 }
 
 static void test_unsigned_rejected(void) {
-    core_mavlink_conn_t *conn = open_conn(14562, KEY_A);
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
     peer_t p;
-    peer_init(&p, 14562, NULL, NULL);
+    peer_init(&p, port, NULL, NULL);
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
@@ -204,9 +231,10 @@ static void test_unsigned_rejected(void) {
 }
 
 static void test_wrong_key_rejected(void) {
-    core_mavlink_conn_t *conn = open_conn(14563, KEY_A);
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
     peer_t p;
-    peer_init(&p, 14563, KEY_B, NULL);
+    peer_init(&p, port, KEY_B, NULL);
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
@@ -225,9 +253,10 @@ static void test_wrong_key_rejected(void) {
 }
 
 static void test_tampered_rejected(void) {
-    core_mavlink_conn_t *conn = open_conn(14564, KEY_A);
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
     peer_t p;
-    peer_init(&p, 14564, KEY_A, NULL);
+    peer_init(&p, port, KEY_A, NULL);
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
@@ -246,13 +275,23 @@ static void test_tampered_rejected(void) {
     printf("  ok: tampered frame rejected\n");
 }
 
-static void test_replay_rejected(void) {
-    core_mavlink_conn_t *conn = open_conn(14565, KEY_A);
+static void test_replay_rejected(bool stx_tail) {
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
     peer_t p;
-    peer_init(&p, 14565, KEY_A, NULL);
+    peer_init(&p, port, KEY_A, NULL);
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
+    if (stx_tail) {
+        /* A rejected signature ending in STX must not seed a phantom frame.
+         * Search signed frames, rather than corrupting the signature: this
+         * must exercise replay rejection of an otherwise authentic frame. */
+        for (unsigned i = 0; buf[len - 1] != MAVLINK_STX && i < 65536; i++) {
+            len = build_heartbeat(buf);
+        }
+        assert(buf[len - 1] == MAVLINK_STX);
+    }
     core_link_security_t s = sec_of(conn);
     send_bytes(&p, buf, len);
     s = pump_until_counted(conn, &s);
@@ -272,13 +311,14 @@ static void test_replay_rejected(void) {
 
     peer_close(&p);
     core_mavlink_conn_close(conn);
-    printf("  ok: replayed frame rejected, fresh frame still accepted\n");
+    printf("  ok: replayed frame rejected, fresh frame still accepted (STX tail: %d)\n", stx_tail);
 }
 
 static void test_signing_off_unchanged(void) {
-    core_mavlink_conn_t *conn = open_conn(14566, NULL);
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, NULL);
     peer_t p;
-    peer_init(&p, 14566, NULL, NULL);
+    peer_init(&p, port, NULL, NULL);
 
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
@@ -290,10 +330,168 @@ static void test_signing_off_unchanged(void) {
     assert(t.heartbeat.valid && "with signing off, behavior must be unchanged");
     assert(!t.link_security.signing_enabled);
     assert(t.link_security.rejected_unsigned == 0);
+    assert(!core_mavlink_publish_link_security(conn, &t.link_security));
+    uint8_t outbound[MAVLINK_MAX_PACKET_LEN];
+    assert(recv(p.fd, outbound, sizeof(outbound), MSG_DONTWAIT) < 0 &&
+           "signing-disabled connection must not publish signing counters");
 
     peer_close(&p);
     core_mavlink_conn_close(conn);
     printf("  ok: signing disabled leaves behavior unchanged\n");
+}
+
+static void assert_named_float(peer_t *p, const char *expected_name, float expected_value) {
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    ssize_t n = -1;
+    for (int i = 0; i < 1000 && n < 0; i++) {
+        n = recv(p->fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n < 0) usleep(1000);
+    }
+    assert(n > 0 && "timed out waiting for published signing counter");
+    mavlink_message_t msg;
+    mavlink_status_t *status = mavlink_get_channel_status(PEER_RX_CHAN);
+    bool decoded = false;
+    for (ssize_t i = 0; i < n; i++) {
+        if (mavlink_parse_char(PEER_RX_CHAN, buf[i], &msg, status)) {
+            assert(msg.msgid == MAVLINK_MSG_ID_NAMED_VALUE_FLOAT);
+            char name[11] = {0};
+            mavlink_msg_named_value_float_get_name(&msg, name);
+            assert(strcmp(name, expected_name) == 0);
+            assert(mavlink_msg_named_value_float_get_value(&msg) == expected_value);
+            decoded = true;
+        }
+    }
+    assert(decoded && "published signing counter must carry a valid signature");
+}
+
+static void assert_no_datagram(peer_t *p) {
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    for (int i = 0; i < 100; i++) {
+        assert(recv(p->fd, buf, sizeof(buf), MSG_DONTWAIT) < 0 &&
+               "outbound MAVLink must not be diverted to the rejected sender");
+        usleep(1000);
+    }
+}
+
+static void test_rejected_sender_cannot_capture_peer(void) {
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
+    peer_t attacker, legitimate;
+    peer_init(&attacker, port, NULL, NULL);
+    peer_init(&legitimate, port, KEY_A, KEY_A);
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+    /* Both invalid startup datagrams come from the attacker's socket. */
+    mavlink_status_t *tx_status = mavlink_get_channel_status(PEER_TX_CHAN);
+    mavlink_signing_t *legit_signing = tx_status->signing;
+    tx_status->signing = NULL;
+    uint16_t len = build_heartbeat(buf);
+    send_bytes(&attacker, buf, len);
+    tx_status->signing = legit_signing;
+
+    /* Wrong-key signature, also from attacker. */
+    memcpy(legitimate.tx_signing.secret_key, KEY_B, sizeof(KEY_B));
+    len = build_heartbeat(buf);
+    memcpy(legitimate.tx_signing.secret_key, KEY_A, sizeof(KEY_A));
+    send_bytes(&attacker, buf, len);
+    core_link_security_t before = sec_of(conn);
+    core_link_security_t sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_unsigned == 1 && sec.rejected_bad_sig == 1);
+
+    /* Even an authentic frame split across different source sockets must not
+     * establish a peer: source attribution across frame boundaries is unclear. */
+    len = build_heartbeat(buf);
+    size_t split = len / 2;
+    send_bytes_part(&attacker, buf, 0, split);
+    send_bytes_part(&legitimate, buf, split, len - split);
+    before = sec;
+    sec = pump_until_counted(conn, &before);
+    assert(sec.signed_accepted == 1);
+    assert_no_datagram(&attacker);
+    assert_no_datagram(&legitimate);
+
+    /* A full valid signed heartbeat from one source establishes the peer. */
+    len = build_heartbeat(buf);
+    send_bytes(&legitimate, buf, len);
+    before = sec;
+    sec = pump_until_counted(conn, &before);
+    assert(sec.signed_accepted == 2);
+
+    assert(core_mavlink_send_heartbeat(conn));
+    assert(recv_and_verify(&legitimate, MAVLINK_MSG_ID_HEARTBEAT));
+    core_telemetry_t telemetry;
+    core_mavlink_conn_get_telemetry(conn, &telemetry);
+    assert(core_mavlink_publish_link_security(conn, &telemetry.link_security));
+    assert_named_float(&legitimate, "SIG_UNSGN", 1.0f);
+    assert_named_float(&legitimate, "SIG_BADSG", 1.0f);
+    assert_named_float(&legitimate, "SIG_REPLY", 0.0f);
+    assert_no_datagram(&attacker);
+
+    peer_close(&attacker);
+    peer_close(&legitimate);
+    core_mavlink_conn_close(conn);
+    printf("  ok: rejected startup sources cannot capture learned peer\n");
+}
+
+static void test_rejection_counters_published(void) {
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
+    peer_t p;
+    peer_init(&p, port, KEY_A, KEY_A);
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+    /* A genuine signed heartbeat establishes the peer and signed stream. */
+    uint16_t len = build_heartbeat(buf);
+    send_bytes(&p, buf, len);
+    core_link_security_t before = sec_of(conn);
+    core_link_security_t sec = pump_until_counted(conn, &before);
+    assert(sec.signed_accepted == 1);
+
+    /* Generate a genuinely unsigned frame, then restore the peer signer. */
+    mavlink_status_t *tx_status = mavlink_get_channel_status(PEER_TX_CHAN);
+    mavlink_signing_t *tx_signing = tx_status->signing;
+    tx_status->signing = NULL;
+    len = build_heartbeat(buf);
+    tx_status->signing = tx_signing;
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_unsigned == 1);
+
+    /* Sign with a different key; this is counted as a bad signature. */
+    memcpy(p.tx_signing.secret_key, KEY_B, sizeof(KEY_B));
+    len = build_heartbeat(buf);
+    memcpy(p.tx_signing.secret_key, KEY_A, sizeof(KEY_A));
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_bad_sig == 1);
+
+    /* A valid packet followed by its byte-identical duplicate is a real replay. */
+    len = build_heartbeat(buf);
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.signed_accepted == 2);
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_replay == 1);
+
+    /* Publish the actual connection snapshot and verify each signed wire value. */
+    core_telemetry_t telemetry;
+    core_mavlink_conn_get_telemetry(conn, &telemetry);
+    assert(telemetry.link_security.rejected_unsigned == 1);
+    assert(telemetry.link_security.rejected_bad_sig == 1);
+    assert(telemetry.link_security.rejected_replay == 1);
+    assert(core_mavlink_publish_link_security(conn, &telemetry.link_security));
+    assert_named_float(&p, "SIG_UNSGN", 1.0f);
+    assert_named_float(&p, "SIG_BADSG", 1.0f);
+    assert_named_float(&p, "SIG_REPLY", 1.0f);
+
+    peer_close(&p);
+    core_mavlink_conn_close(conn);
+    printf("  ok: real signing rejections published as signed named values\n");
 }
 
 static bool recv_and_verify(peer_t *p, uint8_t expected_msgid) {
@@ -329,16 +527,18 @@ static void assert_frame(peer_t *p, uint8_t msgid, bool signed_frame, uint8_t se
 }
 
 static void test_connection_isolation(bool signed_first) {
-    core_mavlink_conn_t *first = open_conn(14571, signed_first ? KEY_A : NULL);
-    core_mavlink_conn_t *second = open_conn(14572, signed_first ? NULL : KEY_A);
+    uint16_t first_port = new_test_port();
+    uint16_t second_port = new_test_port();
+    core_mavlink_conn_t *first = open_conn(first_port, signed_first ? KEY_A : NULL);
+    core_mavlink_conn_t *second = open_conn(second_port, signed_first ? NULL : KEY_A);
     core_mavlink_conn_t *signed_conn = signed_first ? first : second;
     core_mavlink_conn_t *plain_conn = signed_first ? second : first;
     peer_t ps, pp;
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-    peer_init(&ps, signed_first ? 14571 : 14572, KEY_A, NULL);
+    peer_init(&ps, signed_first ? first_port : second_port, KEY_A, NULL);
     send_bytes(&ps, buf, build_heartbeat(buf));
     pump(signed_conn, 10);
-    peer_init(&pp, signed_first ? 14572 : 14571, NULL, NULL);
+    peer_init(&pp, signed_first ? second_port : first_port, NULL, NULL);
     send_bytes(&pp, buf, build_heartbeat(buf));
     pump(plain_conn, 10);
 
@@ -359,10 +559,11 @@ static void test_connection_isolation(bool signed_first) {
 }
 
 static void test_outbound_signed(void) {
-    core_mavlink_conn_t *conn = open_conn(14567, KEY_A);
+    uint16_t port = new_test_port();
+    core_mavlink_conn_t *conn = open_conn(port, KEY_A);
     peer_t p;
     /* Receiver verifies with KEY_A. First it needs to teach conn its address with a signed heartbeat. */
-    peer_init(&p, 14567, KEY_A, KEY_A);
+    peer_init(&p, port, KEY_A, KEY_A);
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
     send_bytes(&p, buf, len);
@@ -377,9 +578,10 @@ static void test_outbound_signed(void) {
 
     /* A receiver with a different key must reject the connection's outbound frames.
      * (Fresh connection: the first one has learned the now-closed peer's address.) */
-    conn = open_conn(14570, KEY_A);
+    port = new_test_port();
+    conn = open_conn(port, KEY_A);
     peer_t q;
-    peer_init(&q, 14570, KEY_A, KEY_B);
+    peer_init(&q, port, KEY_A, KEY_B);
     len = build_heartbeat(buf);
     send_bytes(&q, buf, len);
     pump(conn, 30);
@@ -391,15 +593,17 @@ static void test_outbound_signed(void) {
 }
 
 static void test_latency(void) {
-    core_mavlink_conn_t *signed_conn = open_conn(14568, KEY_A);
-    core_mavlink_conn_t *plain_conn = open_conn(14569, NULL);
+    uint16_t signed_port = new_test_port();
+    uint16_t plain_port = new_test_port();
+    core_mavlink_conn_t *signed_conn = open_conn(signed_port, KEY_A);
+    core_mavlink_conn_t *plain_conn = open_conn(plain_port, NULL);
     peer_t ps, pp;
-    peer_init(&ps, 14568, KEY_A, NULL);
+    peer_init(&ps, signed_port, KEY_A, NULL);
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = build_heartbeat(buf);
     send_bytes(&ps, buf, len);
     pump(signed_conn, 30);
-    peer_init(&pp, 14569, NULL, NULL);
+    peer_init(&pp, plain_port, NULL, NULL);
     len = build_heartbeat(buf);
     send_bytes(&pp, buf, len);
     pump(plain_conn, 30);
@@ -540,11 +744,14 @@ int main(void) {
     test_key_environment();
     test_passphrase_keys();
     test_signing_off_unchanged();
+    test_rejected_sender_cannot_capture_peer();
+    test_rejection_counters_published();
     test_signed_accepted();
     test_unsigned_rejected();
     test_wrong_key_rejected();
     test_tampered_rejected();
-    test_replay_rejected();
+    test_replay_rejected(false);
+    test_replay_rejected(true);
     test_outbound_signed();
     test_latency();
     printf("test_link_signing: all assertions passed\n");

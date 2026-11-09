@@ -968,7 +968,7 @@ func TestHTTPMission(t *testing.T) {
 	b, f, ctx := setup(t)
 	go f.serve(ctx)
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	body, _ := json.Marshal(model.DefaultPlan())
@@ -1003,11 +1003,71 @@ func TestHTTPMission(t *testing.T) {
 	}
 }
 
+func TestHTTPMissionClientAccess(t *testing.T) {
+	body, _ := json.Marshal(model.DefaultPlan())
+	for _, tc := range []struct {
+		name, remote, origin, host string
+		allowRemote                bool
+		want                       int
+	}{
+		{name: "IPv4 loopback", remote: "127.0.0.1:1234", want: http.StatusOK},
+		{name: "IPv6 loopback", remote: "[::1]:1234", want: http.StatusOK},
+		{name: "mapped loopback", remote: "[::ffff:127.0.0.1]:1234", want: http.StatusOK},
+		{name: "remote without Origin", remote: "192.168.1.10:1234", want: http.StatusForbidden},
+		{name: "remote enabled", remote: "192.168.1.10:1234", allowRemote: true, want: http.StatusOK},
+		{name: "cross-origin enabled", remote: "192.168.1.10:1234", origin: "https://evil.example", allowRemote: true, want: http.StatusForbidden},
+		{name: "bad Host enabled", remote: "192.168.1.10:1234", host: "evil.example", allowRemote: true, want: http.StatusForbidden},
+		{name: "malformed", remote: "not-an-address", want: http.StatusForbidden},
+		{name: "missing port", remote: "127.0.0.1", want: http.StatusForbidden},
+		{name: "invalid port", remote: "127.0.0.1:bogus", want: http.StatusForbidden},
+		{name: "malformed enabled", remote: "not-an-address", allowRemote: true, want: http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, f, ctx := setup(t)
+			go f.serve(ctx)
+			connect(t, b, f)
+			h := b.Handler(HandlerOptions{AllowedHosts: []string{"192.168.1.5"}, AllowRemoteUpload: tc.allowRemote})
+			r := httptest.NewRequest("POST", "http://192.168.1.5:8080/api/mission", strings.NewReader(string(body)))
+			r.RemoteAddr = tc.remote
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Origin", tc.origin)
+			// Neither forwarding header can turn a remote client into localhost.
+			r.Header.Set("X-Forwarded-For", "127.0.0.1")
+			r.Header.Set("Forwarded", "for=127.0.0.1")
+			if tc.host != "" {
+				r.Host = tc.host
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			if tc.want == http.StatusForbidden {
+				var reply struct{ Error string }
+				if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil || reply.Error == "" {
+					t.Fatalf("missing JSON error: %s (%v)", w.Body.String(), err)
+				}
+				if tc.origin == "" && tc.host == "" && !strings.Contains(reply.Error, "-allow-remote-upload") {
+					t.Fatalf("missing operator guidance: %q", reply.Error)
+				}
+			}
+			// Viewing remains available without opting in to remote uploads.
+			r = httptest.NewRequest("GET", "http://192.168.1.5:8080/api/status", nil)
+			r.RemoteAddr = "192.168.1.10:1234"
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("remote status = %d", w.Code)
+			}
+		})
+	}
+}
+
 func TestHTTPMissionRefusedWhileArmed(t *testing.T) {
 	b, f, _ := setup(t)
 	f.armed = true
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	body, _ := json.Marshal(model.DefaultPlan())
@@ -1028,7 +1088,7 @@ func TestHTTPStart(t *testing.T) {
 	if err := b.UploadPlan(ctx, model.DefaultPlan()); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	go func() {
@@ -1056,7 +1116,7 @@ func TestHTTPStartRefusedWhileArmed(t *testing.T) {
 	b, f, _ := setup(t)
 	f.armed = true
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/start", "application/json", nil)
@@ -1072,7 +1132,7 @@ func TestHTTPStartRefusedWhileArmed(t *testing.T) {
 func TestHTTPTelemetryStream(t *testing.T) {
 	b, f, _ := setup(t)
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/telemetry")

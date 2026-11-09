@@ -142,7 +142,7 @@ func TestHTTPFault(t *testing.T) {
 	f.params = sitlParams()
 	go f.serve(ctx)
 	connect(t, b, f)
-	srv := httptest.NewServer(b.Handler(""))
+	srv := httptest.NewServer(b.Handler(HandlerOptions{}))
 	defer srv.Close()
 
 	post := func(origin, body string) int {

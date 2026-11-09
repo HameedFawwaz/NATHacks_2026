@@ -108,6 +108,17 @@ bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trus
     return ok;
 }
 
+bool core_mavlink_publish_link_security(core_mavlink_conn_t *conn, const core_link_security_t *security) {
+    if (!conn || !security || !conn->cfg.signing_enabled || !security->signing_enabled) {
+        return false;
+    }
+    bool ok = true;
+    ok = core_mavlink_send_named_value_float(conn, "SIG_UNSGN", (float)security->rejected_unsigned) && ok;
+    ok = core_mavlink_send_named_value_float(conn, "SIG_BADSG", (float)security->rejected_bad_sig) && ok;
+    ok = core_mavlink_send_named_value_float(conn, "SIG_REPLY", (float)security->rejected_replay) && ok;
+    return ok;
+}
+
 static bool send_command_long(core_mavlink_conn_t *conn, uint16_t command, float param1, float param2) {
     if (!conn) {
         return false;
