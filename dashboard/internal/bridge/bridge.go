@@ -151,6 +151,10 @@ func (b *Bridge) sendPeriodic(ctx context.Context) {
 func (b *Bridge) requestStreamsLocked() {
 	b.sendLocked(mavlink.MsgRequestDataStream, mavlink.PackRequestDataStream(
 		b.vehicle.sysID, b.vehicle.compID, mavlink.DataStreamAll, streamRateHz))
+	// Core's estimate is relative to home, and ArduPilot only sends the home
+	// position when asked.
+	b.sendLocked(mavlink.MsgCommandLong, mavlink.PackRequestMessage(
+		b.vehicle.sysID, b.vehicle.compID, mavlink.MsgHomePosition))
 }
 
 // Snapshot returns the latest vehicle state, with events after afterSeq.

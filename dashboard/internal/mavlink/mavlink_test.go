@@ -2,6 +2,7 @@ package mavlink
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"math"
 	"testing"
@@ -101,6 +102,34 @@ func TestEncodeMatchesGolden(t *testing.T) {
 	got = Encode(9, 254, 190, MsgMissionItemInt, PackMissionItemInt(1, 1, 2, item))
 	if want := mustHex(t, goldenItemInt); !bytes.Equal(got, want) {
 		t.Errorf("mission_item_int\n got %x\nwant %x", got, want)
+	}
+}
+
+func TestPackRequestMessage(t *testing.T) {
+	f := Parse(Encode(0, 255, 190, MsgCommandLong, PackRequestMessage(1, 1, MsgHomePosition)))
+	if len(f) != 1 || f[0].MsgID != MsgCommandLong {
+		t.Fatalf("frames: %+v", f)
+	}
+	pl := f[0].Payload
+	if got := math.Float32frombits(binary.LittleEndian.Uint32(pl)); got != MsgHomePosition {
+		t.Errorf("param1 = %v, want %d", got, MsgHomePosition)
+	}
+	if cmd := binary.LittleEndian.Uint16(pl[28:]); cmd != CmdRequestMessage || pl[30] != 1 || pl[31] != 1 {
+		t.Errorf("command %d target %d/%d", cmd, pl[30], pl[31])
+	}
+}
+
+func TestDecodeHomePosition(t *testing.T) {
+	pl := make([]byte, 60)
+	binary.LittleEndian.PutUint32(pl, uint32(int32(-353632620)))
+	binary.LittleEndian.PutUint32(pl[4:], uint32(int32(1491652370)))
+	f := Parse(Encode(0, 1, 1, MsgHomePosition, pl))
+	if len(f) != 1 {
+		t.Fatal("home position frame not parsed")
+	}
+	lat, lon := DecodeHomePosition(f[0].Payload)
+	if math.Abs(lat+35.363262) > 1e-7 || math.Abs(lon-149.165237) > 1e-7 {
+		t.Errorf("home = %f, %f", lat, lon)
 	}
 }
 

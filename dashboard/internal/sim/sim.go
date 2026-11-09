@@ -293,6 +293,7 @@ func (s *Sim) Snapshot() model.Snapshot {
 		Reported:      reported,
 		Estimated:     model.FromLocal(s.pos, 1.5*math.Sin(t/3), 1.5*math.Cos(t/5)),
 		HasEstimate:   true,
+		EstimateFrom:  model.EstimateCore,
 		AltM:          s.altM,
 		SpeedMS:       speed,
 		HeadingDeg:    heading,
