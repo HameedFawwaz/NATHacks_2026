@@ -66,6 +66,27 @@ static void send_fake_gps(int fake_fd, const struct sockaddr_in *conn_addr) {
     assert(sent == (ssize_t)len);
 }
 
+static void send_packed(int fake_fd, const struct sockaddr_in *conn_addr, const mavlink_message_t *msg) {
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    uint16_t len = mavlink_msg_to_send_buffer(buf, msg);
+    ssize_t sent = sendto(fake_fd, buf, len, 0, (const struct sockaddr *)conn_addr, sizeof(*conn_addr));
+    assert(sent == (ssize_t)len);
+}
+
+/* A heartbeat as the autopilot forwards it from a ground station or companion. */
+static void send_other_heartbeat(int fake_fd, const struct sockaddr_in *conn_addr, uint8_t sysid, uint8_t type) {
+    mavlink_message_t msg;
+    mavlink_msg_heartbeat_pack(sysid, 190, &msg, type, MAV_AUTOPILOT_INVALID, 0, 0, MAV_STATE_ACTIVE);
+    send_packed(fake_fd, conn_addr, &msg);
+}
+
+static void send_rc_rssi(int fake_fd, const struct sockaddr_in *conn_addr, uint8_t sysid, uint8_t compid, uint8_t rssi) {
+    mavlink_message_t msg;
+    mavlink_msg_rc_channels_pack(sysid, compid, &msg, 0, 8, 1500, 1500, 1000, 1500, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                 rssi);
+    send_packed(fake_fd, conn_addr, &msg);
+}
+
 static bool poll_until(core_mavlink_conn_t *conn, core_telemetry_t *telemetry, int max_iterations,
                         bool (*condition)(const core_telemetry_t *)) {
     for (int i = 0; i < max_iterations; i++) {
@@ -81,6 +102,8 @@ static bool poll_until(core_mavlink_conn_t *conn, core_telemetry_t *telemetry, i
 
 static bool heartbeat_valid(const core_telemetry_t *t) { return t->heartbeat.valid; }
 static bool gps_valid(const core_telemetry_t *t) { return t->gps_raw.valid; }
+static bool two_operator_heartbeats(const core_telemetry_t *t) { return t->gcs_heartbeat.count >= 2; }
+static bool rc_rssi_200(const core_telemetry_t *t) { return t->rc_status.valid && t->rc_status.rssi == 200; }
 
 int main(void) {
     struct sockaddr_in conn_addr;
@@ -118,6 +141,35 @@ int main(void) {
     assert(telemetry.gps_raw.lat == 473977420);
     assert(telemetry.gps_raw.lon == -1223974560);
     assert(telemetry.gps_raw.satellites_visible == 8);
+
+    /* --- operator GCS heartbeats: only sysid 255 of type GCS counts --- */
+    send_other_heartbeat(fake_fd, &conn_addr, 254, MAV_TYPE_GCS);              /* another GCS, e.g. the dashboard */
+    send_other_heartbeat(fake_fd, &conn_addr, 255, MAV_TYPE_ONBOARD_CONTROLLER); /* not a GCS */
+    send_other_heartbeat(fake_fd, &conn_addr, 255, MAV_TYPE_GCS);
+    send_other_heartbeat(fake_fd, &conn_addr, 255, MAV_TYPE_GCS);
+    ok = poll_until(conn, &telemetry, 2000, two_operator_heartbeats);
+    assert(ok && "timed out waiting for operator heartbeats");
+    for (int i = 0; i < 200; i++) { /* let every one of them be processed before counting */
+        core_mavlink_conn_poll(conn);
+        usleep(1000);
+    }
+    core_mavlink_conn_get_telemetry(conn, &telemetry);
+    assert(telemetry.gcs_heartbeat.count == 2 && "other GCSes and non-GCS types must not count");
+    assert(telemetry.gcs_heartbeat.sysid == 255);
+    assert(telemetry.heartbeat.type == MAV_TYPE_QUADROTOR && "a GCS heartbeat must not overwrite the vehicle's");
+
+    /* --- RC_CHANNELS rssi: only from the autopilot itself --- */
+    send_rc_rssi(fake_fd, &conn_addr, 1, MAV_COMP_ID_AUTOPILOT1, 200);
+    ok = poll_until(conn, &telemetry, 2000, rc_rssi_200);
+    assert(ok && "timed out waiting for RC_CHANNELS rssi");
+    send_rc_rssi(fake_fd, &conn_addr, 1, MAV_COMP_ID_ONBOARD_COMPUTER, 17); /* another component */
+    send_rc_rssi(fake_fd, &conn_addr, 7, MAV_COMP_ID_AUTOPILOT1, 17);        /* another vehicle */
+    for (int i = 0; i < 200; i++) {
+        core_mavlink_conn_poll(conn);
+        usleep(1000);
+    }
+    core_mavlink_conn_get_telemetry(conn, &telemetry);
+    assert(telemetry.rc_status.rssi == 200 && "RC_CHANNELS from anything but the autopilot must be ignored");
 
     /* --- send path: conn should now know the fake vehicle's address --- */
     assert(core_mavlink_send_heartbeat(conn));

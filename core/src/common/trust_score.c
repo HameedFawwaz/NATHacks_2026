@@ -7,6 +7,10 @@ static float clamp01(float value) {
     return value;
 }
 
+bool core_trust_component_live(uint64_t update_ms, uint64_t now_ms) {
+    return update_ms != 0 && now_ms >= update_ms && now_ms - update_ms <= CORE_TRUST_LIVE_MS;
+}
+
 void core_trust_score_init(core_trust_score_t *score) {
     score->nav_trust = 1.0f;
     score->link_trust = 1.0f;

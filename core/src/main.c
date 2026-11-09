@@ -1,7 +1,7 @@
 /*
  * The real integration loop: connects to the flight controller over MAVLink,
- * runs GNSS spoofing detection on the live telemetry stream, and publishes a
- * continuously-updating navigation trust score back over MAVLink.
+ * runs GNSS spoofing detection and lost-link detection on the live telemetry
+ * stream, and publishes the navigation and link trust scores back over MAVLink.
  *
  * Usage:
  *   core_main [port]      (default port: 14551)
@@ -18,6 +18,7 @@
 
 #include "core/common/time.h"
 #include "core/common/trust_score.h"
+#include "core/link/link_monitor.h"
 #include "core/mavlink/mavlink.h"
 #include "core/nav/nav.h"
 
@@ -28,11 +29,29 @@ static void handle_sigint(int signum) {
     g_running = 0;
 }
 
-static void print_status(const core_nav_result_t *result) {
-    printf("[nav_trust=%.3f] jump=%.2f dr=%.2f drift=%.2f ekf=%.2f time=%.2f eph=%.2f flags=0x%02x\n",
+static void print_status(const core_nav_result_t *result, const core_link_result_t *link) {
+    printf("[nav_trust=%.3f] jump=%.2f dr=%.2f drift=%.2f ekf=%.2f time=%.2f eph=%.2f flags=0x%02x"
+           " | [link %s trust=%.3f] loss=%.2f silent=%ums %s\n",
            result->nav_trust, result->score_jump, result->score_dr, result->score_drift, result->score_ekf,
-           result->score_time, result->score_eph, result->flags);
+           result->score_time, result->score_eph, result->flags, core_link_state_name(link->state),
+           link->link_trust, link->loss, link->silence_ms, link->reason);
     fflush(stdout);
+}
+
+/* One STATUSTEXT per link state change, so operators and the log see it. */
+static void report_link_change(core_mavlink_conn_t *conn, const core_link_result_t *link) {
+    core_mav_severity_t severity = CORE_MAV_SEVERITY_INFO;
+    switch (link->state) {
+    case CORE_LINK_JAMMED:
+    case CORE_LINK_LOST: severity = CORE_MAV_SEVERITY_CRITICAL; break;
+    case CORE_LINK_DEGRADED: severity = CORE_MAV_SEVERITY_WARNING; break;
+    case CORE_LINK_NOMINAL:
+    case CORE_LINK_UNKNOWN: break;
+    }
+    char text[51];
+    snprintf(text, sizeof(text), "LINK %s: %s", core_link_state_name(link->state), link->reason);
+    core_mavlink_send_statustext(conn, severity, text);
+    printf("%s\n", text);
 }
 
 static void alert_new_flags(core_mavlink_conn_t *conn, uint32_t prev_flags, uint32_t flags) {
@@ -88,10 +107,16 @@ int main(int argc, char **argv) {
     core_nav_detector_t detector;
     core_nav_detector_init(&detector, &nav_cfg);
 
+    core_link_config_t link_cfg;
+    core_link_config_default(&link_cfg);
+    core_link_monitor_t link_monitor;
+    core_link_monitor_init(&link_monitor, &link_cfg);
+    core_link_result_t link = {0};
+
     core_trust_score_t score;
     core_trust_score_init(&score);
 
-    printf("drone survivability core - GNSS spoofing detection\n");
+    printf("drone survivability core - GNSS spoofing and lost-link detection\n");
     printf("listening for MAVLink on udp 0.0.0.0:%u\n", port);
     printf("point ArduPilot SITL (optionally via core/sitl/gnss_spoof_proxy) at this port\n");
 
@@ -117,6 +142,7 @@ int main(int argc, char **argv) {
      * underlying sensor can actually produce. */
     const uint32_t MSGID_SCALED_PRESSURE = 29;
     const uint32_t MSGID_SCALED_IMU2 = 116;
+    const uint32_t MSGID_RC_CHANNELS = 65; /* carries the radio's RSSI, see link_monitor.h */
 
     while (g_running) {
         core_mavlink_conn_poll(conn);
@@ -125,6 +151,7 @@ int main(int argc, char **argv) {
         if (rate_now - last_rate_request_ms >= 5000) {
             core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);      /* 50Hz */
             core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000); /* 10Hz */
+            core_mavlink_request_message_interval(conn, MSGID_RC_CHANNELS, 500000);     /* 2Hz */
             last_rate_request_ms = rate_now;
         }
 
@@ -139,6 +166,16 @@ int main(int argc, char **argv) {
 
         uint64_t now = core_now_ms();
 
+        /* While UNKNOWN nothing is reported, so autonomy ignores a link that has
+         * never been seen and treats one that goes unjudgeable as stale. */
+        link = core_link_monitor_update(&link_monitor, &telemetry, now);
+        if (link.state != CORE_LINK_UNKNOWN) {
+            core_trust_score_set_component(&score, CORE_TRUST_SOURCE_LINK, link.link_trust);
+        }
+        if (link.state_changed) {
+            report_link_change(conn, &link);
+        }
+
         if (now - last_own_heartbeat_sent_ms >= 1000) {
             core_mavlink_send_heartbeat(conn);
             last_own_heartbeat_sent_ms = now;
@@ -146,11 +183,15 @@ int main(int argc, char **argv) {
 
         if (now - last_publish_ms >= 200) {
             core_mavlink_publish_trust_score(conn, &score);
+            if (link.state != CORE_LINK_UNKNOWN) {
+                core_mavlink_send_named_value_float(conn, "LNK_STATE", (float)link.state);
+                core_mavlink_send_named_value_float(conn, "LNK_LOSS", link.loss);
+            }
             last_publish_ms = now;
         }
 
         if (now - last_print_ms >= 1000) {
-            print_status(&result);
+            print_status(&result, &link);
             last_print_ms = now;
         }
 

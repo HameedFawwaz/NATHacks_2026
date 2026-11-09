@@ -99,12 +99,22 @@ bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trus
         return false;
     }
 
+    /* A component nothing is producing stays at its initial 1.0, and one whose
+     * producer stopped keeps its last value. Neither may go out as a current
+     * score, or a consumer would show it as healthy. */
+    uint64_t now = core_now_ms();
     bool ok = true;
     ok = core_mavlink_send_named_value_float(conn, "TRUST", score->overall_trust) && ok;
-    ok = core_mavlink_send_named_value_float(conn, "TRUST_NAV", score->nav_trust) && ok;
-    ok = core_mavlink_send_named_value_float(conn, "TRUST_LNK", score->link_trust) && ok;
+    if (core_trust_component_live(score->nav_update_ms, now)) {
+        ok = core_mavlink_send_named_value_float(conn, "TRUST_NAV", score->nav_trust) && ok;
+    }
+    if (core_trust_component_live(score->link_update_ms, now)) {
+        ok = core_mavlink_send_named_value_float(conn, "TRUST_LNK", score->link_trust) && ok;
+    }
     ok = core_mavlink_send_named_value_float(conn, "TRUST_CRY", score->crypto_trust) && ok;
-    ok = core_mavlink_send_named_value_float(conn, "TRUST_HW", score->hardware_trust) && ok;
+    if (core_trust_component_live(score->hardware_update_ms, now)) {
+        ok = core_mavlink_send_named_value_float(conn, "TRUST_HW", score->hardware_trust) && ok;
+    }
     return ok;
 }
 

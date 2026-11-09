@@ -12,6 +12,13 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         /* A GCS or companion on the same link must not be mistaken for the
          * vehicle: autonomy reads armed state and flight mode from this. */
         if (hb.autopilot == MAV_AUTOPILOT_INVALID) {
+            uint8_t operator_sysid = conn->cfg.operator_gcs_sysid ? conn->cfg.operator_gcs_sysid : 255;
+            if (hb.type == MAV_TYPE_GCS && msg->sysid == operator_sysid) {
+                conn->telemetry.gcs_heartbeat.sysid = msg->sysid;
+                conn->telemetry.gcs_heartbeat.count++;
+                conn->telemetry.gcs_heartbeat.last_update_ms = now;
+                conn->telemetry.gcs_heartbeat.valid = true;
+            }
             break;
         }
         conn->vehicle_sysid = msg->sysid;
@@ -104,6 +111,16 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         conn->telemetry.radio_status.fixed = radio.fixed;
         conn->telemetry.radio_status.last_update_ms = now;
         conn->telemetry.radio_status.valid = true;
+        break;
+    }
+    case MAVLINK_MSG_ID_RC_CHANNELS: {
+        /* Only the autopilot's own view of its radio counts. */
+        if (msg->sysid != conn->vehicle_sysid || msg->compid != conn->vehicle_compid) {
+            break;
+        }
+        conn->telemetry.rc_status.rssi = mavlink_msg_rc_channels_get_rssi(msg);
+        conn->telemetry.rc_status.last_update_ms = now;
+        conn->telemetry.rc_status.valid = true;
         break;
     }
     case MAVLINK_MSG_ID_COMMAND_ACK: {

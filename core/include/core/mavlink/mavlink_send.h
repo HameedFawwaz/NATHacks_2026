@@ -41,7 +41,12 @@ bool core_mavlink_send_statustext(core_mavlink_conn_t *conn, core_mav_severity_t
 /* name longer than MAVLink's NAMED_VALUE_FLOAT limit (10 bytes) is truncated. */
 bool core_mavlink_send_named_value_float(core_mavlink_conn_t *conn, const char *name, float value);
 
-/* Publishes score as five NAMED_VALUE_FLOAT messages: TRUST, TRUST_NAV, TRUST_LNK, TRUST_CRY, TRUST_HW. */
+/*
+ * Publishes score as NAMED_VALUE_FLOAT messages: TRUST and TRUST_CRY always,
+ * and TRUST_NAV, TRUST_LNK and TRUST_HW only while their producer is live (see
+ * core_trust_component_live), so a missing detector reads as no data rather
+ * than as fully trusted.
+ */
 bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trust_score_t *score);
 
 /*

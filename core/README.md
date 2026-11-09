@@ -34,9 +34,8 @@ ctest --test-dir build --output-on-failure
 
 `mavlink/` and `common/` are implemented (connection handling, telemetry decode, send
 helpers, shared trust-score struct — see `include/core/mavlink/mavlink.h` for the public
-API). `nav/` (GNSS spoofing detection), `autonomy/` (decision layer), and `crypto/`
-(link signing) are also implemented — see below. `link/` (lost-link detection/failover)
-is still empty, scoped to its own issue.
+API). `nav/` (GNSS spoofing detection), `link/` (lost-link detection), `autonomy/` (decision
+layer), and `crypto/` (link signing) are also implemented — see below.
 
 ## GNSS spoofing detection (`nav/`)
 
@@ -103,6 +102,82 @@ Building Copter-4.5 SITL on Apple Silicon needed three workarounds: `setuptools<
 the venv (`dronecan` imports `pkg_resources`, and without it the build hangs instead of
 failing), `CC=/usr/bin/clang CXX=/usr/bin/clang++`, and `LDFLAGS=-Wl,-no_fixup_chains`
 at `./waf configure`.
+
+## Lost-link detection (`link/`)
+
+`link/link_monitor` judges the operator's control link and publishes `link_trust`, which
+autonomy turns into a hold and then a return home. `core_main` runs it every tick. See
+`include/core/link/link_monitor.h` for the states and the full reasoning.
+
+The companion computer isn't on the operator's link, so it measures it indirectly:
+
+- **Operator heartbeats.** ArduPilot forwards the ground station's heartbeats to every
+  other link. The monitor counts the fraction missing over 10 s and how long the link has
+  been silent. The operator is `SYSID_MYGCS`'s default, sysid 255; change
+  `operator_gcs_sysid` in the connection config if yours differs.
+- **Radio data, to tell jamming from a clean loss.** ArduPilot never forwards
+  `RADIO_STATUS`, but with `RSSI_TYPE=5` it puts the telemetry radio's RSSI in
+  `RC_CHANNELS`, which `core_main` requests. Silent while the radio still hears strong RF
+  is read as jamming; silent with the signal gone is a loss. If the radio is wired to the
+  companion computer instead, its `RADIO_STATUS` noise floor is used, which is the
+  stronger signal.
+
+| State | When | `link_trust` |
+|---|---|---|
+| `UNKNOWN` | no operator heard yet, or the autopilot itself is silent | not reported |
+| `NOMINAL` | heartbeats arriving as expected | about 1 |
+| `DEGRADED` | heartbeats missing, weak signal, or interference while connected | below 0.7 |
+| `LOST` | silent for 6 s, no sign of jamming | 0 |
+| `JAMMED` | silent for 6 s while the radio shows interference | 0 |
+
+Each state change goes out as a `LINK <STATE>: <reason>` STATUSTEXT, and the state and
+loss are published as `LNK_STATE` and `LNK_LOSS` alongside `TRUST_LNK`.
+
+Brief dropouts don't trip it: loss is measured over 10 s, the first 3 s of silence cost
+nothing, trust drops at once but climbs back at 0.1/s, and the state only steps back down
+after holding for 3 s. Steady loss doesn't make it bounce either: the link becomes
+`DEGRADED` below 0.7 trust but is only `NOMINAL` again at 0.85 with a clean 30 s record. So
+after an outage, trust (which autonomy acts on) recovers in about 10 s while the label
+stays `DEGRADED` for about 30 s.
+
+Limits:
+
+- **Jamming versus loss is a heuristic.** With RSSI only, the assumption is that a jammed
+  radio still reports strong RF energy. That holds in the SITL scenario because the
+  scenario is built on it; check it against the real radio.
+- **No operator ever heard means no verdict.** A drone that takes off without its ground
+  station connected isn't monitored, the same as autonomy's rule for producers that have
+  never reported.
+- **No backup link.** The issue allows switching to one, but the hardware has none, so the
+  response is left to autonomy.
+- **`core_main` doesn't run autonomy yet**, so in SITL the vehicle doesn't act on the
+  verdict. `tools/autonomy_runner` is still the way to exercise autonomy.
+
+### Scripted jamming in SITL
+
+`sitl/link_jam_proxy.py` stands in for the telemetry radio: it relays the operator's link,
+drops packets, and reports `RADIO_STATUS` to the autopilot with chosen RSSI and noise.
+`sitl/run_link_scenario.py` runs it against SITL and `core_main` and checks each case:
+
+```
+python3 sitl/run_link_scenario.py --ardupilot /path/to/ardupilot --core-main build/core_main
+```
+
+It checks that a steady link stays `NOMINAL`, that 2 s dropouts never reach `LOST` or
+untrusted, that 30% loss is `DEGRADED`, that jamming is `JAMMED` and not `LOST`, that a
+clean loss is `LOST` and not `JAMMED`, and that each recovers without bouncing. The vehicle
+stays on the ground. Needs `pymavlink`.
+
+To try it by hand with MAVProxy as the operator, start the proxy and type a profile
+(`nominal`, `degraded`, `jam`, `lost`) to switch:
+
+```
+python3 sitl/link_jam_proxy.py
+arducopter ... --defaults <copter.parm>,sitl/link_jam.parm \
+  --serial1=udpclient:127.0.0.1:14551 --serial2=udpclient:127.0.0.1:14560
+./build/core_main 14551
+mavproxy.py --master=udpout:127.0.0.1:14562
+```
 
 ## Testing against ArduPilot SITL
 

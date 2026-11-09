@@ -34,6 +34,14 @@ static void test_set_component_clamps(void) {
     assert(score.hardware_trust == 0.25f);
 }
 
+static void test_component_live(void) {
+    assert(!core_trust_component_live(0, 5000));
+    assert(core_trust_component_live(1000, 1000));
+    assert(core_trust_component_live(1000, 1000 + CORE_TRUST_LIVE_MS));
+    assert(!core_trust_component_live(1000, 1001 + CORE_TRUST_LIVE_MS));
+    assert(!core_trust_component_live(5000, 1000)); /* a timestamp from the future isn't trusted either */
+}
+
 static void test_component_timestamps(void) {
     core_trust_score_t score;
     core_trust_score_init(&score);
@@ -51,6 +59,7 @@ static void test_component_timestamps(void) {
 }
 
 int main(void) {
+    test_component_live();
     test_init_sets_all_to_one();
     test_set_component_clamps();
     test_component_timestamps();
