@@ -299,10 +299,98 @@ static void test_signing_off_unchanged(void) {
     assert(t.heartbeat.valid && "with signing off, behavior must be unchanged");
     assert(!t.link_security.signing_enabled);
     assert(t.link_security.rejected_unsigned == 0);
+    assert(!core_mavlink_publish_link_security(conn, &t.link_security));
+    uint8_t outbound[MAVLINK_MAX_PACKET_LEN];
+    assert(recv(p.fd, outbound, sizeof(outbound), MSG_DONTWAIT) < 0 &&
+           "signing-disabled connection must not publish signing counters");
 
     peer_close(&p);
     core_mavlink_conn_close(conn);
     printf("  ok: signing disabled leaves behavior unchanged\n");
+}
+
+static void assert_named_float(peer_t *p, const char *expected_name, float expected_value) {
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+    ssize_t n = -1;
+    for (int i = 0; i < 1000 && n < 0; i++) {
+        n = recv(p->fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n < 0) usleep(1000);
+    }
+    assert(n > 0 && "timed out waiting for published signing counter");
+    mavlink_message_t msg;
+    mavlink_status_t *status = mavlink_get_channel_status(PEER_RX_CHAN);
+    bool decoded = false;
+    for (ssize_t i = 0; i < n; i++) {
+        if (mavlink_parse_char(PEER_RX_CHAN, buf[i], &msg, status)) {
+            assert(msg.msgid == MAVLINK_MSG_ID_NAMED_VALUE_FLOAT);
+            char name[11] = {0};
+            mavlink_msg_named_value_float_get_name(&msg, name);
+            assert(strcmp(name, expected_name) == 0);
+            assert(mavlink_msg_named_value_float_get_value(&msg) == expected_value);
+            decoded = true;
+        }
+    }
+    assert(decoded && "published signing counter must carry a valid signature");
+}
+
+static void test_rejection_counters_published(void) {
+    core_mavlink_conn_t *conn = open_conn(14573, KEY_A);
+    peer_t p;
+    peer_init(&p, 14573, KEY_A, KEY_A);
+    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+
+    /* A genuine signed heartbeat establishes the peer and signed stream. */
+    uint16_t len = build_heartbeat(buf);
+    send_bytes(&p, buf, len);
+    core_link_security_t before = sec_of(conn);
+    core_link_security_t sec = pump_until_counted(conn, &before);
+    assert(sec.signed_accepted == 1);
+
+    /* Generate a genuinely unsigned frame, then restore the peer signer. */
+    mavlink_status_t *tx_status = mavlink_get_channel_status(PEER_TX_CHAN);
+    mavlink_signing_t *tx_signing = tx_status->signing;
+    tx_status->signing = NULL;
+    len = build_heartbeat(buf);
+    tx_status->signing = tx_signing;
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_unsigned == 1);
+
+    /* Sign with a different key; this is counted as a bad signature. */
+    memcpy(p.tx_signing.secret_key, KEY_B, sizeof(KEY_B));
+    len = build_heartbeat(buf);
+    memcpy(p.tx_signing.secret_key, KEY_A, sizeof(KEY_A));
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_bad_sig == 1);
+
+    /* A valid packet followed by its byte-identical duplicate is a real replay. */
+    len = build_heartbeat(buf);
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.signed_accepted == 2);
+    before = sec;
+    send_bytes(&p, buf, len);
+    sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_replay == 1);
+
+    /* Publish the actual connection snapshot and verify each signed wire value. */
+    core_telemetry_t telemetry;
+    core_mavlink_conn_get_telemetry(conn, &telemetry);
+    assert(telemetry.link_security.rejected_unsigned == 1);
+    assert(telemetry.link_security.rejected_bad_sig == 1);
+    assert(telemetry.link_security.rejected_replay == 1);
+    assert(core_mavlink_publish_link_security(conn, &telemetry.link_security));
+    assert_named_float(&p, "SIG_UNSGN", 1.0f);
+    assert_named_float(&p, "SIG_BADSG", 1.0f);
+    assert_named_float(&p, "SIG_REPLY", 1.0f);
+
+    peer_close(&p);
+    core_mavlink_conn_close(conn);
+    printf("  ok: real signing rejections published as signed named values\n");
 }
 
 static bool recv_and_verify(peer_t *p, uint8_t expected_msgid) {
@@ -549,6 +637,7 @@ int main(void) {
     test_key_environment();
     test_passphrase_keys();
     test_signing_off_unchanged();
+    test_rejection_counters_published();
     test_signed_accepted();
     test_unsigned_rejected();
     test_wrong_key_rejected();
