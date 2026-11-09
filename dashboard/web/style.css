@@ -113,6 +113,7 @@ body { display: flex; flex-direction: column; }
 .key { display: inline-block; width: 20px; height: 0; border-top: 3px solid; }
 .key-plan { border-color: var(--accent); border-top-style: dashed; }
 .key-reported { border-color: #fff; }
+.key-truth { border-color: #ffbd59; border-top-style: dotted; }
 .key-estimated { border-color: var(--healthy); }
 .key-drift { border-color: var(--critical); }
 

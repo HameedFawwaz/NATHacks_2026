@@ -23,6 +23,7 @@ const (
 	MsgMissionItemInt    = 73
 	MsgCommandLong       = 76
 	MsgCommandAck        = 77
+	MsgSimState          = 108 // simulator ground truth, never navigation input
 	MsgHomePosition      = 242
 	MsgNamedValueFloat   = 251
 	MsgStatusText        = 253
@@ -60,6 +61,7 @@ var messageInfo = map[uint32]struct {
 	MsgMissionItemInt:    {38, 38},
 	MsgCommandLong:       {152, 33},
 	MsgCommandAck:        {143, 10},
+	MsgSimState:          {32, 92},
 	MsgHomePosition:      {104, 60},
 	MsgNamedValueFloat:   {170, 18},
 	MsgStatusText:        {83, 54},

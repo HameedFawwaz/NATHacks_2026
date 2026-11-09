@@ -30,6 +30,7 @@ const (
 	CmdComponentArmDisarm = 400
 	CmdMissionStart       = 300
 	CmdRequestMessage     = 512
+	CmdSetMessageInterval = 511
 
 	FrameGlobal            = 0
 	FrameGlobalRelativeAlt = 3
@@ -115,6 +116,19 @@ func DecodeGlobalPositionInt(p []byte) GlobalPositionInt {
 		VEast:        float64(int16(u16(p[22:]))) / 100,
 		HeadingCdeg:  u16(p[26:]),
 	}
+}
+
+// DecodeSimState uses SIM_STATE's degE7 extensions when present, otherwise its
+// legacy float coordinates. Payload is zero-padded by Parse for older senders.
+func DecodeSimState(p []byte) (lat, lon float64) {
+	lat, lon = float64(f32(p[52:])), float64(f32(p[56:]))
+	if v := i32(p[84:]); v != 0 {
+		lat = float64(v) / degE7
+	}
+	if v := i32(p[88:]); v != 0 {
+		lon = float64(v) / degE7
+	}
+	return
 }
 
 // ESCTelemetry is ESC_TELEMETRY_1_TO_4: one block of four ESCs. A slot with no

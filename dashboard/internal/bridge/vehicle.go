@@ -127,6 +127,15 @@ func (v *vehicleState) apply(f mavlink.Frame, nowMs int64) (fromAutopilot bool) 
 		lat, lon := mavlink.DecodeHomePosition(f.Payload)
 		v.homeKnown = lat != 0 || lon != 0
 		v.home = model.LatLon{Lat: lat, Lon: lon}
+	case mavlink.MsgSimState:
+		if v.snap.SITLTruth {
+			lat, lon := mavlink.DecodeSimState(f.Payload)
+			valid := math.Abs(lat) <= 90 && math.Abs(lon) <= 180 && (lat != 0 || lon != 0)
+			v.snap.HasTruth = valid
+			if valid {
+				v.snap.Truth, v.snap.TruthAtMs = model.LatLon{Lat: lat, Lon: lon}, nowMs
+			}
+		}
 	}
 	return true
 }
@@ -325,6 +334,8 @@ func (v *vehicleState) snapshot(nowMs int64) model.Snapshot {
 	s.HasPosition = s.HasPosition && s.Connected && gpsFresh
 	s.HasFlightData = s.Connected && globalFresh
 	s.HasHeading = s.HasFlightData && v.headingKnown
+	s.HasTruth = s.SITLTruth && s.HasTruth && s.Connected && s.TruthAtMs != 0 &&
+		s.TruthAtMs <= nowMs && nowMs-s.TruthAtMs <= model.StaleAfterMs
 
 	// Prefer core's GPS-anchored dead reckoning. Fall back to the EKF only
 	// when core isn't publishing one, and say which is in use.

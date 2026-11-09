@@ -43,6 +43,7 @@ type app struct {
 
 	reportedTrail  []model.LatLon
 	estimatedTrail []model.LatLon
+	truthTrail     []model.LatLon
 	wasArmed       bool
 
 	mapView *mapView
@@ -96,15 +97,22 @@ func (a *app) simTick() {
 func (a *app) setSnapshot(s model.Snapshot) {
 	if s.Armed && !a.wasArmed {
 		a.reportedTrail, a.estimatedTrail = nil, nil
+		a.truthTrail = nil
 	}
 	a.wasArmed = s.Armed
 	a.snap = s
+	if !s.HasTruth {
+		a.truthTrail = nil
+	}
 	if s.Armed && s.Connected {
 		if s.HasPosition {
 			a.reportedTrail = appendTrail(a.reportedTrail, s.Reported)
 		}
 		if s.HasEstimate {
 			a.estimatedTrail = appendTrail(a.estimatedTrail, s.Estimated)
+		}
+		if s.HasTruth {
+			a.truthTrail = appendTrail(a.truthTrail, s.Truth)
 		}
 	}
 	a.syncHome(s)
@@ -183,6 +191,7 @@ func (a *app) newFlight() {
 	a.flownPlan = a.plan.Clone()
 	a.sim = sim.New(a.flownPlan)
 	a.reportedTrail, a.estimatedTrail = nil, nil
+	a.truthTrail = nil
 	a.clearEvents()
 	a.setSnapshot(a.sim.Snapshot())
 }

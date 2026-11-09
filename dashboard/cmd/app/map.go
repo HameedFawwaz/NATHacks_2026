@@ -14,6 +14,7 @@ import (
 const (
 	colorPlan      = "#23baff"
 	colorReported  = "#ffffff"
+	colorTruth     = "#ffbd59"
 	colorEstimated = "#3ecf8e"
 	colorDrift     = "#ff5c5c"
 	colorGrid      = "#1d2631"
@@ -130,6 +131,12 @@ func (m *mapView) fit() {
 		}
 		for _, p := range m.app.estimatedTrail {
 			include(p)
+		}
+		for _, p := range m.app.truthTrail {
+			include(p)
+		}
+		if m.app.snap.HasTruth {
+			include(m.app.snap.Truth)
 		}
 	}
 	m.centerEast, m.centerNorth = (minE+maxE)/2, (minN+maxN)/2
@@ -384,6 +391,12 @@ func (m *mapView) drawFlight() {
 	}
 
 	c.Set("lineWidth", 2)
+	if s.HasTruth {
+		c.Set("strokeStyle", colorTruth)
+		c.Call("setLineDash", js.ValueOf([]any{3, 4}))
+		m.polyline(m.app.truthTrail)
+		c.Call("setLineDash", js.ValueOf([]any{}))
+	}
 	c.Set("strokeStyle", colorEstimated)
 	m.polyline(m.app.estimatedTrail)
 	c.Set("strokeStyle", colorReported)
@@ -406,6 +419,18 @@ func (m *mapView) drawFlight() {
 		c.Call("fill")
 	}
 
+	if s.HasTruth {
+		x, y := m.toScreen(s.Truth)
+		c.Set("strokeStyle", colorTruth)
+		c.Set("lineWidth", 3)
+		c.Call("beginPath")
+		c.Call("arc", x, y, 15, 0, 2*math.Pi)
+		c.Call("stroke")
+		c.Set("fillStyle", colorTruth)
+		c.Set("font", "700 11px system-ui, sans-serif")
+		c.Set("textAlign", "left")
+		c.Call("fillText", "ACTUAL (SIM)", x+19, y-17)
+	}
 	if !s.HasPosition {
 		return
 	}

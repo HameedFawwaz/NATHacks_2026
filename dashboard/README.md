@@ -98,6 +98,15 @@ that case. Without `--mission-file`, the script uses a separate 600m-triangle
 stress route; it may legitimately remain blocked when backup error exceeds 10m.
 That stress failure is not waived or turned into a healthy score.
 
+### Simulator actual-position display
+
+The local SITL launcher enables `serve -sitl-truth`. An **amber dotted trail and
+ring labelled ACTUAL (SIM)** show simulator `SIM_STATE` position, separately from
+white reported GPS and green navigation estimates. This data is display-only:
+it never enters detection, recovery, flight commands, or trust scores. The flag
+defaults off for hardware connections. Missing/stale truth removes the current
+marker and shows an unavailable legend; no estimate is substituted for truth.
+
 For the full local ArduPilot simulator + real detectors + live dashboard, run
 `./scripts/sitl` from the repository root. See the root README for flight commands.
 `make live` by itself starts only the dashboard bridge, not ArduPilot.

@@ -19,6 +19,7 @@ func main() {
 	signingKey := flag.String("signing-key", "", "file holding the MAVLink 2 signing key, as written by core's signing_keygen (empty = unsigned link)")
 	publicHost := flag.String("public-host", "", "name or IP the dashboard is reached by from other machines, if any")
 	allowRemoteUpload := flag.Bool("allow-remote-upload", false, "allow unauthenticated mission uploads from remote clients (trusted networks only)")
+	sitlTruth := flag.Bool("sitl-truth", false, "display simulator ground truth (SITL only; never enable for hardware)")
 	flag.Parse()
 
 	mux := http.NewServeMux()
@@ -40,6 +41,9 @@ func main() {
 		b, err := bridge.Listen(*mavlinkAddr)
 		if err != nil {
 			log.Fatal(err)
+		}
+		if *sitlTruth {
+			b.EnableSITLTruth()
 		}
 		if *signingKey != "" {
 			b.EnableSigning(key)

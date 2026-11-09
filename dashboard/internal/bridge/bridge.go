@@ -87,6 +87,14 @@ func Listen(addr string) (*Bridge, error) {
 // Addr returns the UDP address being listened on.
 func (b *Bridge) Addr() net.Addr { return b.conn.LocalAddr() }
 
+// EnableSITLTruth opts into simulator-only display data. Call before Run, only
+// for an actual SITL connection; it never changes flight or recovery inputs.
+func (b *Bridge) EnableSITLTruth() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.vehicle.snap.SITLTruth = true
+}
+
 // Run serves until ctx is cancelled.
 func (b *Bridge) Run(ctx context.Context) error {
 	go b.sendPeriodic(ctx)
@@ -204,6 +212,10 @@ func (b *Bridge) requestStreamsLocked() {
 	// position when asked.
 	b.sendLocked(mavlink.MsgCommandLong, mavlink.PackRequestMessage(
 		b.vehicle.sysID, b.vehicle.compID, mavlink.MsgHomePosition))
+	if b.vehicle.snap.SITLTruth {
+		b.sendLocked(mavlink.MsgCommandLong, mavlink.PackCommandLong(
+			b.vehicle.sysID, b.vehicle.compID, mavlink.CmdSetMessageInterval, mavlink.MsgSimState, 200000))
+	}
 }
 
 // Snapshot returns the latest vehicle state, with events after afterSeq.

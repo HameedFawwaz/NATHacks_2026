@@ -298,6 +298,12 @@ func (a *app) renderSource() {
 
 func (a *app) renderInstruments() {
 	s := a.snap
+	byID("legend-truth").Set("hidden", !s.SITLTruth)
+	truthLabel := "Simulation actual (ground truth)"
+	if !s.HasTruth {
+		truthLabel += " — unavailable"
+	}
+	setText(byID("legend-truth-label"), truthLabel)
 	show := func(id string, current bool, value string) {
 		if !current {
 			value = "--"

@@ -68,6 +68,10 @@ type Snapshot struct {
 	Estimated     LatLon // independent position estimate
 	HasEstimate   bool
 	EstimateFrom  string // EstimateCore or EstimateEKF; empty when HasEstimate is false
+	SITLTruth     bool   // explicitly enabled simulator-only display; NOT a sensor
+	Truth         LatLon
+	HasTruth      bool
+	TruthAtMs     int64
 	AltM          float64
 	SpeedMS       float64
 	HeadingDeg    float64

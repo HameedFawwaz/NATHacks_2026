@@ -72,6 +72,10 @@ function snapshot(state, recoveryEnabled, recoveryFresh, recoveryControllable) {
     Estimated: estimate,
     HasEstimate: connected,
     EstimateFrom: "core",
+    SITLTruth: state === "drift",
+    Truth: { Lat: home.Lat + 0.00027, Lon: home.Lon },
+    HasTruth: connected && state === "drift",
+    TruthAtMs: now,
     HasHeading: connected,
     HeadingDeg: 0,
     HasFlightData: connected,
@@ -438,15 +442,16 @@ async function main() {
     await waitFor(() => cdp.evaluate(`(() => {
       const canvas = document.querySelector('#map');
       const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-      let planned = 0, drift = 0;
+      let planned = 0, drift = 0, truth = 0;
       for (let i = 0; i < pixels.length; i += 4) {
         if (Math.abs(pixels[i] - 35) < 8 && Math.abs(pixels[i+1] - 186) < 8 && Math.abs(pixels[i+2] - 255) < 8) planned++;
         if (Math.abs(pixels[i] - 255) < 8 && Math.abs(pixels[i+1] - 92) < 8 && Math.abs(pixels[i+2] - 92) < 8) drift++;
+        if (Math.abs(pixels[i] - 255) < 8 && Math.abs(pixels[i+1] - 189) < 8 && Math.abs(pixels[i+2] - 89) < 8) truth++;
       }
-      return planned > 100 && drift > 50;
+      return planned > 100 && drift > 50 && truth > 50 && !document.querySelector('#legend-truth').hidden;
     })()`), "planned route and drift overlay pixels");
     await save("drift-17m-offline");
-    console.log("PASS map: exact 17 m core-estimate disagreement; offline grid and planned route render.");
+    console.log("PASS map: distinct simulator truth, GPS/estimate disagreement, offline grid and route render.");
   } finally {
     try { ws?.close(); } catch {}
     try { fixture?.close(); } catch {}

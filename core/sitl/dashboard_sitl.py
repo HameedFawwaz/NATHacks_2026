@@ -92,7 +92,7 @@ def run(args):
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         launch("dashboard", [str(ROOT / "core/build/dashboard-serve"), "-dir", str(ROOT / "dashboard/web"),
-                             "-mavlink", "127.0.0.1:14552"])
+                             "-mavlink", "127.0.0.1:14552", "-sitl-truth"])
         launch("core", [str(ROOT / "core/build/core_main"), "14551", "--allow-recovery-control", "--gps-free-backup"])
         launch("arducopter", [str(copter), "--model", "+", "--home", "-35.363262,149.165237,584,353",
                               # autonomy_failover.parm: core_main runs autonomy, whose
