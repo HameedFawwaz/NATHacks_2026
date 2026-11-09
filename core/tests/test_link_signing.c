@@ -381,21 +381,25 @@ static void test_rejected_sender_cannot_capture_peer(void) {
     peer_init(&legitimate, port, KEY_A, KEY_A);
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
-    /* Both invalid startup datagrams come from the attacker's socket. */
+    /* Both invalid startup datagrams come from the attacker's socket. Wait
+     * for each separately: pump_until_counted only promises one new event. */
     mavlink_status_t *tx_status = mavlink_get_channel_status(PEER_TX_CHAN);
     mavlink_signing_t *legit_signing = tx_status->signing;
     tx_status->signing = NULL;
     uint16_t len = build_heartbeat(buf);
+    core_link_security_t before = sec_of(conn);
     send_bytes(&attacker, buf, len);
+    core_link_security_t sec = pump_until_counted(conn, &before);
+    assert(sec.rejected_unsigned == 1);
     tx_status->signing = legit_signing;
 
     /* Wrong-key signature, also from attacker. */
     memcpy(legitimate.tx_signing.secret_key, KEY_B, sizeof(KEY_B));
     len = build_heartbeat(buf);
     memcpy(legitimate.tx_signing.secret_key, KEY_A, sizeof(KEY_A));
+    before = sec;
     send_bytes(&attacker, buf, len);
-    core_link_security_t before = sec_of(conn);
-    core_link_security_t sec = pump_until_counted(conn, &before);
+    sec = pump_until_counted(conn, &before);
     assert(sec.rejected_unsigned == 1 && sec.rejected_bad_sig == 1);
 
     /* Even an authentic frame split across different source sockets must not
