@@ -37,7 +37,7 @@ typedef struct {
      * divergence/timestamp comparisons. */
     core_gps_raw_t prev_gps_raw;
     bool have_prev_gps;
-    bool yaw_seeded; /* attitude yaw seeded from the first fix's course-over-ground */
+    bool yaw_seeded; /* attitude yaw seeded, from the FC's heading while disarmed or else from course over ground */
 
     /* Consecutive non-advancing-timestamp GPS samples. A single one is
      * ambiguous (e.g. a receiver re-sending a cached fix when polled faster

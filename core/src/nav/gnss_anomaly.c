@@ -6,6 +6,12 @@
 #include "core/common/time.h"
 
 #define METERS_PER_DEG_LAT 111320.0
+#define MAV_MODE_FLAG_ARMED 128 /* MAV_MODE_FLAG_SAFETY_ARMED, without exposing the vendored enum */
+
+/* Course over ground says nothing about heading until the vehicle is actually
+ * moving: a stationary receiver's COG is noise (seen in SITL swinging through
+ * 80-340 deg on the pad). */
+#define COG_SEED_MIN_SPEED_CMS 300
 
 static float linear_score(float value, float warn, float reject) {
     if (reject <= warn) {
@@ -86,9 +92,56 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
 
     /* Filters run on every tick, independent of GPS rate. */
     core_attitude_filter_update(&detector->attitude, &telemetry->imu);
-    core_nav_kf_set_update(&detector->kf_short, &telemetry->imu, &detector->attitude, &telemetry->baro,
+
+    /* Yaw seed, preferred source: the flight controller's own heading, but
+     * only while disarmed. On the ground that heading is the compass's (GPS
+     * has no say in it before flight), and the gyro free-integrates from the
+     * last seed once armed, so a spoof that starts in flight can't steer it.
+     * Re-seeded every tick until arming so a vehicle turned by hand on the
+     * pad still takes off with the right heading. Before this, yaw came only
+     * from the first fix's COG - noise while stationary - and a few degrees of
+     * resulting heading error was enough to false-alarm the long-horizon check
+     * in ordinary forward flight (see core/sitl/run_gnss_e2e_scenarios.py's
+     * "cruise" control). The gyro's bias is learned over the same disarmed
+     * stretch, for the same reason. */
+    {
+        bool armed = telemetry->heartbeat.valid && (telemetry->heartbeat.base_mode & MAV_MODE_FLAG_ARMED) != 0;
+        bool attitude_fresh = telemetry->attitude.valid &&
+                              (core_now_ms() - telemetry->attitude.last_update_ms) < cfg->imu_stale_ms;
+        if (!armed) {
+            /* Disarmed means sitting still, so whatever the gyro reads is bias. */
+            core_attitude_filter_learn_gyro_bias(&detector->attitude, &telemetry->imu);
+        }
+        if (!armed && attitude_fresh && detector->attitude.initialized) {
+            core_attitude_filter_seed_yaw(&detector->attitude, telemetry->attitude.yaw);
+            detector->yaw_seeded = true;
+        }
+    }
+    /* Which attitude rotates the IMU into NED for the KFs. Core's own filter
+     * (gyro + accel, no magnetometer, no in-flight bias tracking) drifts a
+     * few degrees in tilt and heading over a minute of aggressive flight, and
+     * at 30 deg of tilt every degree is ~0.17 m/s^2 of phantom acceleration:
+     * in SITL that alone false-alarmed the 8s long-horizon check on an
+     * unspoofed square route. The flight controller's ATTITUDE is far better
+     * (it fuses magnetometer and tracks gyro bias), and attitude is the part
+     * of its state a GNSS spoof barely touches: tilt and heading are held by
+     * gyro, accel and compass, while a spoof drags position and velocity -
+     * what this detector still compares only against its own dead
+     * reckoning. Core's filter stays the fallback whenever ATTITUDE is stale
+     * or missing. */
+    const core_attitude_filter_t *kf_attitude = &detector->attitude;
+    core_attitude_filter_t fc_attitude;
+    if (cfg->kf_attitude_from_fc && telemetry->attitude.valid &&
+        (core_now_ms() - telemetry->attitude.last_update_ms) < cfg->imu_stale_ms) {
+        fc_attitude = detector->attitude;
+        fc_attitude.roll = telemetry->attitude.roll;
+        fc_attitude.pitch = telemetry->attitude.pitch;
+        fc_attitude.yaw = telemetry->attitude.yaw;
+        kf_attitude = &fc_attitude;
+    }
+    core_nav_kf_set_update(&detector->kf_short, &telemetry->imu, kf_attitude, &telemetry->baro,
                             cfg->kf_sigma_accel_mps2, cfg->kf_baro_r_m2);
-    core_nav_kf_set_update(&detector->kf_long, &telemetry->imu, &detector->attitude, &telemetry->baro,
+    core_nav_kf_set_update(&detector->kf_long, &telemetry->imu, kf_attitude, &telemetry->baro,
                             cfg->kf_sigma_accel_mps2, cfg->kf_baro_r_m2);
 
     /* --- GPS health: staleness (possible jamming) + fix quality. Runs every
@@ -143,11 +196,12 @@ core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
         float score_eph = 1.0f;
         uint32_t flags = 0;
 
-        /* Seed yaw from the first real heading reference available, rather
-         * than leaving it at the arbitrary 0 (true north) initial guess -
-         * see attitude_filter.h. Only once; it free-integrates from gyro
-         * after that, as designed. */
-        if (!detector->yaw_seeded && gps->cog_cdeg != UINT16_MAX) {
+        /* Fallback yaw seed, for a link with no ATTITUDE stream (see above):
+         * course over ground, once moving fast enough for it to mean
+         * anything. Assumes the nose points along the track, as a copter's
+         * does in AUTO/GUIDED by default. Only once; it free-integrates from
+         * gyro after that, as designed. */
+        if (!detector->yaw_seeded && gps->cog_cdeg != UINT16_MAX && gps->vel_cms >= COG_SEED_MIN_SPEED_CMS) {
             core_attitude_filter_seed_yaw(&detector->attitude, cog_cdeg_to_rad(gps->cog_cdeg));
             detector->yaw_seeded = true;
         }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Flies ArduCopter SITL against core's real GNSS detector and autonomy
-together, under issue #19's three spoof scenarios plus an unspoofed control
-run.
+together, under issue #19's three spoof scenarios plus two unspoofed control
+runs (a hover, and a square flown at cruise speed).
 
 Usage: run_gnss_e2e_scenarios.py --ardupilot <repo> [--core-main <binary>] [scenario ...]
 
@@ -12,8 +12,9 @@ that SITL actually glitches via SIM_GPS_GLITCH_X/Y. The detector sees a real
 spoofed fix, and the EKF is genuinely fooled, rather than just being told
 telemetry happens to be numerically "spoofed".
 
-Assumes no other SITL instance 0 is running (same assumption
-run_autonomy_scenario.py makes): it binds the default ports 5760/5501/5502.
+Assumes no other SITL is running on the chosen --instance (default 0, which
+binds the default ports 5760/5501/5502). Use e.g. --instance 1 --core-port
+14565 to run it beside run.sh.
 """
 import argparse
 import json
@@ -56,6 +57,9 @@ MIN_APART_M = 50.0
 AREA_MARGIN_M = 40.0
 LEG_TRIES = 30
 ARRIVE_RADIUS_M = 3.0
+
+# Side of the square the unspoofed "cruise" control flies.
+CRUISE_SQUARE_M = 120.0
 
 
 class ScenarioFailed(Exception):
@@ -160,7 +164,7 @@ class RandomRouteSpoof:
 
 
 class Sitl:
-    def __init__(self, ardupilot, core_main, workdir, core_port):
+    def __init__(self, ardupilot, core_main, workdir, core_port, instance=0):
         self.core_port = core_port
         self.core_log = open(workdir / "core_main.log", "w")
         self.core_proc = subprocess.Popen(
@@ -172,6 +176,7 @@ class Sitl:
             [
                 str(ardupilot / "build/sitl/bin/arducopter"),
                 "--model", "+",
+                "-I", str(instance),
                 "--wipe",
                 "--defaults",
                 f"{ardupilot / 'Tools/autotest/default_params/copter.parm'},"
@@ -182,7 +187,7 @@ class Sitl:
             stdout=open(workdir / "arducopter.log", "w"),
             stderr=subprocess.STDOUT,
         )
-        self.mav = mavutil.mavlink_connection("tcp:127.0.0.1:5760", retries=60, dialect="ardupilotmega")
+        self.mav = mavutil.mavlink_connection(f"tcp:127.0.0.1:{5760 + 10 * instance}", retries=60, dialect="ardupilotmega")
         self.mav.wait_heartbeat(timeout=30)
         self.mav.mav.request_data_stream_send(
             self.mav.target_system, self.mav.target_component, mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
@@ -206,15 +211,16 @@ class Sitl:
         self._set_stream_rates(instance=1, rate_hz=10)
 
     def _set_stream_rates(self, instance, rate_hz):
-        """Sets every SRn_* stream-rate group for serial port n, over the primary
+        """Sets every stream-rate group for serial port n, over the primary
         link (these are plain vehicle parameters, not per-channel state, so
-        setting them here takes effect on serial1 too)."""
+        setting them here takes effect on serial1 too). ArduPilot renamed them
+        from SRn_* to MAVn_* in 4.7; each version ignores the other's."""
         for group in ("RAW_SENS", "EXT_STAT", "RC_CHAN", "RAW_CTRL", "POSITION", "EXTRA1", "EXTRA2", "EXTRA3", "PARAMS"):
-            name = f"SR{instance}_{group}"
-            self.mav.mav.param_set_send(
-                self.mav.target_system, self.mav.target_component, name.encode(), rate_hz,
-                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
-            )
+            for name in (f"SR{instance}_{group}", f"MAV{instance}_{group}"):
+                self.mav.mav.param_set_send(
+                    self.mav.target_system, self.mav.target_component, name.encode(), rate_hz,
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+                )
         self.pump(2)  # let the param sets land before anything depends on their streams
 
     def pump(self, seconds=0.0):
@@ -261,6 +267,15 @@ class Sitl:
         params = list(params) + [0] * (7 - len(params))
         self.mav.mav.command_long_send(self.mav.target_system, self.mav.target_component, command, 0, *params)
 
+    def goto(self, lat, lon, alt_m=TAKEOFF_ALT_M):
+        """GUIDED-mode position target, relative altitude."""
+        self.mav.mav.set_position_target_global_int_send(
+            0, self.mav.target_system, self.mav.target_component,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            0b0000111111111000,  # position only
+            int(lat * 1e7), int(lon * 1e7), alt_m, 0, 0, 0, 0, 0, 0, 0, 0,
+        )
+
     def set_gps_glitch(self, lat_offset_deg, lon_offset_deg):
         # Renamed between ArduPilot releases; each version ignores the other's.
         for name, value in (
@@ -301,6 +316,26 @@ def expect(condition, message):
     return condition
 
 
+class SquareRoute:
+    """Unspoofed: flies a square around where it started, so the control run
+    covers ordinary maneuvering (accelerating, cruising, turning) and not just
+    a hover. A hover never rotates accelerations through the attitude
+    estimate, which is where dead-reckoning error actually comes from."""
+
+    def __init__(self, sitl, side_m=CRUISE_SQUARE_M):
+        self.sitl = sitl
+        start = sitl.status["true_pos"]
+        self.corners = [from_local(start, e, n) for e, n in ((side_m, 0), (side_m, side_m), (0, side_m), (0, 0))]
+        self.leg = 0
+        sitl.goto(*self.corners[0])
+
+    def step(self, dt, true_pos):
+        if distance_m(true_pos, self.corners[self.leg]) < ARRIVE_RADIUS_M * 2:
+            self.leg = (self.leg + 1) % len(self.corners)
+            self.sitl.goto(*self.corners[self.leg])
+        return None  # no spoof
+
+
 def run_window(sitl, duration_s, step_fn, label):
     """Runs the GPS at whatever offset step_fn(dt, true_pos) -> (fake_lat, fake_lon)
     says, or unspoofed if step_fn is None, and reports what happened."""
@@ -315,8 +350,9 @@ def run_window(sitl, duration_s, step_fn, label):
     while (elapsed := time.monotonic() - began) < duration_s:
         true_pos = sitl.status["true_pos"]
         if step_fn is not None:
-            fake_lat, fake_lon = step_fn(dt, true_pos)
-            sitl.set_gps_glitch(fake_lat - true_pos[0], fake_lon - true_pos[1])
+            fake = step_fn(dt, true_pos)
+            if fake is not None:
+                sitl.set_gps_glitch(fake[0] - true_pos[0], fake[1] - true_pos[1])
         sitl.pump(dt)
         furthest = max(furthest, distance_m(home, sitl.status["true_pos"]))
         lowest_trust = min(lowest_trust, sitl.status["nav_trust"])
@@ -354,6 +390,9 @@ SCENARIOS = {
         "random route",
     ),
     "control": lambda sitl, rng, duration: run_window(sitl, duration, None, "control (unspoofed)"),
+    "cruise": lambda sitl, rng, duration: run_window(
+        sitl, duration, SquareRoute(sitl).step, "control cruise (unspoofed, flying a square)"
+    ),
 }
 
 
@@ -373,6 +412,10 @@ def main():
         help="built core_main binary (default: core/build/core_main)",
     )
     parser.add_argument("--core-port", type=int, default=14555, help="UDP port core_main listens on")
+    parser.add_argument(
+        "--instance", type=int, default=0,
+        help="SITL instance; each one uses its own ports (5760 + 10*N), so a non-zero one can run beside run.sh",
+    )
     parser.add_argument("--duration", type=float, default=60.0, help="seconds per scenario")
     parser.add_argument("--seed", type=int, default=1, help="RNG seed for the random-route scenario, for repeatability")
     parser.add_argument("--log-dir", type=Path, help="keep logs here instead of a temp directory")
@@ -397,7 +440,7 @@ def main():
             # rather than the clean one its own result implies.
             scenario_dir = workdir / name
             scenario_dir.mkdir(parents=True, exist_ok=True)
-            sitl = Sitl(args.ardupilot.resolve(), args.core_main.resolve(), scenario_dir, args.core_port)
+            sitl = Sitl(args.ardupilot.resolve(), args.core_main.resolve(), scenario_dir, args.core_port, args.instance)
             try:
                 print(f"\n[{name}] taking off")
                 sitl.take_off()
@@ -415,8 +458,8 @@ def main():
             print(f"{r['label']}: {json.dumps(r)}")
             if r["label"].startswith("control") and (r["behaviors_entered"] or r["lowest_nav_trust"] < NAV_TRUST_DETECT_THRESHOLD):
                 no_false_alarm = False
-        if "control" in scenarios:
-            expect(no_false_alarm, "no false alarm during the unspoofed control run")
+        if any(r["label"].startswith("control") for r in results):
+            expect(no_false_alarm, "no false alarm during the unspoofed control runs")
 
         results_path = workdir / "results.json"
         results_path.write_text(json.dumps(results, indent=2))

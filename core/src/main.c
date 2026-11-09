@@ -133,16 +133,26 @@ int main(int argc, char **argv) {
     const uint32_t MSGID_SCALED_IMU2 = 116;
     const uint32_t MSGID_GPS_RAW_INT = 24;
     const uint32_t MSGID_GLOBAL_POSITION_INT = 33;
+    const uint32_t MSGID_ATTITUDE = 30;
+    bool rates_requested = false;
 
     while (g_running) {
         core_mavlink_conn_poll(conn);
 
+        /* Every 30s once they've gone out, but every second until then: they
+         * can't be sent before the vehicle's first heartbeat identifies it,
+         * and waiting a full 30s for the next try left the detector with no
+         * telemetry at all for the first half-minute after startup. */
         uint64_t rate_now = core_now_ms();
-        if (rate_now - last_rate_request_ms >= 30000) {
-            core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);           /* 50Hz */
-            core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000);      /* 10Hz */
-            core_mavlink_request_message_interval(conn, MSGID_GPS_RAW_INT, 200000);          /* 5Hz: native rate, see above */
-            core_mavlink_request_message_interval(conn, MSGID_GLOBAL_POSITION_INT, 100000);  /* 10Hz: EKF output, not sensor-rate-limited */
+        if (rate_now - last_rate_request_ms >= (rates_requested ? 30000u : 1000u)) {
+            bool ok = core_mavlink_request_message_interval(conn, MSGID_SCALED_IMU2, 20000);       /* 50Hz */
+            ok = core_mavlink_request_message_interval(conn, MSGID_SCALED_PRESSURE, 100000) && ok;  /* 10Hz */
+            ok = core_mavlink_request_message_interval(conn, MSGID_GPS_RAW_INT, 200000) && ok;      /* 5Hz: native rate, see above */
+            /* 10Hz: EKF output, not sensor-rate-limited */
+            ok = core_mavlink_request_message_interval(conn, MSGID_GLOBAL_POSITION_INT, 100000) && ok;
+            /* 10Hz: the nav detector seeds its yaw from this while disarmed */
+            ok = core_mavlink_request_message_interval(conn, MSGID_ATTITUDE, 100000) && ok;
+            rates_requested = ok;
             last_rate_request_ms = rate_now;
         }
 

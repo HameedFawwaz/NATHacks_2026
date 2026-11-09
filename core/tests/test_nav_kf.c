@@ -84,6 +84,123 @@ static void test_attitude_filter_level_stationary(void) {
     assert(approx(filter.pitch, 0.0f, 0.01f));
 }
 
+/* Specific force an unaccelerated vehicle at this attitude reads: R^T*[0,0,-g],
+ * written out independently of the code under test. */
+static core_imu_t make_tilted_imu(float roll, float pitch, uint64_t t_ms) {
+    const float g = 9.80665f;
+    return make_imu(g * sinf(pitch), -g * sinf(roll) * cosf(pitch), -g * cosf(roll) * cosf(pitch),
+                    0.0f, 0.0f, 0.0f, t_ms);
+}
+
+/* Attitude filter: a steady tilt must come back with its own sign. Forward
+ * flight is nose-down (negative pitch) and banked; a filter that mirrors
+ * tilt passes the level test above but fails this. */
+static void test_attitude_filter_tilt_sign(void) {
+    const float cases[][2] = {{0.0f, -0.35f}, {0.0f, 0.35f}, {0.3f, 0.0f}, {-0.3f, 0.0f}, {0.25f, -0.3f}};
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        core_attitude_filter_t filter;
+        core_attitude_filter_init(&filter, 1.0f);
+        uint64_t t = 1000;
+        for (int i = 0; i < 500; i++) { /* 10s at 50Hz, many time constants */
+            core_imu_t imu = make_tilted_imu(cases[c][0], cases[c][1], t);
+            core_attitude_filter_update(&filter, &imu);
+            t += 20;
+        }
+        assert(approx(filter.roll, cases[c][0], 0.01f));
+        assert(approx(filter.pitch, cases[c][1], 0.01f));
+    }
+}
+
+/* Attitude filter: a copter tilted forward and accelerating reads pure thrust
+ * along its own z-axis - the accelerometer says "level" whatever the real
+ * tilt. The filter must hold the gyro's tilt through that, not decay toward
+ * level; decaying lagged pitch 10-15 deg behind the truth through every
+ * speed-up in SITL and false-alarmed the long-horizon KF check. */
+static void test_attitude_filter_holds_tilt_while_accelerating(void) {
+    const float g = 9.80665f, pitch = -0.3f;
+    core_attitude_filter_t filter;
+    core_attitude_filter_init(&filter, 1.0f);
+    uint64_t t = 1000;
+    core_imu_t still = make_tilted_imu(0.0f, pitch, t);
+    core_attitude_filter_update(&filter, &still); /* initializes at the true tilt */
+    for (int i = 0; i < 150; i++) { /* 3s of acceleration, gyro still */
+        t += 20;
+        core_imu_t imu = make_imu(0.0f, 0.0f, -g / cosf(pitch), 0.0f, 0.0f, 0.0f, t);
+        core_attitude_filter_update(&filter, &imu);
+    }
+    assert(approx(filter.pitch, pitch, 0.02f));
+}
+
+/* Attitude filter: a biased gyro, learned on the pad, must stop pulling the
+ * tilt away from the accelerometer's in flight. Unlearned, a complementary
+ * filter settles tau*bias off the truth - in SITL ~1-2 deg of pitch in cruise,
+ * which the KFs integrate as g*sin(that) of phantom deceleration. */
+static void test_attitude_filter_learns_gyro_bias(void) {
+    const float bias = 0.005f; /* ~0.3 deg/s */
+    core_attitude_filter_t filter;
+    core_attitude_filter_init(&filter, 1.0f);
+    uint64_t t = 1000;
+    for (int i = 0; i < 1500; i++) { /* 30s disarmed on the pad */
+        core_imu_t imu = make_imu(0.0f, 0.0f, -9.80665f, 0.0f, bias, 0.0f, t);
+        core_attitude_filter_learn_gyro_bias(&filter, &imu);
+        core_attitude_filter_update(&filter, &imu);
+        t += 20;
+    }
+    assert(approx(filter.gyro_bias[1], bias, 0.0002f));
+
+    for (int i = 0; i < 500; i++) { /* 10s cruising nose-down, same bias */
+        core_imu_t imu = make_tilted_imu(0.0f, -0.5f, t);
+        imu.ygyro_rps = bias;
+        core_attitude_filter_update(&filter, &imu);
+        t += 20;
+    }
+    assert(approx(filter.pitch, -0.5f, 0.002f));
+}
+
+/* KF set: a vehicle cruising at constant velocity, tilted nose-down and
+ * banked, has zero true acceleration, so the dead-reckoned position must
+ * keep advancing at the anchor velocity and not pick up phantom
+ * acceleration from the tilt. This is the unspoofed-cruise false positive
+ * the inverted-tilt bug produced. */
+static void test_kf_set_tilted_cruise_no_phantom_accel(void) {
+    core_attitude_filter_t att;
+    core_attitude_filter_init(&att, 1.0f);
+    core_nav_kf_set_t set;
+    core_nav_kf_set_init(&set, 8000, 5);
+
+    const float roll = 0.1f, pitch = -0.3f; /* ~17 deg nose down, as at ~10 m/s */
+    uint64_t t = 1000;
+    for (int i = 0; i < 250; i++) { /* let the attitude converge first */
+        core_imu_t imu = make_tilted_imu(roll, pitch, t);
+        core_attitude_filter_update(&att, &imu);
+        t += 20;
+    }
+
+    core_gps_raw_t gps;
+    memset(&gps, 0, sizeof(gps));
+    gps.lat = 473977420;
+    gps.lon = -1223974560;
+    gps.vel_cms = 1000; /* 10 m/s */
+    gps.cog_cdeg = 0;   /* north */
+    gps.last_update_ms = t;
+    gps.valid = true;
+    core_nav_kf_set_reanchor(&set, &gps);
+
+    core_baro_t baro;
+    memset(&baro, 0, sizeof(baro));
+    for (int i = 0; i < 400; i++) { /* 8s */
+        core_imu_t imu = make_tilted_imu(roll, pitch, t);
+        core_attitude_filter_update(&att, &imu);
+        core_nav_kf_set_update(&set, &imu, &att, &baro, 0.5f, 0.25f);
+        t += 20;
+    }
+
+    assert(approx(set.north.v, 10.0f, 0.2f));
+    assert(approx(set.east.v, 0.0f, 0.2f));
+    assert(approx(set.north.p, 80.0f, 1.0f)); /* 10 m/s * 8s */
+    assert(approx(set.east.p, 0.0f, 1.0f));
+}
+
 /* KF set: with zero IMU input and no re-anchor, position should stay at the
  * anchor (i.e. filtered lat/lon/alt should equal the GPS fix it was anchored
  * to). */
@@ -116,6 +233,10 @@ int main(void) {
     test_axis_constant_acceleration();
     test_axis_measurement_update_pulls_toward_z();
     test_attitude_filter_level_stationary();
+    test_attitude_filter_tilt_sign();
+    test_attitude_filter_holds_tilt_while_accelerating();
+    test_attitude_filter_learns_gyro_bias();
+    test_kf_set_tilted_cruise_no_phantom_accel();
     test_kf_set_reanchor_and_hold();
     return 0;
 }

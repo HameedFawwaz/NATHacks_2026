@@ -10,9 +10,10 @@
  * (core_imu_t) - deliberately independent of the flight controller's own
  * ATTITUDE estimate, so it carries no GPS dependency of any kind.
  *
- * Simplification (documented, not a bug): treats body angular rate as
- * directly equal to Euler angle rate (no tan(pitch) conversion), valid for
- * the attitude range multirotors normally fly in. Yaw has no accel/mag
+ * Gyro rates are converted to Euler rates properly (ZYX kinematics), and the
+ * accelerometer's tilt correction only applies while the measured specific
+ * force is close to 1 g, i.e. while the vehicle isn't accelerating - see
+ * attitude_filter.c. Yaw has no accel/mag
  * correction available and free-integrates from gyro alone, so it will
  * drift slowly over time.
  *
@@ -26,6 +27,8 @@
 typedef struct {
     float roll, pitch, yaw; /* rad */
     float tau_s;            /* complementary filter time constant */
+    float gyro_bias[3];     /* rad/s, subtracted from every gyro sample; see core_attitude_filter_learn_gyro_bias */
+    uint64_t bias_last_ms;
     uint64_t last_update_ms;
     bool initialized;
 } core_attitude_filter_t;
@@ -34,6 +37,14 @@ void core_attitude_filter_init(core_attitude_filter_t *filter, float tau_s);
 
 /* No-op if imu->valid is false. */
 void core_attitude_filter_update(core_attitude_filter_t *filter, const core_imu_t *imu);
+
+/* Learns the gyro's bias from one IMU sample, assuming the vehicle is NOT
+ * rotating - call it only while that's known, e.g. sitting disarmed on the
+ * pad. A slow low-pass of the raw rates, clamped, so a vehicle carried around
+ * by hand while disarmed can't teach it anything wild. Without it a few
+ * tenths of a deg/s of bias (SITL simulates this as SIM_DRIFT_SPEED) holds the
+ * tilt estimate tau*bias away from the truth, and walks yaw off freely. */
+void core_attitude_filter_learn_gyro_bias(core_attitude_filter_t *filter, const core_imu_t *imu);
 
 /* Overrides yaw directly - intended to be called ONCE, as soon as a real
  * heading reference (e.g. GPS course-over-ground) becomes available, to

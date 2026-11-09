@@ -54,16 +54,21 @@ flight controller.
 
 **Known limitations**:
 
-- The long-horizon KF divergence check was calibrated against real flight
-  (`core/sitl/fly_square.py`, not just synthetic/stationary data) and can still
-  occasionally false-positive for a few seconds during normal maneuvering. Root cause:
-  this filter has no accel/gyro bias calibration, and in testing only received ~4Hz IMU
-  samples (SITL/MAVProxy didn't honor our `MAV_CMD_SET_MESSAGE_INTERVAL` request to speed
-  `SCALED_IMU2` up to 50Hz — see `core_mavlink_request_message_interval` in
-  `core/include/core/mavlink/mavlink_send.h`), so integration error compounds faster than a
-  properly-sampled filter would see. Follow-up: figure out why the rate request isn't
-  taking effect (possibly a MAVProxy pass-through quirk, worth checking against a direct
-  SITL connection without MAVProxy in between), or add basic bias estimation.
+- **The KFs rotate IMU data by the flight controller's ATTITUDE**, not core's own
+  attitude filter (`kf_attitude_from_fc`, on by default; core's filter is the fallback
+  whenever ATTITUDE is stale). Core's filter has no magnetometer and no in-flight gyro
+  bias tracking, and drifted a few degrees in tilt and heading over a minute of
+  aggressive flight; at 30 deg of tilt each degree is ~0.17 m/s^2 of phantom
+  acceleration, which on its own false-alarmed the long-horizon check on an unspoofed
+  square route (`sitl/run_gnss_e2e_scenarios.py cruise`). The trade: attitude is the
+  part of the flight controller's state a GNSS spoof barely moves (tilt and heading are
+  held by gyro, accel and compass), but it isn't fully GPS-independent, since EKF3 does
+  use GPS velocity to correct tilt slowly. Position and velocity are still compared only
+  against core's own dead reckoning.
+- Earlier false positives during maneuvering, once blamed on a ~4 Hz IMU, were core's
+  attitude filter reading tilt with the wrong sign, then lagging through every
+  acceleration (see `attitude_filter.c`). Wired straight to SITL's SERIAL1 (no MAVProxy
+  in between), `SCALED_IMU2` arrives at the requested 50 Hz.
 - **Minimum detectable sustained-drift rate**: re-anchoring to GPS is now gated on the
   filter's own divergence score staying at ceiling (see `gnss_anomaly.c`), so a slow spoof
   no longer gets silently absorbed every re-anchor interval the way it used to — but the

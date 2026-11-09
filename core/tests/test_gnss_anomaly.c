@@ -17,6 +17,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "core/common/time.h"
 #include "core/nav/gnss_anomaly.h"
 #include "core/nav/nav_config.h"
 
@@ -571,6 +572,74 @@ static void test_imu_loss_not_treated_as_attack(void) {
     assert(!(flags_seen & CORE_NAV_FLAG_SLOW_DRIFT));
 }
 
+/* --- Yaw seeding: from the FC's heading while disarmed only, else from COG
+ * only once moving. A wrong yaw misdirects every horizontal acceleration the
+ * KFs integrate, so a seed from noise is a false alarm waiting for the first
+ * forward flight. --- */
+static void test_yaw_seed_from_fc_heading_until_armed(void) {
+    core_nav_config_t cfg;
+    core_nav_config_default(&cfg);
+    core_nav_detector_t detector;
+    core_nav_detector_init(&detector, &cfg);
+
+    sim_vehicle_t v;
+    sim_vehicle_init(&v, 47.397742, -122.397456, 10.0, 0.0f, 0.0f);
+
+    core_telemetry_t t;
+    for (int i = 0; i < 50; i++) { /* on the pad, disarmed, COG reading noise */
+        t = make_telemetry(&v);
+        t.gps_raw.cog_cdeg = (uint16_t)((i * 7919) % 36000);
+        t.heartbeat.valid = true;
+        t.attitude.yaw = 1.0f;
+        t.attitude.last_update_ms = core_now_ms();
+        t.attitude.valid = true;
+        core_nav_detector_update(&detector, &t, &cfg);
+        sim_vehicle_step(&v, 20);
+    }
+    assert(detector.yaw_seeded);
+    assert(fabsf(detector.attitude.yaw - 1.0f) < 1e-4f);
+
+    /* Armed: the FC's heading no longer counts, so a spoof-steered EKF can't
+     * drag core's yaw along with it. */
+    for (int i = 0; i < 50; i++) {
+        t = make_telemetry(&v);
+        t.heartbeat.valid = true;
+        t.heartbeat.base_mode = 128;
+        t.attitude.yaw = 2.0f;
+        t.attitude.last_update_ms = core_now_ms();
+        t.attitude.valid = true;
+        core_nav_detector_update(&detector, &t, &cfg);
+        sim_vehicle_step(&v, 20);
+    }
+    assert(fabsf(detector.attitude.yaw - 1.0f) < 1e-4f);
+}
+
+static void test_yaw_not_seeded_from_stationary_cog(void) {
+    core_nav_config_t cfg;
+    core_nav_config_default(&cfg);
+    core_nav_detector_t detector;
+    core_nav_detector_init(&detector, &cfg);
+
+    sim_vehicle_t v;
+    sim_vehicle_init(&v, 47.397742, -122.397456, 10.0, 0.0f, 0.0f);
+    for (int i = 0; i < 50; i++) { /* no ATTITUDE stream, stationary */
+        core_telemetry_t t = make_telemetry(&v);
+        t.gps_raw.cog_cdeg = 31500;
+        core_nav_detector_update(&detector, &t, &cfg);
+        sim_vehicle_step(&v, 20);
+    }
+    assert(!detector.yaw_seeded);
+
+    v.ve_mps = 5.0f; /* moving east: COG now means something */
+    for (int i = 0; i < 50; i++) {
+        core_telemetry_t t = make_telemetry(&v);
+        core_nav_detector_update(&detector, &t, &cfg);
+        sim_vehicle_step(&v, 20);
+    }
+    assert(detector.yaw_seeded);
+    assert(fabsf(detector.attitude.yaw - (float)M_PI / 2.0f) < 0.01f);
+}
+
 int main(void) {
     test_normal_flight();
     test_instant_jump();
@@ -583,5 +652,7 @@ int main(void) {
     test_eph_unknown_not_penalized();
     test_single_duplicate_timestamp_not_flagged();
     test_imu_loss_not_treated_as_attack();
+    test_yaw_seed_from_fc_heading_until_armed();
+    test_yaw_not_seeded_from_stationary_cog();
     return 0;
 }
