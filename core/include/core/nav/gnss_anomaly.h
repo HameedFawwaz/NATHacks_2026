@@ -75,6 +75,18 @@ typedef struct {
 
 void core_nav_detector_init(core_nav_detector_t *detector, const core_nav_config_t *cfg);
 
+/* Explicit operator-confirmed ground rebaseline, NOT an automatic recovery.
+ * The caller must obtain confirmation that the GPS location has been verified
+ * independently and that spoofing has stopped. Checks fresh disarmed heartbeat,
+ * stationary good GPS and IMU, and non-DR detector checks. Returns false and
+ * changes nothing if any gate fails. It does not set trust or clear scores;
+ * normal scoring and slew recovery require subsequent GPS samples. now_ms is
+ * the same monotonic clock as telemetry timestamps. */
+bool core_nav_detector_operator_rebaseline(core_nav_detector_t *detector,
+                                            const core_telemetry_t *telemetry,
+                                            const core_nav_config_t *cfg,
+                                            uint64_t now_ms, bool operator_confirmed);
+
 /* Call on every telemetry poll tick (not just when GPS updates - the IMU/baro
  * driven filters, GPS/IMU staleness tracking, and the published trust slew
  * all need to run in between GPS fixes too). Internally only re-evaluates

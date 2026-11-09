@@ -62,6 +62,38 @@ void core_nav_detector_init(core_nav_detector_t *detector, const core_nav_config
     detector->nav_trust = 1.0f;
 }
 
+static bool rebaseline_fresh(uint64_t now, uint64_t stamp, uint32_t max_age) {
+    return stamp != 0 && stamp <= now && now - stamp < max_age;
+}
+
+bool core_nav_detector_operator_rebaseline(core_nav_detector_t *detector, const core_telemetry_t *telemetry,
+                                            const core_nav_config_t *cfg, uint64_t now_ms,
+                                            bool operator_confirmed) {
+    if (!detector || !telemetry || !cfg || !operator_confirmed) return false;
+    const core_gps_raw_t *gps = &telemetry->gps_raw;
+    const core_imu_t *imu = &telemetry->imu;
+    const core_nav_result_t *scores = &detector->cached_scores;
+    /* These gates cannot authenticate GPS. Confirmation must follow an
+     * independent physical position check, not merely an 'all clear' signal. */
+    if (!telemetry->heartbeat.valid || (telemetry->heartbeat.base_mode & MAV_MODE_FLAG_ARMED) ||
+        !rebaseline_fresh(now_ms, telemetry->heartbeat.last_update_ms, 2000) ||
+        !gps->valid || gps->fix_type < 3 || !rebaseline_fresh(now_ms, gps->last_update_ms, cfg->gps_stale_warn_ms) ||
+        (gps->lat == 0 && gps->lon == 0) || gps->lat < -850000000 || gps->lat > 850000000 ||
+        gps->lon < -1800000000 || gps->lon > 1800000000 || gps->vel_cms == UINT16_MAX || gps->vel_cms > 50 ||
+        gps->eph == UINT16_MAX || gps->eph > cfg->eph_nominal_max ||
+        !imu->valid || !rebaseline_fresh(now_ms, imu->last_update_ms, cfg->imu_stale_ms) ||
+        !isfinite(imu->xacc_mps2) || !isfinite(imu->yacc_mps2) || !isfinite(imu->zacc_mps2) ||
+        !isfinite(imu->xgyro_rps) || !isfinite(imu->ygyro_rps) || !isfinite(imu->zgyro_rps) ||
+        !detector->have_cached_scores || !detector->have_prev_gps ||
+        detector->prev_gps_raw.last_update_ms != gps->last_update_ms ||
+        scores->score_jump < 1.0f || scores->score_time < 1.0f || scores->score_eph < 1.0f ||
+        scores->score_ekf < 1.0f || !isfinite(scores->score_jump) || !isfinite(scores->score_time) ||
+        !isfinite(scores->score_eph) || !isfinite(scores->score_ekf)) return false;
+    core_nav_kf_set_reanchor(&detector->kf_short, gps);
+    core_nav_kf_set_reanchor(&detector->kf_long, gps);
+    return true;
+}
+
 core_nav_result_t core_nav_detector_update(core_nav_detector_t *detector,
                                             const core_telemetry_t *telemetry,
                                             const core_nav_config_t *cfg) {

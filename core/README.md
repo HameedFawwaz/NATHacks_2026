@@ -39,6 +39,27 @@ layer), and `crypto/` (link signing) are also implemented — see below.
 
 ## GNSS spoofing detection (`nav/`)
 
+### Recovery after prolonged divergence
+
+Removing a simulated fault does not establish GPS trust. The short and long
+dead-reckoning filters re-anchor only when their own divergence checks pass.
+After a long outage or attack, IMU integration error can prevent that even
+after honest GPS returns; the position estimate then expires and NAV can remain
+critical. FC global position may itself use the same GPS, so agreement with it
+is not evidence sufficient for automatic re-acquisition.
+
+`core_nav_detector_operator_rebaseline` is an **unwired primitive**, not an
+automatic recovery or an All clear action. A future operator interface must
+require explicit confirmation only after independently verifying the actual
+ground position and that the interference has ended. It checks a recent
+disarmed FC heartbeat, fresh stationary 3D GPS with known acceptable HDOP,
+fresh finite IMU, and passing non-DR checks. These gates do not authenticate
+GPS and cannot rule out a stationary spoof. It reanchors the filters but does
+not clear scores or set trust: a later fix must pass normal checks and trust
+recovers at its configured slew rate. Never invoke it just because a timer
+elapsed, an operator enabled auto-recovery, or a simulator fault was removed.
+No in-flight rebaseline is supported by this primitive.
+
 Maintains dead-reckoned position estimates (Kalman filters propagating accelerometer,
 gyro and barometer measurements between GPS anchors) and cross-checks incoming GPS
 against them. The default IMU rotation uses the flight controller's attitude, so the

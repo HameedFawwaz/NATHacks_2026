@@ -391,6 +391,47 @@ static void test_slow_spoof_not_followed(void) {
     CHECK(widest_gap > 15.0);
 }
 
+static void test_operator_rebaseline(void) {
+    rig_t r;
+    rig_init(&r, 40, 25, 0, 0);
+    for (int i = 0; i < 500; ++i) rig_step(&r, 0);
+    for (int i = 0; i < 4000; ++i) {
+        rig_step(&r, (i + 1) * 0.03);
+        if (i > 1500) CHECK(r.detector.nav_trust < 0.1f);
+    }
+    CHECK(r.detector.nav_trust < 0.1f);
+    uint64_t anchor = r.detector.kf_long.anchor_time_ms;
+    /* Long after the attack starts, honest fixes alone may still not recover
+     * if the unanchored IMU prediction has drifted. Force that condition. */
+    r.detector.kf_short.north.p = r.detector.kf_long.north.p = 1000.0f;
+    for (int i = 0; i < 500; ++i) rig_step(&r, 0);
+    CHECK(r.detector.nav_trust < 0.1f);
+    core_telemetry_t t = make_telemetry(&r.v, true, 0);
+    t.heartbeat.valid = true;
+    t.heartbeat.last_update_ms = r.v.t_ms;
+    core_nav_detector_update(&r.detector, &t, &r.nav_cfg);
+    float trust = r.detector.nav_trust;
+    CHECK(!core_nav_detector_operator_rebaseline(&r.detector, &t, &r.nav_cfg, r.v.t_ms, false));
+    t.heartbeat.base_mode = 128;
+    CHECK(!core_nav_detector_operator_rebaseline(&r.detector, &t, &r.nav_cfg, r.v.t_ms, true));
+    t.heartbeat.base_mode = 0;
+    t.imu.xacc_mps2 = NAN;
+    CHECK(!core_nav_detector_operator_rebaseline(&r.detector, &t, &r.nav_cfg, r.v.t_ms, true));
+    t.imu.xacc_mps2 = 0;
+    t.gps_raw.vel_cms = UINT16_MAX;
+    CHECK(!core_nav_detector_operator_rebaseline(&r.detector, &t, &r.nav_cfg, r.v.t_ms, true));
+    t.gps_raw.vel_cms = 0;
+    t.gps_raw.eph = UINT16_MAX;
+    CHECK(!core_nav_detector_operator_rebaseline(&r.detector, &t, &r.nav_cfg, r.v.t_ms, true));
+    t.gps_raw.eph = 120;
+    CHECK(!core_nav_detector_operator_rebaseline(&r.detector, &t, &r.nav_cfg, r.v.t_ms + 3000, true));
+    CHECK(r.detector.kf_long.anchor_time_ms == anchor);
+    CHECK(core_nav_detector_operator_rebaseline(&r.detector, &t, &r.nav_cfg, r.v.t_ms, true));
+    CHECK(r.detector.nav_trust == trust); /* never force trust */
+    for (int i = 0; i < 3000; ++i) rig_step(&r, 0);
+    CHECK(r.detector.nav_trust > 0.99f);
+}
+
 int main(void) {
     test_projection_matches_dashboard_inverse();
     test_nothing_before_ready();
@@ -401,6 +442,7 @@ int main(void) {
     test_dead_reckoning_age_limit();
     test_invalid_values_withheld();
     test_slow_spoof_not_followed();
+    test_operator_rebaseline();
     printf("test_nav_estimate: all passed\n");
     return 0;
 }
