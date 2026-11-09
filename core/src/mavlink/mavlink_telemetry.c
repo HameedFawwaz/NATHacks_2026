@@ -132,6 +132,22 @@ void core_mavlink_internal_decode_into_telemetry(core_mavlink_conn_t *conn, cons
         conn->telemetry.command_ack.valid = true;
         break;
     }
+    case MAVLINK_MSG_ID_HOME_POSITION: {
+        /* Home anchors the published position estimate, so a GCS or other
+         * component on the link must not be able to move it. */
+        if (conn->vehicle_sysid == 0 || msg->sysid != conn->vehicle_sysid ||
+            msg->compid != conn->vehicle_compid) {
+            break;
+        }
+        mavlink_home_position_t home;
+        mavlink_msg_home_position_decode(msg, &home);
+        conn->telemetry.home_position.lat = home.latitude;
+        conn->telemetry.home_position.lon = home.longitude;
+        conn->telemetry.home_position.alt_mm = home.altitude;
+        conn->telemetry.home_position.last_update_ms = now;
+        conn->telemetry.home_position.valid = true;
+        break;
+    }
     default:
         /* Not one of the messages we track yet - ignored, extend here later. */
         break;

@@ -56,6 +56,72 @@ source-set changes and, if failover fails, landing commands. It is not a passive
 monitor; use `tools/mavlink_monitor` for read-only observation. Configure and validate
 the fallback source set in SITL before connecting this loop to hardware.
 
+## Published position estimate (`EST_N` / `EST_E`)
+
+`core_main` publishes core's dead-reckoned horizontal position with the trust scores
+(every 200 ms) as two `NAMED_VALUE_FLOAT`s from component 191:
+
+| Name | Value |
+|---|---|
+| `EST_N` | metres north of the autopilot's `HOME_POSITION` |
+| `EST_E` | metres east of the autopilot's `HOME_POSITION` |
+
+The pair is always sent together, `EST_N` first. A float can't hold latitude and
+longitude precisely, but it can hold local metres. To get back to latitude and
+longitude, use the equirectangular projection on a 6,371,000 m sphere about home:
+`lat = home_lat + deg(N / R)`, `lon = home_lon + deg(E / (R cos(home_lat)))`. That is
+exactly the dashboard's `model.FromLocal`, and core projects with its inverse
+(`core_nav_local_from_geo`).
+
+**Validity is signalled by absence.** Nothing is sent unless every one of these holds,
+so a consumer must treat a pair it hasn't received recently (the dashboard uses 3 s)
+as no estimate, never reuse an old one, and never assume zero:
+
+- the autopilot's `HOME_POSITION` is known (core requests it at 1 Hz; ArduCopter
+  moves home when it arms, and core re-reads it every tick);
+- the filter has been anchored to a trusted GPS fix;
+- an IMU sample arrived within the last 500 ms;
+- if the IMU stream went stale, the filter has re-anchored since it came back (the
+  first sample back is integrated across the whole gap);
+- an attitude source is available (fresh FC `ATTITUDE`, or core's filter with yaw
+  seeded);
+- no more than 15 s of pure dead reckoning since the last anchor;
+- both values are finite and within ±100 km.
+
+`core_main` prints the reason once a second (`[nav_est] no_home (not published)`,
+`imu_stale`, `await_reanchor`, `dr_expired` and so on).
+
+**What it is.** The source is the long-horizon KF set. Its origin is its last trusted
+GPS fix, not home: the published value is that anchor projected relative to home,
+plus the KF's metre offset from it. In normal flight the anchor is refreshed every
+8 s. While the long-horizon drift check sees GPS diverging, re-anchoring stops, so the
+estimate keeps dead-reckoning from the last fix it trusted rather than following the
+spoof. After 15 s of that it is withdrawn, because without IMU bias tracking the error
+grows quickly (see below). The short-horizon set re-anchors every 1.5 s and absorbs a
+slow spoof, so it isn't used.
+
+**What it is not.** It is not GPS-independent. Every anchor is a GPS fix (a spoof
+slower than the drift check's ~1.25 m/s limit is absorbed at each re-anchor), and by
+default the IMU is rotated by the flight controller's `ATTITUDE`, which EKF3 slowly
+corrects with GPS velocity. Altitude is not published.
+
+The SITL harness requests `SIM_STATE` at 20 Hz and scores received estimate pairs
+against its simulator physics position and velocity, never the GPS-influenced EKF.
+It carries the latest simulator position forward using simulator velocity only when
+its arrival age is at most 200 ms, reports the median and maximum arrival age, and
+does not score older samples. Arrival age does not measure source-to-receiver
+latency; constant-velocity extrapolation and separate telemetry links also introduce
+uncertainty, particularly during maneuvers. Earlier reported position-error numbers
+used EKF velocity and should not be treated as independent truth.
+
+The dashboard observations are the estimate selected and delivered by the live
+bridge's telemetry API, not evidence of browser rendering. In an earlier `imu_gap`
+scenario (SITL frozen for 2 s mid-hover), core logged
+`imu_stale` then `await_reanchor` and published nothing new until its filter
+re-anchored, 1.25 s after the freeze ended. The two pairs sent in the first 0.5 s of
+the freeze arrived in a burst when SITL resumed. `tests/test_nav_estimate.c` covers
+the same gates synthetically.
+
 ## End-to-end GNSS scenarios
 
 From the repository root, using a Python environment with `pymavlink` and a built
@@ -83,7 +149,10 @@ Use `--instance`, `--core-port`, `--dashboard-port`, and `--dashboard-http-port`
 avoid an existing run. The script refuses occupied ports and only stops its own
 children. An existing dashboard may be used with `--dashboard-url` if it listens on
 `--dashboard-port`. The test reads its telemetry API; it does not validate browser
-rendering. Until #16 publishes `EST_N`/`EST_E`, drift remains the labelled EKF fallback.
+rendering. Each result also scores core's `EST_N`/`EST_E` against simulator truth
+(`core_estimate`, plus `takeoff_estimate` for the climb), and records the dashboard's
+estimate source and drift line. The `imu_gap` scenario freezes SITL for 2 s to check
+the estimate is withheld across a stream outage (see above).
 
 ### Review results (2026-11-09)
 
@@ -103,8 +172,8 @@ Detection times are polled telemetry observations, not exact detector transition
 times; an autonomy STATUSTEXT can arrive before the next periodic trust sample.
 Both control runs had no false alarms. The live dashboard API received trust dropping
 to zero and `GNSS_FAILOVER` for all three attacks, and trust 1.0 throughout both
-controls. Its estimate source was `ekf` throughout, not core's still-unpublished
-estimate. On the controls no autonomy transition was published, so the behavior field
+controls. Its estimate source was `ekf` throughout: core did not publish an estimate
+until #16 (see "Published position estimate" for results since). On the controls no autonomy transition was published, so the behavior field
 remained unreported rather than inventing a NOMINAL message.
 
 A separate fresh SITL run verified that the dashboard refuses start before a
@@ -129,6 +198,11 @@ or browser-rendering validation is claimed.
   held by gyro, accel and compass), but it isn't fully GPS-independent, since EKF3 does
   use GPS velocity to correct tilt slowly. Position and velocity are still compared only
   against core's own dead reckoning.
+- **GPS staleness uses real time as well as the IMU-paced clock.** The detector's
+  clock follows IMU timestamps, so if the IMU and GPS streams both stopped while the
+  link stayed up, GPS age used to freeze and `nav_trust` stayed healthy. A stale IMU
+  alone still only sets `IMU_LOST` and neutralises the KF checks; it does not lower
+  `nav_trust` by itself.
 - Earlier false positives during maneuvering, once blamed on a ~4 Hz IMU, were core's
   attitude filter reading tilt with the wrong sign, then lagging through every
   acceleration (see `attitude_filter.c`). Wired straight to SITL's SERIAL1 (no MAVProxy
