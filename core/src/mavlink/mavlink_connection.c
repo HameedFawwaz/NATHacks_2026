@@ -217,6 +217,13 @@ int core_mavlink_conn_poll(core_mavlink_conn_t *conn) {
                 conn->last_rx_ms = now;
                 if (conn->state == CORE_MAVLINK_CONN_CONNECTING) {
                     conn->state = CORE_MAVLINK_CONN_CONNECTED;
+                    /* A fresh window for the next heartbeat. Left at the one
+                     * from before an outage, the timeout below would drop
+                     * this connection again in the same poll unless the very
+                     * first frame back happened to be a heartbeat. */
+                    if (conn->last_heartbeat_rx_ms != 0) {
+                        conn->last_heartbeat_rx_ms = now;
+                    }
                     CORE_LOG_INFO("mavlink connection established");
                 }
                 core_mavlink_internal_decode_into_telemetry(conn, &msg);

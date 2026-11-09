@@ -83,6 +83,32 @@ typedef struct {
     bool valid;
 } core_radio_status_t;
 
+/*
+ * Heartbeats from the operator's ground station, the one with
+ * cfg.operator_gcs_sysid. The autopilot forwards them to every other link, so
+ * the companion computer hears them even though it isn't on the operator's
+ * link. count only increases, so a reader can tell how many arrived since it
+ * last looked.
+ */
+typedef struct {
+    uint8_t sysid;
+    uint32_t count;
+    uint64_t last_update_ms;
+    bool valid;
+} core_gcs_heartbeat_t;
+
+/*
+ * RC_CHANNELS.rssi from the autopilot: receiver or telemetry-radio signal
+ * strength, depending on its RSSI_TYPE. ArduPilot forwards no RADIO_STATUS to
+ * other links, so with RSSI_TYPE=5 this is the only view a companion computer
+ * gets of the telemetry radio. 0..254, 255 = not configured.
+ */
+typedef struct {
+    uint8_t rssi;
+    uint64_t last_update_ms;
+    bool valid;
+} core_rc_status_t;
+
 /* The most recent COMMAND_ACK; a newer ack for any command overwrites it. */
 typedef struct {
     uint16_t command;  /* MAV_CMD */
@@ -114,6 +140,8 @@ typedef struct {
     core_baro_t baro;
     core_radio_status_t radio_status;
     core_command_ack_t command_ack;
+    core_gcs_heartbeat_t gcs_heartbeat;
+    core_rc_status_t rc_status;
 
     core_link_security_t link_security;
 } core_telemetry_t;

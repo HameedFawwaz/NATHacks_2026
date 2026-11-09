@@ -1,6 +1,7 @@
 #ifndef CORE_COMMON_TRUST_SCORE_H
 #define CORE_COMMON_TRUST_SCORE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Which module last wrote a component of the trust score. */
@@ -42,6 +43,12 @@ typedef struct {
 
 /* Sets every component to 1.0 (fully trusted) and stamps last_update_ms = now. */
 void core_trust_score_init(core_trust_score_t *score);
+
+/* A nav, link or hardware component older than this is no longer current. */
+#define CORE_TRUST_LIVE_MS 3000
+
+/* Whether a component updated at update_ms (0 = never) is still current at now_ms. */
+bool core_trust_component_live(uint64_t update_ms, uint64_t now_ms);
 
 /* Clamps value to [0, 1] before writing it into the given component. */
 void core_trust_score_set_component(core_trust_score_t *score, core_trust_source_t source, float value);
