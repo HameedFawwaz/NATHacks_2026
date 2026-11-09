@@ -95,7 +95,11 @@ def run(args):
                              "-mavlink", "127.0.0.1:14552"])
         launch("core", [str(ROOT / "core/build/core_main"), "14551"])
         launch("arducopter", [str(copter), "--model", "+", "--home", "-35.363262,149.165237,584,353",
-                              "--defaults", f"{ap / 'Tools/autotest/default_params/copter.parm'},{ROOT / 'core/sitl/dashboard.parm'}",
+                              # autonomy_failover.parm: core_main runs autonomy, whose
+                              # GNSS failover needs the non-GPS EKF source set.
+                              "--defaults", f"{ap / 'Tools/autotest/default_params/copter.parm'},"
+                                            f"{ROOT / 'core/sitl/autonomy_failover.parm'},"
+                                            f"{ROOT / 'core/sitl/dashboard.parm'}",
                               "--serial0=tcp:5760",
                               "--serial1=udpclient:127.0.0.1:14551",
                               "--serial2=udpclient:127.0.0.1:14552",

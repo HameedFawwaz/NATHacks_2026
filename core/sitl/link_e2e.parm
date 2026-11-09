@@ -1,0 +1,9 @@
+# For run_link_e2e_scenarios.py, on top of autonomy_failover.parm and link_jam.parm.
+# SITL only; not for hardware.
+
+# ArduPilot's own GCS failsafe stays off, so any hold or return in the scenario
+# is core's autonomy acting on the measured link, not the autopilot's fallback.
+FS_GCS_ENABLE 0
+
+# The dashboard bridge's link (SERIAL3 is the simulated GPS).
+SERIAL4_PROTOCOL 2

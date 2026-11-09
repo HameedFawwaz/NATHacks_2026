@@ -2,10 +2,14 @@
 """Jams and drops the operator link in ArduCopter SITL and checks core_main's verdict.
 
 Usage: run_link_scenario.py --ardupilot <repo> --core-main <build/core_main>
+           [--instance N --core-port P --proxy-fc-port P --proxy-gcs-port P]
 
     operator GCS (this script, sysid 255) -- link_jam_proxy -- SITL serial2
                                        core_main (udp 14551) -- SITL serial1
-                         observer (this script, sysid 200) -- SITL tcp 5760
+                         observer (this script, sysid 200) -- SITL tcp 5760+10N
+
+The defaults are SITL instance 0's ports; pick another instance and ports to
+run beside a simulator that is already using them.
 
 The observer reads what core_main publishes, as any ground station would:
 TRUST_LNK and LNK_STATE as NAMED_VALUE_FLOAT, and "LINK ..." STATUSTEXTs.
@@ -16,6 +20,7 @@ include the radio's reporting lag, so they're slower than the unit tests.
 """
 import argparse
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -41,8 +46,8 @@ class Failed(Exception):
 class Observer:
     """Follows core_main's published link verdict through the autopilot."""
 
-    def __init__(self):
-        self.mav = mavutil.mavlink_connection("tcp:127.0.0.1:5760", retries=60, source_system=200)
+    def __init__(self, tcp_port=5760):
+        self.mav = mavutil.mavlink_connection(f"tcp:127.0.0.1:{tcp_port}", retries=60, source_system=200)
         self.mav.wait_heartbeat(timeout=60)
         self.lock = threading.Lock()
         self.state, self.trust, self.updated = "UNKNOWN", None, 0.0
@@ -82,8 +87,8 @@ class Observer:
 class Operator:
     """The operator's ground station: a heartbeat a second, through the proxy."""
 
-    def __init__(self):
-        self.mav = mavutil.mavlink_connection(f"udpout:127.0.0.1:{PROXY_GCS_PORT}", source_system=255)
+    def __init__(self, gcs_port=PROXY_GCS_PORT):
+        self.mav = mavutil.mavlink_connection(f"udpout:127.0.0.1:{gcs_port}", source_system=255)
         self.running = True
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -127,6 +132,21 @@ class Phase:
     def summary(self):
         trust = "n/a" if self.min_trust is None else f"{self.min_trust:.2f}"
         return f"{self.name:<16} states {' -> '.join(self.states):<40} min trust {trust}"
+
+
+def check_ports(ports):
+    """Refuses to start beside something already using these ports, rather than
+    driving another simulator."""
+    if len(set(ports)) != len(ports):
+        raise SystemExit("each component needs a distinct port")
+    for port, kind in ports:
+        with socket.socket(socket.AF_INET, kind) as sock:
+            if kind == socket.SOCK_STREAM:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                raise SystemExit(f"port {port} is in use; pick another --instance or port")
 
 
 def expect(condition, message):
@@ -214,24 +234,30 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ardupilot", type=Path, required=True)
     parser.add_argument("--core-main", type=Path, required=True)
+    parser.add_argument("--instance", type=int, default=0, help="SITL instance: its operator TCP port is 5760 + 10*N")
+    parser.add_argument("--core-port", type=int, default=CORE_PORT)
+    parser.add_argument("--proxy-fc-port", type=int, default=PROXY_FC_PORT)
+    parser.add_argument("--proxy-gcs-port", type=int, default=PROXY_GCS_PORT)
     args = parser.parse_args()
+    check_ports([(5760 + 10 * args.instance, socket.SOCK_STREAM), (args.core_port, socket.SOCK_DGRAM),
+                 (args.proxy_fc_port, socket.SOCK_DGRAM), (args.proxy_gcs_port, socket.SOCK_DGRAM)])
 
     work = Path(tempfile.mkdtemp(prefix="link_scenario_"))
     here = Path(__file__).parent
     procs = []
-    proxy = LinkJamProxy(PROXY_FC_PORT, PROXY_GCS_PORT, seed=2).start()
+    proxy = LinkJamProxy(args.proxy_fc_port, args.proxy_gcs_port, seed=2).start()
     results = []
     observer = operator = None
     try:
-        procs.append(subprocess.Popen([str(args.core_main), str(CORE_PORT)], stdout=open(work / "core_main.log", "w"),
-                                      stderr=subprocess.STDOUT))
+        procs.append(subprocess.Popen([str(args.core_main), str(args.core_port)], cwd=work,
+                                      stdout=open(work / "core_main.log", "w"), stderr=subprocess.STDOUT))
         procs.append(subprocess.Popen(
-            [str(args.ardupilot / "build/sitl/bin/arducopter"), "--model", "+", "--wipe", "--defaults",
-             f"{args.ardupilot / 'Tools/autotest/default_params/copter.parm'},{here / 'link_jam.parm'}",
-             f"--serial1=udpclient:127.0.0.1:{CORE_PORT}", f"--serial2=udpclient:127.0.0.1:{PROXY_FC_PORT}"],
+            [str(args.ardupilot / "build/sitl/bin/arducopter"), "--model", "+", "-I", str(args.instance), "--wipe",
+             "--defaults", f"{args.ardupilot / 'Tools/autotest/default_params/copter.parm'},{here / 'link_jam.parm'}",
+             f"--serial1=udpclient:127.0.0.1:{args.core_port}", f"--serial2=udpclient:127.0.0.1:{args.proxy_fc_port}"],
             cwd=work, stdout=open(work / "arducopter.log", "w"), stderr=subprocess.STDOUT))
-        observer = Observer()
-        operator = Operator()
+        observer = Observer(5760 + 10 * args.instance)
+        operator = Operator(args.proxy_gcs_port)
         results = run(proxy, observer)
         ok = True
     except Failed as e:
