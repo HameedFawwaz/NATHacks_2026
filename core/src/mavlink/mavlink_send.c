@@ -109,7 +109,7 @@ bool core_mavlink_publish_trust_score(core_mavlink_conn_t *conn, const core_trus
 }
 
 bool core_mavlink_publish_link_security(core_mavlink_conn_t *conn, const core_link_security_t *security) {
-    if (!conn || !security || !security->signing_enabled) {
+    if (!conn || !security || !conn->cfg.signing_enabled || !security->signing_enabled) {
         return false;
     }
     bool ok = true;

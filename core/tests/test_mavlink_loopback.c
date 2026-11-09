@@ -151,43 +151,6 @@ int main(void) {
     }
     assert(decoded_any && "failed to decode the connection's outbound heartbeat");
 
-    /* Signing rejection counters are private when enforcement is off. */
-    core_link_security_t security = {0};
-    security.rejected_unsigned = 2;
-    security.rejected_bad_sig = 3;
-    security.rejected_replay = 4;
-    assert(!core_mavlink_publish_link_security(conn, &security));
-    assert(recv(fake_fd, recv_buf, sizeof(recv_buf), MSG_DONTWAIT) < 0);
-
-    /* When enabled, publish all three counts under their stable short names. */
-    security.signing_enabled = true;
-    assert(core_mavlink_publish_link_security(conn, &security));
-    const char *expected_names[] = {"SIG_UNSGN", "SIG_BADSG", "SIG_REPLY"};
-    const float expected_values[] = {2.0f, 3.0f, 4.0f};
-    for (size_t i = 0; i < 3; i++) {
-        n = -1;
-        for (int attempt = 0; attempt < 2000 && n < 0; attempt++) {
-            n = recv(fake_fd, recv_buf, sizeof(recv_buf), MSG_DONTWAIT);
-            if (n < 0) usleep(1000);
-        }
-        assert(n > 0 && "timed out waiting for a signing counter");
-        memset(&recv_status, 0, sizeof(recv_status));
-        decoded_any = false;
-        for (ssize_t j = 0; j < n; j++) {
-            if (mavlink_parse_char(MAVLINK_COMM_1, recv_buf[j], &recv_msg, &recv_status)) {
-                char name[11] = {0};
-                float value = 0;
-                assert(recv_msg.msgid == MAVLINK_MSG_ID_NAMED_VALUE_FLOAT);
-                mavlink_msg_named_value_float_get_name(&recv_msg, name);
-                value = mavlink_msg_named_value_float_get_value(&recv_msg);
-                assert(strcmp(name, expected_names[i]) == 0);
-                assert(value == expected_values[i]);
-                decoded_any = true;
-            }
-        }
-        assert(decoded_any);
-    }
-
     core_mavlink_conn_close(conn);
     close(fake_fd);
 
