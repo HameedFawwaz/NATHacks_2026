@@ -49,7 +49,8 @@ open the dashboard from another machine, use `-addr 0.0.0.0:8080 -public-host <i
 |---|---|
 | Armed, mode | `HEARTBEAT` from the autopilot |
 | GPS position, satellites | `GPS_RAW_INT` |
-| Position estimate, altitude, speed, heading | `GLOBAL_POSITION_INT` (see below) |
+| Position estimate | core's `EST_N` and `EST_E` (metres north and east of home) with the autopilot's `HOME_POSITION`; falls back to `GLOBAL_POSITION_INT` |
+| Altitude, speed, heading | `GLOBAL_POSITION_INT` |
 | Battery, IMU | `SYS_STATUS`; IMU health is yes or no, so that score is 0% or 100% |
 | Motors | Nothing yet, so it reads "No data". ArduPilot always sets the `MOTOR_OUTPUTS` health bit, so `SYS_STATUS` can't show a failed motor; this needs ESC telemetry |
 | GNSS, link and hardware scores | `TRUST_NAV`, `TRUST_LNK`, `TRUST_HW` from core |
@@ -58,9 +59,12 @@ open the dashboard from another machine, use `-addr 0.0.0.0:8080 -public-host <i
 
 Things to know when reading the live view:
 
-- **The drift line compares GPS with the autopilot's EKF**, because core doesn't publish
-  its independent estimate yet. The EKF fuses GPS, so a slow spoof that it accepts won't
-  show as drift. Once core publishes its estimate, this should switch to it.
+- **The drift line compares GPS with core's own estimate** when core is publishing one
+  (`EST_N`/`EST_E`, #16). It doesn't use GPS, so a slow spoof the autopilot's EKF accepts
+  still shows as drift. The dashboard asks the autopilot for `HOME_POSITION` to place it.
+  If core isn't publishing, or the estimate goes stale, it falls back to the EKF, which
+  fuses GPS and so can follow a slow spoof. The drift label and map legend say which one
+  is in use ("Drift vs core" or "Drift vs EKF").
 - **The summary line is what autonomy has decided**, not proof the aircraft has done it.
   The mode in the top bar shows what the autopilot is actually doing.
 - **The behavior only updates on a transition.** A dashboard that connects after one has

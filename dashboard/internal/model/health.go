@@ -20,6 +20,12 @@ const (
 // drawing a drift line.
 const DriftThresholdM = 10.0
 
+// Where Snapshot.Estimated comes from.
+const (
+	EstimateCore = "core" // core's GPS-free estimate; independent of GPS
+	EstimateEKF  = "ekf"  // the autopilot's EKF, which fuses GPS
+)
+
 // Behaviors reported by the drone, named after core_autonomy_behavior_t.
 const (
 	BehaviorNominal      = "NOMINAL"
@@ -50,6 +56,7 @@ type Snapshot struct {
 	HasPosition   bool
 	Estimated     LatLon // independent position estimate
 	HasEstimate   bool
+	EstimateFrom  string // EstimateCore or EstimateEKF; empty when HasEstimate is false
 	AltM          float64
 	SpeedMS       float64
 	HeadingDeg    float64

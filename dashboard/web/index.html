@@ -58,7 +58,7 @@
       <div id="legend" class="legend">
         <div><i class="key key-plan"></i>Planned route</div>
         <div><i class="key key-reported"></i>GPS position</div>
-        <div><i class="key key-estimated"></i>Drone's own estimate</div>
+        <div><i class="key key-estimated"></i><span id="legend-estimate">Drone's own estimate</span></div>
         <div><i class="key key-drift"></i>Disagreement</div>
       </div>
 
@@ -71,7 +71,7 @@
         <div class="instrument"><label>Speed</label><output id="i-speed"></output></div>
         <div class="instrument"><label>Heading</label><output id="i-heading"></output></div>
         <div class="instrument"><label>Satellites</label><output id="i-sats"></output></div>
-        <div class="instrument"><label>GPS drift</label><output id="i-drift"></output></div>
+        <div class="instrument"><label id="l-drift">GPS drift</label><output id="i-drift"></output></div>
       </div>
         <div class="heading-gauge" id="heading-gauge" role="img" aria-label="Vehicle heading unavailable"><div class="gauge-ticks"></div><span class="gauge-n">N</span><span class="gauge-e">E</span><span class="gauge-s">S</span><span class="gauge-w">W</span><div class="gauge-arrow" id="gauge-arrow"></div><div class="gauge-center"><output id="gauge-value">--</output><span>HEADING</span></div></div>
       </div>

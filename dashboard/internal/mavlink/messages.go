@@ -25,6 +25,8 @@ const (
 	CmdNavRTL      = 20
 	CmdNavTakeoff  = 22
 
+	CmdRequestMessage = 512
+
 	FrameGlobal            = 0
 	FrameGlobalRelativeAlt = 3
 
@@ -101,6 +103,11 @@ func DecodeGlobalPositionInt(p []byte) GlobalPositionInt {
 	}
 }
 
+// DecodeHomePosition returns the autopilot's home position in degrees.
+func DecodeHomePosition(p []byte) (lat, lon float64) {
+	return float64(i32(p[0:])) / degE7, float64(i32(p[4:])) / degE7
+}
+
 func DecodeNamedValueFloat(p []byte) (name string, value float64) {
 	return cString(p[8:18]), float64(f32(p[4:]))
 }
@@ -139,6 +146,16 @@ func PackRequestDataStream(targetSys, targetComp, streamID uint8, rateHz uint16)
 	p := make([]byte, 6)
 	binary.LittleEndian.PutUint16(p, rateHz)
 	p[2], p[3], p[4], p[5] = targetSys, targetComp, streamID, 1
+	return p
+}
+
+// PackRequestMessage returns a COMMAND_LONG asking the vehicle to send one
+// message of type msgID once.
+func PackRequestMessage(targetSys, targetComp uint8, msgID uint32) []byte {
+	p := make([]byte, 33)
+	binary.LittleEndian.PutUint32(p, math.Float32bits(float32(msgID))) // param1
+	binary.LittleEndian.PutUint16(p[28:], CmdRequestMessage)
+	p[30], p[31] = targetSys, targetComp
 	return p
 }
 
