@@ -79,6 +79,7 @@ typedef struct {
     uint32_t nominal_window_ms; /* ...with loss no worse than loss_ok over this longer window */
     float recover_per_s;    /* how fast trust may rise */
     uint32_t state_hold_ms; /* a less severe state must hold this long to be entered */
+    uint32_t autopilot_late_ms;  /* autopilot heartbeat this late => hold the verdict: silence may be its fault */
     uint32_t autopilot_stale_ms; /* no autopilot heartbeat for this long => UNKNOWN */
 } core_link_config_t;
 
@@ -111,6 +112,7 @@ typedef struct {
 
     float noise_floor;
     bool noise_floor_known;
+    uint64_t last_radio_ms; /* the RADIO_STATUS sample already folded into the floor */
 
     float trust;
     uint64_t last_update_ms;

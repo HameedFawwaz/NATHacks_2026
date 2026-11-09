@@ -5,7 +5,11 @@
 
 #define RSSI_UNKNOWN 255
 #define RSSI_MAX 254.0f
-#define NOISE_FLOOR_ALPHA 0.05f /* per RADIO_STATUS sample while the link is healthy */
+/* Per new RADIO_STATUS sample while the link is healthy. At SiK's 1-2 Hz that's
+ * a time constant of about a minute, so a jammer ramping up over tens of
+ * seconds is seen as interference before the floor can follow it. */
+#define NOISE_FLOOR_ALPHA 0.01f
+#define RELEARN_RATE_RATIO 1.3f /* this many more heartbeats than expected means the GCS sped up */
 #define WARMUP_GAPS 5           /* gaps learned before the interval needs a healthy link */
 /* After warm-up, only gaps near the current interval are learned. A dropped
  * heartbeat leaves a gap of at least twice it; clipping both sides equally
@@ -35,15 +39,22 @@ void core_link_config_default(core_link_config_t *cfg) {
     cfg->nominal_window_ms = 30000;
     cfg->recover_per_s = 0.1f;
     cfg->state_hold_ms = 3000;
+    cfg->autopilot_late_ms = 2000;
     cfg->autopilot_stale_ms = 3000;
 }
 
+/* After the autopilot has been silent: what was heard before no longer
+ * describes the link, and the GCS may be a different one, so its rate is
+ * learned again. Trust is kept, so a link that was lost recovers gradually
+ * rather than being declared healthy by the gap. */
 static void reset_history(core_link_monitor_t *mon) {
     mon->first_heard_ms = 0;
     mon->last_heard_ms = 0;
     mon->arrivals_head = 0;
     mon->arrivals_len = 0;
-    mon->trust = 1.0f;
+    mon->gaps_head = 0;
+    mon->gaps_len = 0;
+    mon->interval_ms = mon->cfg.default_interval_ms;
     mon->state = CORE_LINK_UNKNOWN;
     mon->easing_since_ms = 0;
 }
@@ -51,8 +62,8 @@ static void reset_history(core_link_monitor_t *mon) {
 void core_link_monitor_init(core_link_monitor_t *mon, const core_link_config_t *cfg) {
     memset(mon, 0, sizeof(*mon));
     mon->cfg = *cfg;
-    mon->interval_ms = cfg->default_interval_ms;
     mon->blind = true;
+    mon->trust = 1.0f;
     reset_history(mon);
 }
 
@@ -124,10 +135,11 @@ static void record_arrivals(core_link_monitor_t *mon, const core_gcs_heartbeat_t
         fresh = CORE_LINK_ARRIVALS;
     }
 
-    /* Several in one tick share the tick's timestamp. */
+    /* Several in one tick share the tick's timestamp. Learn the average spacing
+     * of what arrived, not the time between batches. */
     uint64_t at = hb->last_update_ms;
     if (mon->last_heard_ms != 0 && at > mon->last_heard_ms) {
-        learn_gap(mon, (uint32_t)(at - mon->last_heard_ms));
+        learn_gap(mon, (uint32_t)((at - mon->last_heard_ms) / fresh));
     }
     for (uint32_t i = 0; i < fresh; i++) {
         mon->arrivals[mon->arrivals_head] = at;
@@ -142,7 +154,9 @@ static void record_arrivals(core_link_monitor_t *mon, const core_gcs_heartbeat_t
     mon->last_heard_ms = at;
 }
 
-static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint64_t window) {
+/* Fills received and expected for the window; returns false while too early. */
+static bool count_window(const core_link_monitor_t *mon, uint64_t now_ms, uint64_t window, int *received,
+                         float *expected) {
     if (window < MIN_LOSS_INTERVALS * (uint64_t)mon->interval_ms) {
         window = MIN_LOSS_INTERVALS * (uint64_t)mon->interval_ms; /* a slow GCS gets a longer window */
     }
@@ -158,19 +172,50 @@ static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint6
     /* Over only a few heartbeats, one landing just outside the window by jitter
      * reads as a large loss, so wait for enough of them. */
     if (span < MIN_LOSS_INTERVALS * (uint64_t)mon->interval_ms) {
-        return 0.0f;
+        return false;
     }
-    int received = 0;
+    *received = 0;
     for (int i = 0; i < mon->arrivals_len; i++) {
         if (now_ms - mon->arrivals[i] < span) {
-            received++;
+            (*received)++;
         }
     }
     /* Rounded down: the window catches a whole number of heartbeats, and the
      * fraction left over is phase, not loss. */
-    float expected = (float)(span / mon->interval_ms);
+    *expected = (float)(span / mon->interval_ms);
+    return true;
+}
+
+static float measure_loss(const core_link_monitor_t *mon, uint64_t now_ms, uint64_t window) {
+    int received;
+    float expected;
+    if (!count_window(mon, now_ms, window, &received, &expected)) {
+        return 0.0f;
+    }
     float loss = 1.0f - (float)received / expected;
     return loss < 0.0f ? 0.0f : (loss > 1.0f ? 1.0f : loss);
+}
+
+/* More heartbeats than expected can't be loss, so a GCS that sped up is
+ * unambiguous and re-learned at once. One that slowed down looks exactly like
+ * loss, so it is treated as loss. */
+static void relearn_if_faster(core_link_monitor_t *mon, uint64_t now_ms) {
+    int received;
+    float expected;
+    if (!count_window(mon, now_ms, mon->cfg.window_ms, &received, &expected)) {
+        return;
+    }
+    if ((float)received < RELEARN_RATE_RATIO * expected) {
+        return;
+    }
+    uint64_t window = now_ms - mon->first_heard_ms;
+    uint64_t limit = MIN_LOSS_INTERVALS * (uint64_t)mon->interval_ms;
+    if (window > mon->cfg.window_ms && mon->cfg.window_ms > limit) window = mon->cfg.window_ms;
+    else if (window > limit) window = limit;
+    uint32_t interval = (uint32_t)(window / (uint64_t)received);
+    mon->interval_ms = interval < 100 ? 100 : interval;
+    mon->gaps_head = 0;
+    mon->gaps_len = 0; /* the old gaps describe the old rate */
 }
 
 typedef struct {
@@ -188,7 +233,15 @@ static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, ui
     if (radio->valid && now_ms - radio->last_update_ms <= mon->cfg.rf_stale_ms) {
         rf.source = CORE_LINK_RF_NOISE;
         rf.rssi = radio->rssi == RSSI_UNKNOWN ? 0.0f : (float)radio->rssi / RSSI_MAX;
-        if (healthy) {
+        /* Judged against the floor before this sample, which is then learned
+         * once, and only from a healthy link that shows no interference. */
+        if (mon->noise_floor_known) {
+            rf.noise_excess = (int)((float)radio->noise - mon->noise_floor);
+            rf.noise_high = rf.noise_excess >= (int)mon->cfg.jam_noise_margin;
+        }
+        bool new_sample = radio->last_update_ms != mon->last_radio_ms;
+        mon->last_radio_ms = radio->last_update_ms;
+        if (healthy && new_sample && !rf.noise_high) {
             if (!mon->noise_floor_known) {
                 mon->noise_floor = (float)radio->noise;
                 mon->noise_floor_known = true;
@@ -196,13 +249,11 @@ static rf_view_t read_rf(core_link_monitor_t *mon, const core_telemetry_t *t, ui
                 mon->noise_floor += NOISE_FLOOR_ALPHA * ((float)radio->noise - mon->noise_floor);
             }
         }
-        if (mon->noise_floor_known) {
-            rf.noise_excess = (int)((float)radio->noise - mon->noise_floor);
-            rf.noise_high = rf.noise_excess >= (int)mon->cfg.jam_noise_margin;
-        }
         return rf;
     }
-    if (rc->valid && rc->rssi != RSSI_UNKNOWN && now_ms - rc->last_update_ms <= mon->cfg.rf_stale_ms) {
+    /* 0 is what ArduPilot sends when RSSI_TYPE=5 but no radio has reported for
+     * 5 s: no radio, rather than a weak signal. */
+    if (rc->valid && rc->rssi != RSSI_UNKNOWN && rc->rssi != 0 && now_ms - rc->last_update_ms <= mon->cfg.rf_stale_ms) {
         rf.source = CORE_LINK_RF_RSSI;
         rf.rssi = (float)rc->rssi / RSSI_MAX;
     }
@@ -242,12 +293,26 @@ core_link_result_t core_link_monitor_update(core_link_monitor_t *mon, const core
         snprintf(r.reason, sizeof(r.reason), "autopilot silent");
         return r;
     }
-    if (mon->blind) {
-        mon->blind = false;
-        mon->seen_count = telemetry->gcs_heartbeat.count; /* only count what arrives from now */
+    /* While blind, seen_count followed the count, so whatever is new now
+     * arrived with the autopilot's return and counts. */
+    mon->blind = false;
+
+    /* When the autopilot goes quiet, the operator's forwarded heartbeats stop
+     * with it. Until it's late enough to call UNKNOWN, hold the last verdict
+     * rather than blame the operator link. */
+    if (now_ms - telemetry->heartbeat.last_update_ms > cfg->autopilot_late_ms && mon->state != CORE_LINK_UNKNOWN) {
+        mon->last_update_ms = now_ms;
+        r.state = mon->state;
+        r.link_trust = mon->trust;
+        r.silence_ms = (uint32_t)(now_ms - mon->last_heard_ms);
+        snprintf(r.reason, sizeof(r.reason), "autopilot late, holding");
+        return r;
     }
 
     record_arrivals(mon, &telemetry->gcs_heartbeat);
+    if (mon->last_heard_ms != 0) {
+        relearn_if_faster(mon, now_ms);
+    }
     if (mon->last_heard_ms == 0) {
         mon->last_update_ms = now_ms;
         r.state = CORE_LINK_UNKNOWN;

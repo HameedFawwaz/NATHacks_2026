@@ -20,6 +20,8 @@ typedef struct {
     uint32_t gcs_interval_ms;
     float drop;            /* probability each operator heartbeat is lost */
     uint32_t jitter_ms;    /* each heartbeat lands up to this early or late, as on a real link */
+    uint32_t batch;        /* deliver heartbeats in groups of this many, as a bursty transport would */
+    uint32_t pending;
     bool gcs_on;           /* the operator is sending */
     bool autopilot_on;
     int rf;                /* 0 none, 1 RC rssi, 2 RADIO_STATUS */
@@ -72,10 +74,14 @@ static void run(harness_t *h, uint32_t ms) {
             }
             bool dropped = (float)rand() / (float)RAND_MAX < h->drop;
             if (h->gcs_on && h->autopilot_on && !dropped) {
+                h->pending++;
+            }
+            if (h->pending > 0 && (h->batch <= 1 || h->pending >= h->batch)) {
                 h->t.gcs_heartbeat.valid = true;
                 h->t.gcs_heartbeat.sysid = 255;
-                h->t.gcs_heartbeat.count++;
+                h->t.gcs_heartbeat.count += h->pending;
                 h->t.gcs_heartbeat.last_update_ms = h->now;
+                h->pending = 0;
             }
         }
         if (h->autopilot_on && h->now % 500 < TICK_MS) {
@@ -315,6 +321,121 @@ static void test_autopilot_silence_is_unknown_not_lost(void) {
     assert(h.last.state == CORE_LINK_NOMINAL && "comes back without a false outage");
 }
 
+/* --- From review of PR #21 --- */
+
+static void test_faster_gcs_is_relearned(void) {
+    /* A GCS that speeds up must not leave loss detection tuned to the old rate. */
+    harness_t h;
+    setup(&h);
+    h.gcs_interval_ms = 5000;
+    run(&h, 60000);
+    h.gcs_interval_ms = 1000;
+    h.next_gcs_ms = h.now + 1000;
+    run(&h, 40000);
+    assert(h.mon.interval_ms < 1300);
+    h.gcs_on = false;
+    run(&h, 9000);
+    assert(h.last.state == CORE_LINK_LOST && "a loss must be caught on the new rate's timescale");
+}
+
+static void test_slower_gcs_mid_flight_reads_as_loss(void) {
+    /* Documented policy: halving the rate looks exactly like 50% loss, so it's
+     * treated as one rather than learned away. */
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.gcs_interval_ms = 2000;
+    run(&h, 30000);
+    assert(h.last.state == CORE_LINK_DEGRADED);
+}
+
+static void test_reconnect_relearns_rate(void) {
+    harness_t h;
+    setup(&h);
+    h.gcs_interval_ms = 100;
+    settle(&h);
+    h.autopilot_on = false;
+    run(&h, 5000);
+    h.autopilot_on = true;
+    h.gcs_interval_ms = 1000; /* a different GCS setup after the reconnect */
+    h.next_gcs_ms = h.now + 500;
+    run(&h, 60000);
+    assert(h.last.state == CORE_LINK_NOMINAL && "the old 100 ms interval must not outlive the reconnect");
+    assert(h.last.link_trust > 0.95f);
+}
+
+static void test_heartbeat_in_first_poll_counts(void) {
+    /* If the only operator heartbeat ever seen arrives in the very first poll
+     * and is thrown away, the link stays UNKNOWN forever and is never reported. */
+    harness_t h;
+    setup(&h);
+    h.t.heartbeat.valid = true;
+    h.t.heartbeat.last_update_ms = h.now;
+    h.t.gcs_heartbeat.valid = true;
+    h.t.gcs_heartbeat.count = 1;
+    h.t.gcs_heartbeat.last_update_ms = h.now;
+    h.gcs_on = false;
+    run(&h, 20000);
+    assert(h.last.state == CORE_LINK_LOST);
+}
+
+static void test_batched_arrivals_dont_hide_loss(void) {
+    harness_t h;
+    setup(&h);
+    h.batch = 3; /* three at a time, every 3 s */
+    run(&h, 30000);
+    assert(h.mon.interval_ms > 800 && h.mon.interval_ms < 1200 && "learn the heartbeat rate, not the batch rate");
+    h.batch = 1;
+    h.drop = 0.67f;
+    reset_stats(&h);
+    run(&h, 60000);
+    assert(h.min_trust < 0.4f && "losing two thirds of them must be caught");
+}
+
+static void test_autopilot_outage_keeps_distrust(void) {
+    harness_t h;
+    setup(&h);
+    settle(&h);
+    h.gcs_on = false;
+    run(&h, 10000);
+    assert(h.last.state == CORE_LINK_LOST);
+
+    h.autopilot_on = false;
+    run(&h, 5000);
+    h.autopilot_on = true;
+    h.gcs_on = true;
+    run(&h, 2000);
+    assert(h.last.link_trust < 0.4f && "an observation gap is not evidence the link recovered");
+    assert(h.last.state != CORE_LINK_NOMINAL);
+}
+
+static void test_gradual_noise_rise_is_interference(void) {
+    harness_t h;
+    setup(&h);
+    h.rf = 2;
+    settle(&h);
+    for (int i = 0; i < 20; i++) { /* 5 units a second, 40 -> 140 */
+        h.noise += 5;
+        run(&h, 1000);
+    }
+    assert(h.last.interference && "the floor must not follow a rising jammer up");
+    h.gcs_on = false;
+    run(&h, 8000);
+    assert(h.last.state == CORE_LINK_JAMMED);
+}
+
+static void test_zero_rssi_is_no_radio_data(void) {
+    /* ArduPilot reports 0 when RSSI_TYPE=5 is set but no radio has reported for
+     * 5 s: that's an absent radio, not a weak signal. */
+    harness_t h;
+    setup(&h);
+    h.rf = 1;
+    h.rssi = 0;
+    run(&h, 30000);
+    assert(h.last.state == CORE_LINK_NOMINAL);
+    assert(h.last.rf_source == CORE_LINK_RF_NONE);
+}
+
 int main(void) {
     test_unknown_until_operator_heard();
     test_steady_link_stays_nominal();
@@ -330,6 +451,14 @@ int main(void) {
     test_slow_gcs_is_learned();
     test_fast_gcs_doesnt_overflow();
     test_autopilot_silence_is_unknown_not_lost();
+    test_faster_gcs_is_relearned();
+    test_slower_gcs_mid_flight_reads_as_loss();
+    test_reconnect_relearns_rate();
+    test_heartbeat_in_first_poll_counts();
+    test_batched_arrivals_dont_hide_loss();
+    test_autopilot_outage_keeps_distrust();
+    test_gradual_noise_rise_is_interference();
+    test_zero_rssi_is_no_radio_data();
     printf("test_link_monitor: all passed\n");
     return 0;
 }

@@ -145,6 +145,18 @@ Limits:
 - **Jamming versus loss is a heuristic.** With RSSI only, the assumption is that a jammed
   radio still reports strong RF energy. That holds in the SITL scenario because the
   scenario is built on it; check it against the real radio.
+- **A GCS that slows its heartbeat mid-flight reads as loss.** Halving the rate looks
+  exactly like losing half the heartbeats, so it's treated as loss rather than learned
+  away. The rate is learned at startup and after an autopilot reconnect, and a GCS that
+  speeds up is re-learned at once, since extra heartbeats can't be loss.
+- **A very slow rise in noise can be absorbed.** The noise floor follows a healthy link
+  with a time constant of about a minute, so a jammer that ramps up over tens of seconds
+  is caught, but one that creeps up over many minutes may not be.
+- **`RC_CHANNELS.rssi` of 0 is read as "no radio"**, which is what ArduPilot sends with
+  `RSSI_TYPE=5` and no radio reporting. Other `RSSI_TYPE`s report the RC receiver's RSSI
+  instead, which the monitor can't tell apart; use 5.
+- **Forwarding needs an ordinary link.** ArduPilot only forwards heartbeats to active links
+  that aren't marked private (`MAV_OPTIONS`/`SERIALn_OPTIONS`).
 - **No operator ever heard means no verdict.** A drone that takes off without its ground
   station connected isn't monitored, the same as autonomy's rule for producers that have
   never reported.
