@@ -25,6 +25,17 @@ which one you're looking at.
 
 ## Live mode
 
+### Core on an ESP32
+
+When core runs on a flashed ESP32 instead of as `core_main`
+(`./scripts/sitl --esp32 /dev/cu.usbserial-0001`, see
+[`core/README.md`](../core/README.md#running-core-on-an-esp32)), the dashboard
+needs no change: the board is wired to SITL's companion port, and its trust
+scores, link verdicts, autonomy state and recovery acknowledgements reach the
+bridge through the autopilot exactly as `core_main`'s do. The vehicle is still
+SITL; only core runs on the board. The board announces itself with a
+`core running on ESP32 (companion)` message.
+
 ### Automatic recovery controls
 
 The Fly tab shows **Automatic recovery enabled/disabled**, confirmed by core's

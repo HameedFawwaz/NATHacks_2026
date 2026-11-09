@@ -2,13 +2,15 @@
 #define CORE_MAVLINK_CONNECTION_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "core/mavlink/mavlink_telemetry.h"
 
 typedef enum {
-    CORE_MAVLINK_TRANSPORT_UDP = 0,
-    CORE_MAVLINK_TRANSPORT_SERIAL = 1
+    CORE_MAVLINK_TRANSPORT_UDP = 0,    /* POSIX sockets; host builds only */
+    CORE_MAVLINK_TRANSPORT_SERIAL = 1, /* POSIX tty (termios); host builds only */
+    CORE_MAVLINK_TRANSPORT_STREAM = 2  /* caller-supplied byte stream, e.g. an ESP32 UART driver */
 } core_mavlink_transport_type_t;
 
 typedef struct {
@@ -19,15 +21,31 @@ typedef struct {
 } core_mavlink_udp_config_t;
 
 typedef struct {
-    char device[64];       /* e.g. "/dev/ttyUSB0" - not yet implemented */
-    uint32_t baud_rate;
+    char device[64];       /* e.g. "/dev/ttyUSB0" or "/dev/cu.usbserial-0001" */
+    uint32_t baud_rate;    /* one of the standard rates 9600..230400 (460800/921600 on Linux) */
 } core_mavlink_serial_config_t;
+
+/*
+ * A byte stream supplied by the caller: a microcontroller UART, or an
+ * in-memory pipe. There is exactly one peer, so nothing needs learning.
+ */
+typedef struct {
+    /* Non-blocking. Returns the number of bytes copied into buf (0 = none
+     * available right now), or -1 if the link has failed. Reads may end
+     * anywhere, including mid-frame; the connection reassembles frames. */
+    int (*read)(void *ctx, uint8_t *buf, size_t len);
+    /* Called once per outbound frame with the whole frame. Returns true only if
+     * all len bytes were accepted. Must not block for long. */
+    bool (*write)(void *ctx, const uint8_t *buf, size_t len);
+    void *ctx;
+} core_mavlink_stream_config_t;
 
 typedef struct {
     core_mavlink_transport_type_t type;
     union {
         core_mavlink_udp_config_t udp;
         core_mavlink_serial_config_t serial;
+        core_mavlink_stream_config_t stream;
     } transport;
 
     uint8_t system_id;             /* our MAVLink system id */

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Run real ArduCopter SITL, core_main and the dashboard's live MAVLink bridge."""
+"""Run real ArduCopter SITL, core_main and the dashboard's live MAVLink bridge.
+
+With --esp32 DEVICE, core runs on an ESP32 plugged in over USB instead of as
+core_main on this computer: SITL's SERIAL1 (the companion-computer telemetry
+port) is opened on the board's serial device, so the board reads the simulated
+vehicle's telemetry, detects spoofing and lost links, and commands the
+recovery itself. Flash it first (core/README.md, "Running core on an ESP32").
+"""
 import argparse
 import json
 import os
@@ -59,9 +66,13 @@ def run(args):
     if not copter.is_file():
         raise RuntimeError(f"No built ArduCopter SITL at {copter}. Set ARDUPILOT_DIR or pass --ardupilot.")
     check_ports()
+    if args.esp32 and not os.path.exists(args.esp32):
+        raise RuntimeError(f"No serial device at {args.esp32}. Is the ESP32 plugged in? (ls /dev/cu.*)")
     if not args.no_build:
-        subprocess.run(["cmake", "-S", str(ROOT / "core"), "-B", str(ROOT / "core/build")], check=True)
-        subprocess.run(["cmake", "--build", str(ROOT / "core/build"), "--target", "core_main", "--parallel", "4"], check=True)
+        if not args.esp32:
+            subprocess.run(["cmake", "-S", str(ROOT / "core"), "-B", str(ROOT / "core/build")], check=True)
+            subprocess.run(["cmake", "--build", str(ROOT / "core/build"), "--target", "core_main", "--parallel", "4"],
+                           check=True)
         subprocess.run(["make", "build"], cwd=ROOT / "dashboard", check=True)
         subprocess.run(["go", "build", "-o", str(ROOT / "core/build/dashboard-serve"), "./cmd/serve"],
                        cwd=ROOT / "dashboard", check=True)
@@ -93,7 +104,14 @@ def run(args):
     try:
         launch("dashboard", [str(ROOT / "core/build/dashboard-serve"), "-dir", str(ROOT / "dashboard/web"),
                              "-mavlink", "127.0.0.1:14552", "-sitl-truth"])
-        launch("core", [str(ROOT / "core/build/core_main"), "14551", "--allow-recovery-control", "--gps-free-backup"])
+        if args.esp32:
+            # The board is core: same flags as below, set in its Kconfig.
+            serial1 = f"--serial1=uart:{args.esp32}:{args.esp32_baud}"
+            log(f"core: ESP32 on {args.esp32} at {args.esp32_baud} baud (SITL SERIAL1)")
+        else:
+            launch("core", [str(ROOT / "core/build/core_main"), "14551", "--allow-recovery-control",
+                            "--gps-free-backup"])
+            serial1 = "--serial1=udpclient:127.0.0.1:14551"
         launch("arducopter", [str(copter), "--model", "+", "--home", "-35.363262,149.165237,584,353",
                               # autonomy_failover.parm: core_main runs autonomy, whose
                               # GNSS failover needs the non-GPS EKF source set.
@@ -101,7 +119,7 @@ def run(args):
                                             f"{ROOT / 'core/sitl/autonomy_failover.parm'},"
                                             f"{ROOT / 'core/sitl/dashboard.parm'}",
                               "--serial0=tcp:5760",
-                              "--serial1=udpclient:127.0.0.1:14551",
+                              serial1,
                               "--serial2=udpclient:127.0.0.1:14552",
                               "--serial4=udpclient:127.0.0.1:14553"])
         log(f"Logs: {work}")
@@ -140,7 +158,8 @@ def run(args):
                 except (OSError, ValueError):
                     pass
                 if ready:
-                    log("Ready: http://127.0.0.1:8080 (LIVE ArduPilot SITL; disarmed)")
+                    where = f"core on the ESP32 at {args.esp32}" if args.esp32 else "core_main on this computer"
+                    log(f"Ready: http://127.0.0.1:8080 (LIVE ArduPilot SITL; disarmed; {where})")
                     log("Upload a plan in the dashboard, then run: ./scripts/sitl start")
                     log("Or fly the test square: ./scripts/sitl square")
                     log("Land: ./scripts/sitl land | Status: ./scripts/sitl status | Stop: Ctrl+C")
@@ -223,6 +242,11 @@ def main():
     parser.add_argument("action", nargs="?", default="run", choices=("run", "square", "start", "land", "status"))
     parser.add_argument("--ardupilot", type=Path, default=Path(os.environ.get("ARDUPILOT_DIR", str(DEFAULT_AP))))
     parser.add_argument("--no-build", action="store_true", help="reuse previously built core and dashboard binaries")
+    parser.add_argument("--esp32", metavar="DEVICE",
+                        help="run core on a flashed ESP32 at this serial device (e.g. /dev/cu.usbserial-0001) "
+                             "instead of starting core_main")
+    parser.add_argument("--esp32-baud", type=int, default=921600,
+                        help="the ESP32 firmware's CONFIG_CORE_UART_BAUD (default 921600)")
     args = parser.parse_args()
     try:
         if args.action == "run":

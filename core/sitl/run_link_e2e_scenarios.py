@@ -29,6 +29,13 @@ Scenarios, each on a fresh SITL, flown out 60 m from home at 20 m:
                8 s while the operator's is fine: no hold, no return, no BRAKE
                once it's back (core_main sits behind a pausable relay here)
 
+With --esp32 DEVICE, core is the flashed ESP32 on that serial device instead
+of core_main (SITL's SERIAL1 is opened on the board, which is reset before each
+scenario). The board writes no autonomy_transitions.csv, so transitions are
+rebuilt from its "AUTONOMY <behavior>: <reason>" STATUSTEXTs, with the trust
+scores it published next (within 200 ms of the decision). companion_outage needs a pausable UDP
+relay on SERIAL1 and isn't available with --esp32.
+
 Assumes nothing else uses the chosen instance and ports; it refuses to start if
 they're taken. Needs pymavlink and a built dashboard bridge (or --no-dashboard).
 """
@@ -51,7 +58,7 @@ from pymavlink import mavutil  # noqa: E402
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from link_jam_proxy import LinkJamProxy  # noqa: E402
-from run_gnss_e2e_scenarios import dashboard_snapshot, distance_m, from_local  # noqa: E402
+from run_gnss_e2e_scenarios import dashboard_snapshot, distance_m, from_local, reset_esp32  # noqa: E402
 from run_link_scenario import Operator  # noqa: E402
 
 GUIDED, RTL, LAND, BRAKE = 4, 6, 9, 17
@@ -135,6 +142,8 @@ class Flight:
         self.events = []  # (seconds since start, kind, detail)
         self.texts = []  # (seconds, text)
         self.dash = {"link_values": [], "behaviors": set(), "link_at_ms": 0}
+        self.esp32 = args.esp32
+        self.text_transitions = []  # --esp32: rebuilt from AUTONOMY STATUSTEXTs
         try:
             self._start(args)
         except BaseException:
@@ -150,8 +159,10 @@ class Flight:
 
     def _start(self, args):
         tcp = 5760 + 10 * args.instance
-        ports = [(tcp, socket.SOCK_STREAM), (args.core_port, socket.SOCK_DGRAM),
-                 (args.proxy_fc_port, socket.SOCK_DGRAM), (args.proxy_gcs_port, socket.SOCK_DGRAM)]
+        ports = [(tcp, socket.SOCK_STREAM), (args.proxy_fc_port, socket.SOCK_DGRAM),
+                 (args.proxy_gcs_port, socket.SOCK_DGRAM)]
+        if not args.esp32:
+            ports.append((args.core_port, socket.SOCK_DGRAM))
         if args.relay:
             ports.append((args.relay_port, socket.SOCK_DGRAM))
         if not args.no_dashboard:
@@ -165,17 +176,21 @@ class Flight:
             self._launch("dashboard", [str(args.dashboard_serve), "-addr", f"127.0.0.1:{args.dashboard_http_port}",
                                        "-mavlink", f"127.0.0.1:{args.dashboard_port}"])
             self.dashboard_url = f"http://127.0.0.1:{args.dashboard_http_port}"
-        # core_main runs in workdir, so its autonomy_transitions.csv lands there.
-        self._launch("core_main", [str(args.core_main), str(args.core_port)])
+        if args.esp32:
+            reset_esp32(args.esp32)
+            serial1 = f"--serial1=uart:{args.esp32}:{args.esp32_baud}"
+        else:
+            # core_main runs in workdir, so its autonomy_transitions.csv lands there.
+            self._launch("core_main", [str(args.core_main), str(args.core_port)])
+            serial1_port = args.core_port
+            if args.relay:
+                self.relay = CompanionRelay(args.relay_port, args.core_port)
+                serial1_port = args.relay_port
+            serial1 = f"--serial1=udpclient:127.0.0.1:{serial1_port}"
         self.proxy = LinkJamProxy(args.proxy_fc_port, args.proxy_gcs_port, seed=args.seed).start()
-        serial1_port = args.core_port
-        if args.relay:
-            self.relay = CompanionRelay(args.relay_port, args.core_port)
-            serial1_port = args.relay_port
         time.sleep(1)
 
-        serials = [f"--serial1=udpclient:127.0.0.1:{serial1_port}",
-                   f"--serial2=udpclient:127.0.0.1:{args.proxy_fc_port}"]
+        serials = [serial1, f"--serial2=udpclient:127.0.0.1:{args.proxy_fc_port}"]
         if not args.no_dashboard:
             serials.append(f"--serial4=udpclient:127.0.0.1:{args.dashboard_port}")
         defaults = ",".join(str(p) for p in (
@@ -230,7 +245,14 @@ class Flight:
             if msg.text.startswith(("LINK ", "AUTONOMY ")) or "ailsafe" in msg.text:
                 self.event("text", msg.text)
             if msg.text.startswith("AUTONOMY "):
-                self.status["behavior"] = msg.text[len("AUTONOMY "):].split(":", 1)[0]
+                behavior, _, reason = msg.text[len("AUTONOMY "):].partition(":")
+                # Trust is filled from the board's next publication (<= 200 ms
+                # later): the last one before this text can predate the tick
+                # autonomy acted on.
+                self.text_transitions.append({
+                    "from": self.status["behavior"], "to": behavior, "reason": reason.strip(),
+                    "nav_trust": None, "link_trust": None, "source": "statustext"})
+                self.status["behavior"] = behavior
             return
         if msg.get_srcSystem() != self.mav.target_system:
             return
@@ -253,6 +275,7 @@ class Flight:
         elif kind == "NAMED_VALUE_FLOAT":
             if msg.name == "TRUST_LNK":
                 self.status["link_trust"], self.status["link_at"] = msg.value, time.monotonic()
+                self._fill_transition_trust("link_trust", msg.value)
             elif msg.name == "LNK_STATE":
                 state = LINK_STATES.get(int(round(msg.value)), "UNKNOWN")
                 if state != self.status["link_state"]:
@@ -260,6 +283,12 @@ class Flight:
                 self.status["link_state"] = state
             elif msg.name == "TRUST_NAV":
                 self.status["nav_trust"], self.status["nav_at"] = msg.value, time.monotonic()
+                self._fill_transition_trust("nav_trust", msg.value)
+
+    def _fill_transition_trust(self, key, value):
+        for row in self.text_transitions:
+            if row[key] is None:
+                row[key] = value
 
     def sample_dashboard(self):
         if self.dashboard_url is None:
@@ -323,7 +352,10 @@ class Flight:
         return distance_m(self.status["home"], self.status["pos"])
 
     def transitions(self):
-        """autonomy_transitions.csv, as core_main wrote it."""
+        """autonomy_transitions.csv, as core_main wrote it, or with --esp32 the
+        board's AUTONOMY STATUSTEXTs (trust scores from its next publication)."""
+        if self.esp32:
+            return list(self.text_transitions)
         path = self.workdir / "autonomy_transitions.csv"
         if not path.is_file():
             return []
@@ -540,6 +572,9 @@ def main():
                         help="companion_outage only: SERIAL1 goes to this relay, which forwards to --core-port")
     parser.add_argument("--seed", type=int, default=2, help="the proxy's packet-drop RNG seed")
     parser.add_argument("--log-dir", type=Path, help="keep logs here instead of a temp directory")
+    parser.add_argument("--esp32", metavar="DEVICE",
+                        help="core is a flashed ESP32 on this serial device (e.g. /dev/cu.usbserial-0001), not core_main")
+    parser.add_argument("--esp32-baud", type=int, default=921600, help="the firmware's CONFIG_CORE_UART_BAUD")
     parser.add_argument("scenarios", nargs="*", choices=[*SCENARIOS, "all"], default=["all"])
     args = parser.parse_args()
     args.ardupilot = args.ardupilot.resolve()
@@ -551,6 +586,11 @@ def main():
     workdir.mkdir(parents=True, exist_ok=True)
     print(f"logs in {workdir}")
     names = list(SCENARIOS) if "all" in args.scenarios else args.scenarios
+    if args.esp32:
+        if "all" in args.scenarios:
+            names = [n for n in names if n not in RELAY_SCENARIOS]
+        elif RELAY_SCENARIOS & set(names):
+            parser.error(f"{', '.join(sorted(RELAY_SCENARIOS))} needs a UDP relay on SERIAL1; not available with --esp32")
     results, ok = [], True
     for name in names:
         print(f"\n[{name}]", flush=True)

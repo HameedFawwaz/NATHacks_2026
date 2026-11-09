@@ -15,6 +15,10 @@ telemetry happens to be numerically "spoofed".
 Assumes no other SITL is running on the chosen --instance (default 0, which
 binds the default ports 5760/5501/5502). Use e.g. --instance 1 --core-port
 14565 to run it beside run.sh.
+
+With --esp32 DEVICE, core is the flashed ESP32 on that serial device instead
+of core_main: SITL's SERIAL1 is opened on the board, which is reset before
+each scenario so every flight starts from a fresh detector and autonomy.
 """
 import argparse
 import json
@@ -179,7 +183,9 @@ class RandomRouteSpoof:
 
 class Sitl:
     def __init__(self, ardupilot, core_main, workdir, core_port, instance=0,
-                 dashboard_serve=None, dashboard_port=14556, dashboard_http_port=8081, dashboard_url=None):
+                 dashboard_serve=None, dashboard_port=14556, dashboard_http_port=8081, dashboard_url=None,
+                 esp32=None, esp32_baud=921600):
+        self.esp32, self.esp32_baud = esp32, esp32_baud
         self.proc = self.core_proc = self.dashboard_proc = self.mav = None
         self.logs = []
         self.dashboard_url = dashboard_url or f"http://127.0.0.1:{dashboard_http_port}"
@@ -198,7 +204,9 @@ class Sitl:
     def _start(self, ardupilot, core_main, workdir, core_port, instance,
                dashboard_serve, dashboard_port, dashboard_http_port, dashboard_url):
         # Refuse collisions instead of accidentally driving another running SITL.
-        ports = [(5760 + 10 * instance, socket.SOCK_STREAM), (core_port, socket.SOCK_DGRAM)]
+        ports = [(5760 + 10 * instance, socket.SOCK_STREAM)]
+        if not self.esp32:
+            ports.append((core_port, socket.SOCK_DGRAM))
         if not dashboard_url:
             ports += [(dashboard_port, socket.SOCK_DGRAM), (dashboard_http_port, socket.SOCK_STREAM)]
         if len(set(ports)) != len(ports):
@@ -217,9 +225,15 @@ class Sitl:
                 [str(dashboard_serve), "-addr", f"127.0.0.1:{dashboard_http_port}",
                  "-mavlink", f"127.0.0.1:{dashboard_port}"], workdir, "dashboard")
         self.core_port = core_port
-        self.core_proc = self._launch([str(core_main), str(core_port)], workdir, "core_main")
-        self.core_log = workdir / "core_main.log"
-        time.sleep(1)  # let core_main bind before SITL's serial1 tries to reach it
+        if self.esp32:
+            reset_esp32(self.esp32)
+            self.core_log = None  # the board's UART carries only MAVLink
+            serial1 = f"--serial1=uart:{self.esp32}:{self.esp32_baud}"
+        else:
+            self.core_proc = self._launch([str(core_main), str(core_port)], workdir, "core_main")
+            self.core_log = workdir / "core_main.log"
+            time.sleep(1)  # let core_main bind before SITL's serial1 tries to reach it
+            serial1 = f"--serial1=udpclient:127.0.0.1:{core_port}"
 
         self.proc = self._launch(
             [
@@ -230,7 +244,7 @@ class Sitl:
                 "--defaults",
                 f"{ardupilot / 'Tools/autotest/default_params/copter.parm'},"
                 f"{Path(__file__).parent / 'autonomy_failover.parm'}",
-                f"--serial1=udpclient:127.0.0.1:{core_port}",
+                serial1,
                 f"--serial2=udpclient:127.0.0.1:{dashboard_port}",
             ],
             workdir, "arducopter",
@@ -604,9 +618,27 @@ def summarize_dashboard_estimate(samples):
     return out
 
 
+def reset_esp32(device):
+    """Restarts the board through its USB-UART bridge's auto-reset wiring
+    (RTS -> EN, DTR -> IO0 held high so it boots the app, not the ROM
+    downloader), then waits for core to come up."""
+    import serial  # pyserial, a pymavlink dependency
+    with serial.Serial() as port:
+        port.port, port.baudrate = device, 115200
+        port.dtr = False
+        port.rts = False
+        port.open()
+        port.rts = True
+        time.sleep(0.1)
+        port.rts = False
+    time.sleep(1.5)
+
+
 def estimate_readiness_from_log(path):
     """core_main's own per-second [nav_est] lines up to the first published
     estimate: what it was waiting for, and that nothing came out before."""
+    if path is None:
+        return {"error": "core runs on the ESP32; no core log"}
     statuses = []
     try:
         for line in Path(path).read_text(errors="replace").splitlines():
@@ -653,7 +685,7 @@ def run_imu_gap(sitl, duration):
     try:
         lines = [line.split()[1] for line in sitl.core_log.read_text(errors="replace").splitlines()
                  if line.startswith("[nav_est] ")]
-    except OSError:
+    except (OSError, AttributeError):  # AttributeError: no core log on the ESP32
         pass
     # Pairs core sent in the freeze's first 0.5 s (before its IMU freshness
     # limit) sat in SITL's socket and arrive in a burst on resume, so judge the
@@ -716,6 +748,9 @@ def main():
     parser.add_argument("--seed", type=int, default=1, help="RNG seed for the random-route scenario, for repeatability")
     parser.add_argument("--log-dir", type=Path, help="keep logs here instead of a temp directory")
     parser.add_argument("--dashboard-url", help="use an existing live bridge instead of starting one; it must listen on --dashboard-port")
+    parser.add_argument("--esp32", metavar="DEVICE",
+                        help="core is a flashed ESP32 on this serial device (e.g. /dev/cu.usbserial-0001), not core_main")
+    parser.add_argument("--esp32-baud", type=int, default=921600, help="the firmware's CONFIG_CORE_UART_BAUD")
     parser.add_argument("scenarios", nargs="*", choices=[*SCENARIOS, "all"], default=["all"])
     args = parser.parse_args()
     if args.duration <= 0 or args.instance < 0:
@@ -739,7 +774,8 @@ def main():
             scenario_dir = workdir / name
             scenario_dir.mkdir(parents=True, exist_ok=True)
             sitl = Sitl(args.ardupilot.resolve(), args.core_main.resolve(), scenario_dir, args.core_port, args.instance,
-                        args.dashboard_serve.resolve(), args.dashboard_port, args.dashboard_http_port, args.dashboard_url)
+                        args.dashboard_serve.resolve(), args.dashboard_port, args.dashboard_http_port, args.dashboard_url,
+                        args.esp32, args.esp32_baud)
             try:
                 print(f"\n[{name}] taking off")
                 sitl.take_off()

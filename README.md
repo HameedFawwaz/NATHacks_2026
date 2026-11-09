@@ -57,6 +57,11 @@ The launcher reuses `../ardupilot-sitl/ardupilot` (already built locally) and
 `pymavlink`. Also requires CMake, a C compiler, Make and Go 1.24+.
 Use `./scripts/sitl --no-build` after the first build for faster startup.
 
+To run core on a flashed ESP32 plugged in over USB instead of as `core_main` on
+this computer, pass its serial device: `./scripts/sitl --esp32
+/dev/cu.usbserial-0001`. See
+[`core/README.md`](core/README.md#running-core-on-an-esp32) to build and flash it.
+
 Ports: dashboard HTTP `8080`, core UDP `14551`, live bridge UDP `14552`, flight
 scripts UDP `14553`, primary operator TCP `5760`. These are local simulation
 connections; do not point the flight commands at hardware.

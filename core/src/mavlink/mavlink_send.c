@@ -2,17 +2,16 @@
 #include "mavlink_internal.h"
 
 #include <string.h>
-#include <sys/socket.h>
 
 #include "core/common/log.h"
 #include "core/common/time.h"
 
 bool core_mavlink_internal_send_raw(core_mavlink_conn_t *conn, const mavlink_message_t *msg) {
-    if (!conn || conn->sock_fd < 0) {
+    if (!conn || conn->state == CORE_MAVLINK_CONN_DISCONNECTED) {
         CORE_LOG_WARN("mavlink send failed: connection not open");
         return false;
     }
-    if (!conn->peer_known) {
+    if (!conn->ops->can_send(conn)) {
         CORE_LOG_WARN("mavlink send failed: no known peer yet");
         return false;
     }
@@ -39,13 +38,7 @@ bool core_mavlink_internal_send_raw(core_mavlink_conn_t *conn, const mavlink_mes
     uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
     uint16_t len = mavlink_msg_to_send_buffer(buffer, msg);
 
-    ssize_t sent = sendto(conn->sock_fd, buffer, len, 0,
-                           (struct sockaddr *)&conn->peer_addr, sizeof(conn->peer_addr));
-    if (sent < 0 || (uint16_t)sent != len) {
-        CORE_LOG_WARN("mavlink sendto failed");
-        return false;
-    }
-    return true;
+    return conn->ops->write(conn, buffer, len);
 }
 
 bool core_mavlink_send_heartbeat(core_mavlink_conn_t *conn) {
