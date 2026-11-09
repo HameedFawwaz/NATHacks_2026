@@ -187,3 +187,41 @@ Optional presentation tests (Node.js, no dependencies):
 ```
 node --test web/mission.test.cjs
 ```
+
+## Browser smoke check
+
+`web/dashboard-smoke.cjs` runs rendered-UI checks in installed Chrome/Chromium using
+Node's built-in WebSocket and Chrome DevTools Protocol. It requires Node.js 22 or
+newer and an installed Chrome-family browser (set `CHROME_BIN` if it isn't at the
+usual path). It does not download a browser or install npm packages. Every run
+creates and removes a fresh temporary browser profile; it never attaches to a
+normal browser profile. Basemap hosts are blocked so the offline-grid fallback is
+deterministic.
+
+From this directory, build the dashboard first, then run the fixture checks:
+
+```sh
+make build
+node web/dashboard-smoke.cjs --mode fixture --out /path/to/dashboard-smoke-shots
+```
+
+The script serves the existing dashboard assets alongside a test-only local
+HTTP/SSE fixture (no production test hooks). It verifies and saves screenshots of
+healthy, caution, critical, no-data, and exactly 17 m reported-vs-core-estimate
+states with basemap tiles unavailable. All fixture values and screenshots are
+synthetic; they are not SITL or flight evidence. The command exits nonzero if a
+state or offline-map assertion fails.
+
+For a later read-only screenshot of a locally served integrated dashboard:
+
+```sh
+node web/dashboard-smoke.cjs --mode live --url http://127.0.0.1:8080 --out /path/to/live-smoke-shots
+```
+
+Live mode only accepts an `http://localhost` URL, loads the existing page and
+telemetry, and does not click controls. A browser request guard allows only GET
+and HEAD requests; any attempted mutating request is aborted and reported. It
+captures `live-readonly.png`; it does not assert a particular flight state or
+simulate a fault. Start the dashboard/SITL separately if appropriate, and review
+the screenshot as live evidence only when its source badge and telemetry confirm
+that status.
