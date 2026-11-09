@@ -341,18 +341,25 @@ Seconds after injection; each line is one run.
 
 | Scenario | Link verdict | `LINK_HOLD` | `BRAKE` confirmed | `LINK_RETURN` | `RTL` confirmed | Landed, from home |
 |---|---|---|---|---|---|---|
-| `jam` | `JAMMED` 7.0 / 8.4 | 7.2 / 8.6 | 7.5 / 8.8 | 37.0 / 38.3 | 37.2 / 38.5 | 86.8 / 88.6 s, 0.0 m |
-| `lost` | `LOST` 6.1 | 6.3 | 6.6 | 35.8 | 36.0 | 85.6 s, 0.0 m |
+| `jam` | `JAMMED` 10.5 | 10.7 | 10.9 | 40.5 | 40.7 | 91.1 s, 0.0 m |
+| `lost` | `LOST` 5.2 | 5.4 | 5.6 | 35.1 | 35.3 | 85.1 s, 0.0 m |
 
-- In `BRAKE` the vehicle held at 0.02 m/s and moved under 0.1 m before the return; every
-  hold lasted 29.5 to 29.8 s, then `RTL` brought it back 60 m and landed it at home.
+- In `BRAKE` the vehicle held position before the return; both holds lasted about 30 s,
+  then `RTL` brought it back 60 m and landed it at home.
 - `dropouts`: `NOMINAL -> DEGRADED -> NOMINAL`, minimum `TRUST_LNK` 0.45, no autonomy
   transition, still `GUIDED`.
-- `recover`: hold at 11.5 s, link restored at 11.7 s, autonomy `NOMINAL` 13.0 s later
+- `recover`: hold at 10.7 s, link restored at 10.9 s, autonomy `NOMINAL` 13.0 s later
   (trust climbs at 0.1/s to 0.7, then autonomy's 5 s recovery hold); no return, mode left
-  in `BRAKE`.
-- `companion_outage`: see the final run's `results.json` for the outcome; an earlier run
-  before the reconnect and settling fixes incorrectly entered `GNSS_FAILOVER` on return.
+  in `BRAKE`. This run briefly reported `LOST: interference unconfirmed` before `JAMMED`:
+  the interference confirmation and silence thresholds can coincide. Both verdicts
+  correctly triggered the same safe hold.
+- `companion_outage`: after an 8 s cut, no autonomy transition, still `GUIDED`. Before
+  the reconnect and settling fixes, the same test incorrectly entered `GNSS_FAILOVER`.
+- Ground-link scenario passed; the 30% random-loss phase briefly reached `LOST` after
+  consecutive dropped heartbeats, then recovered. A 90 s fast GNSS ramp triggered
+  `GNSS_FAILOVER` with EKF source set 2 active; a 90 s unspoofed control had no false
+  alarm. Those GNSS runs had no operator heartbeat, so the link was `UNKNOWN` and they
+  do not demonstrate concurrent active-link monitoring during GNSS spoofing.
 
 ## Testing against ArduPilot SITL
 
