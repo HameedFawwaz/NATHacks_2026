@@ -337,8 +337,16 @@ The autopilot must be given the same key so it accepts our signed commands
 message; MAVProxy's `signing setup <passphrase>` command does this, deriving
 the 32-byte key as the SHA-256 of the ASCII passphrase. Use the passphrase route
 above, and provision over a trusted local link, not an exposed unsigned link.
-**Not yet verified against our SITL setup**: confirm the handshake and signature
-verification before flight; do not silently fall back to an unsigned autopilot link.
+Verified against local ArduCopter SITL during the 2026-11-09 issue #4 audit:
+on a protected SERIAL1 MAVLink 2 channel, unsigned and wrong-key mode commands
+received no ACK and did not change the disarmed vehicle's mode; the correctly
+signed command was accepted and its mode change confirmed. Provisioning used
+`SETUP_SIGNING`, the same mechanism as MAVProxy's command. This is simulation
+evidence, not a physical-hardware security test. ArduPilot deliberately permits
+unsigned traffic on its trusted primary/USB channel and certain radio-status
+messages, so do not expose that trusted channel as an authenticated network link.
+Validate your hardware's channel configuration before flight, and never silently
+fall back to an unsigned autopilot link. Signing still does not provide encryption.
 
 ## Dashboard
 
